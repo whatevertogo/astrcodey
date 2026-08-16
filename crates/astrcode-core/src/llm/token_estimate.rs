@@ -159,8 +159,6 @@ mod tests {
             parameters: json!({"type": "object"}),
             strict: false,
             origin: crate::tool::ToolOrigin::Bundled,
-            execution_mode: crate::tool::ExecutionMode::Sequential,
-            timeout_ms: None,
         }];
         assert!(estimate_tool_definition_tokens(&tools) > 0);
         assert!(estimate_provider_request_tokens(std::slice::from_ref(&message), &tools) > 26);

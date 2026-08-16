@@ -426,7 +426,7 @@ fn indent_body(body: &str) -> String {
 mod tests {
     use std::path::Path;
 
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin, ToolPromptMetadata, ToolPromptTag};
+    use astrcode_core::tool::{ToolOrigin, ToolPromptMetadata, ToolPromptTag};
 
     use super::*;
 
@@ -437,8 +437,6 @@ mod tests {
             parameters: Default::default(),
             strict: false,
             origin,
-            execution_mode: ExecutionMode::Sequential,
-            timeout_ms: None,
         }
     }
 

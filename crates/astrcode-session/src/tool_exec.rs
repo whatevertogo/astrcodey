@@ -366,7 +366,7 @@ mod tests {
     use astrcode_core::{
         llm::LlmProviderBindings,
         permission::ApprovalMode,
-        tool::{ExecutionMode, SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
+        tool::{SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
         types::SessionId,
     };
 
@@ -396,8 +396,6 @@ mod tests {
                 parameters: serde_json::json!({ "type": "object" }),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             }
         }
 

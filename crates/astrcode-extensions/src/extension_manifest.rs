@@ -3,14 +3,14 @@
 use std::collections::BTreeSet;
 
 use astrcode_extension_sdk::{
-    builder::manifest as extension_manifest,
+    builder::{ExtensionToolDefinition, manifest as extension_manifest},
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRoute, HookMode, LifecycleEvent, SlashCommand,
         internal::{fixed_hook_mode, hook_mode_is_supported},
     },
     s5r::HandlerId,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionPolicy, ToolOrigin},
     wire::{
         FeatureName,
         manifest::{
@@ -29,7 +29,7 @@ pub(crate) struct ExtensionRegistration {
     pub(crate) required_transport_features:
         Vec<astrcode_extension_sdk::extension::TransportFeature>,
     pub(crate) capabilities: Vec<ExtensionCapability>,
-    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) tools: Vec<ExtensionToolDefinition>,
     pub(crate) commands: Vec<SlashCommand>,
     pub(crate) subscriptions: Vec<HookSubscription>,
     pub(crate) http_routes: Vec<RegisteredHttpRoute>,
@@ -182,20 +182,32 @@ fn validate_handler_id_kind(
     Ok(())
 }
 
-fn normalize_tool(tool: ManifestTool) -> Result<ToolDefinition, String> {
+fn normalize_tool(tool: ManifestTool) -> Result<ExtensionToolDefinition, String> {
     let execution_mode = match tool.mode {
         ManifestToolMode::Parallel => ExecutionMode::Parallel,
         ManifestToolMode::Sequential => ExecutionMode::Sequential,
     };
-    Ok(ToolDefinition {
+    let timeout = tool
+        .timeout_ms
+        .map(|timeout_ms| {
+            if timeout_ms == 0 {
+                Err("tool timeout_ms must be greater than zero".to_owned())
+            } else {
+                Ok(std::time::Duration::from_millis(timeout_ms))
+            }
+        })
+        .transpose()?;
+    Ok(ExtensionToolDefinition::from_definition(ToolDefinition {
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
         strict: tool.strict,
         origin: ToolOrigin::Extension,
-        execution_mode,
-        timeout_ms: tool.timeout_ms,
     })
+    .with_execution_policy(ToolExecutionPolicy {
+        mode: execution_mode,
+        timeout,
+    }))
 }
 
 fn normalize_command(command: ManifestCommand) -> SlashCommand {
@@ -352,13 +364,16 @@ mod tests {
         );
         assert!(!registration.tools[0].strict);
         assert_eq!(
-            registration.tools[0].execution_mode,
+            registration.tools[0].execution_policy().mode,
             ExecutionMode::Sequential
         );
         assert!(registration.tools[1].strict);
-        assert_eq!(registration.tools[0].timeout_ms, None);
-        assert_eq!(registration.tools[1].timeout_ms, None);
-        assert_eq!(registration.tools[2].timeout_ms, Some(300_000));
+        assert_eq!(registration.tools[0].execution_policy().timeout, None);
+        assert_eq!(registration.tools[1].execution_policy().timeout, None);
+        assert_eq!(
+            registration.tools[2].execution_policy().timeout,
+            Some(std::time::Duration::from_millis(300_000))
+        );
         assert!(registration.capabilities.is_empty());
         assert!(registration.http_routes.is_empty());
         assert_eq!(registration.commands[0].description, "Command metadata");
@@ -387,6 +402,22 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn s5r_tool_timeout_must_be_positive() {
+        let manifest: InitializeManifest = serde_json::from_value(json!({
+            "tools": [{
+                "name": "invalid-timeout",
+                "description": "",
+                "parameters": {"type": "object"},
+                "timeout_ms": 0
+            }]
+        }))
+        .unwrap();
+
+        let error = registration_from_manifest("timeout-test", "test", manifest).unwrap_err();
+        assert_eq!(error, "tool timeout_ms must be greater than zero");
     }
 
     #[test]

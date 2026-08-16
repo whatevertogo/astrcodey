@@ -22,8 +22,8 @@ use astrcode_extension_sdk::{
         HostSubmitTurnRequest,
     },
     tool::{
-        ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
-        ToolPromptTag, ToolResult, tool_metadata,
+        HostResource, ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan,
+        ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use serde::Deserialize;
@@ -54,6 +54,7 @@ impl Extension for AgentToolsExtension {
         let shared = Arc::new(AgentShared::new());
         reg.tool(
             ExtensionToolDefinition::from_definition(agent_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL)
                 .with_prompt(agent_tool_prompt()),
             Arc::new(AgentToolHandler {
                 shared: shared.clone(),
@@ -110,8 +111,6 @@ fn agent_tool_definition() -> ToolDefinition {
             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
     }
 }
 

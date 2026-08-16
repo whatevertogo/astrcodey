@@ -149,15 +149,19 @@ class ToolDefinition:
     parameters: dict[str, Any]
     strict: bool = False
     mode: str = ToolMode.SEQUENTIAL
+    timeout_ms: int | None = None
 
     def to_manifest(self) -> dict[str, Any]:
-        return {
+        manifest = {
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters,
             "strict": self.strict,
             "mode": self.mode,
         }
+        if self.timeout_ms is not None:
+            manifest["timeout_ms"] = self.timeout_ms
+        return manifest
 
 
 @dataclass

@@ -191,7 +191,7 @@ mod tests {
     use astrcode_core::{
         config::OpenAiApiMode,
         llm::thinking::ThinkingConfig,
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin},
     };
 
     use super::*;
@@ -231,8 +231,6 @@ mod tests {
             }),
             strict: false,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Parallel,
-            timeout_ms: None,
         }
     }
 

@@ -14,7 +14,7 @@ use astrcode_extension_sdk::{
         HostProcessStartRequest, HostProcessState, HostProcessTargetRequest,
     },
     shell::{ShellFamily, ShellInfo, resolve_shell},
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
+    tool::{ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
@@ -587,8 +587,6 @@ pub(super) fn definition() -> ToolDefinition {
         ),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

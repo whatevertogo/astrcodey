@@ -23,8 +23,8 @@ use astrcode_extension_sdk::{
     },
     frontmatter, hostpaths,
     tool::{
-        ExecutionMode, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
-        ToolPromptTag, ToolResult, tool_metadata,
+        ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
     },
 };
 use noyalib::compat::serde_yaml as yaml;
@@ -323,8 +323,6 @@ fn skill_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 

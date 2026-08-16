@@ -30,8 +30,11 @@ use serde_json::{Map, Value, json};
 use tokio::{process::Command, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use super::session_support::{
-    HostInvokeState, ReentrancyGuard, StderrTaskGuard, drain_stderr, prepare_host_invoke,
+use super::{
+    DEFAULT_INVOKE_TIMEOUT,
+    session_support::{
+        HostInvokeState, ReentrancyGuard, StderrTaskGuard, drain_stderr, prepare_host_invoke,
+    },
 };
 use crate::{
     extension_manifest::{registration_from_s5r_manifest, validate_registration_features},
@@ -41,7 +44,6 @@ use crate::{
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
-const INVOKE_TIMEOUT_MS: u64 = 120_000;
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const MAX_PARALLEL_INVOKES: u32 = 8;
 const MAX_CONTINUATION_DEPTH: u32 = 16;
@@ -353,8 +355,13 @@ impl S5rV3Session {
             .acquire_many_owned(permits)
             .await
             .map_err(|_| self.draining_error())?;
-        self.invoke_handler_unadmitted(handler_id, event, invoke_context, None)
-            .await
+        self.invoke_handler_unadmitted(
+            handler_id,
+            event,
+            invoke_context,
+            Some(DEFAULT_INVOKE_TIMEOUT),
+        )
+        .await
     }
 
     async fn invoke_handler_unadmitted(
@@ -362,7 +369,7 @@ impl S5rV3Session {
         handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
-        timeout_ms: Option<u64>,
+        timeout: Option<Duration>,
     ) -> Result<HandlerResult, ExtensionError> {
         let handle = self
             .handle
@@ -387,7 +394,7 @@ impl S5rV3Session {
             })?,
         );
         let output =
-            run_with_cancellation(invoke, invoke_context.cancel_token.as_ref(), timeout_ms).await?;
+            run_with_cancellation(invoke, invoke_context.cancel_token.as_ref(), timeout).await?;
         serde_json::from_value(output)
             .map_err(|error| ExtensionError::Internal(format!("parse HandlerResult: {error}")))
     }
@@ -398,7 +405,7 @@ impl S5rV3Session {
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
-        timeout_ms: Option<u64>,
+        timeout: Option<Duration>,
     ) -> Result<HandlerResult, ExtensionError> {
         let attribution = HandlerAttribution::from_event(&event);
         let mut stack = vec![(handler_id.clone(), event, 0u32)];
@@ -416,7 +423,7 @@ impl S5rV3Session {
                 )));
             }
             let mut result = self
-                .invoke_handler_unadmitted(&handler_id, event, invoke_context, timeout_ms)
+                .invoke_handler_unadmitted(&handler_id, event, invoke_context, timeout)
                 .await?;
             let continuations = std::mem::take(&mut result.continuations);
             if first.is_none() {
@@ -438,7 +445,7 @@ impl S5rV3Session {
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
-        timeout_ms: Option<u64>,
+        timeout: Option<Duration>,
     ) -> Result<HandlerResult, ExtensionError> {
         let permits = invocation_permit_count(execution_mode);
         let _permit = Arc::clone(&self.admission)
@@ -446,7 +453,7 @@ impl S5rV3Session {
             .await
             .map_err(|_| self.draining_error())?;
         let result = self
-            .invoke_handler_unadmitted(handler_id, event, invoke_context, timeout_ms)
+            .invoke_handler_unadmitted(handler_id, event, invoke_context, timeout)
             .await?;
         if !result.continuations.is_empty() {
             return Err(ExtensionError::Internal(
@@ -534,24 +541,29 @@ impl Drop for S5rV3Session {
 async fn run_with_cancellation(
     invoke: impl std::future::Future<Output = Result<Value, InvokeError>>,
     cancellation: Option<&CancellationToken>,
-    timeout_ms: Option<u64>,
+    timeout: Option<Duration>,
 ) -> Result<Value, ExtensionError> {
-    let timeout_ms = timeout_ms.unwrap_or(INVOKE_TIMEOUT_MS);
-    let timeout = Duration::from_millis(timeout_ms);
-    let result = if let Some(cancellation) = cancellation {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                return Err(ExtensionError::Cancelled);
-            },
-            result = tokio::time::timeout(timeout, invoke) => result,
+    let invoke = async {
+        if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    return Err(ExtensionError::Cancelled);
+                },
+                result = invoke => result.map_err(invoke_error_to_extension_error),
+            }
+        } else {
+            invoke.await.map_err(invoke_error_to_extension_error)
         }
+    };
+    let result = if let Some(timeout) = timeout {
+        tokio::time::timeout(timeout, invoke)
+            .await
+            .map_err(|_| ExtensionError::Timeout(timeout.as_millis() as u64))?
     } else {
-        tokio::time::timeout(timeout, invoke).await
+        invoke.await
     };
     result
-        .map_err(|_| ExtensionError::Timeout(timeout_ms))?
-        .map_err(invoke_error_to_extension_error)
 }
 
 fn invoke_error_to_extension_error(error: InvokeError) -> ExtensionError {
@@ -697,18 +709,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_tool_timeout_overrides_the_default_invoke_timeout() {
+    async fn transport_timeout_is_reported_with_its_duration() {
         let error = run_with_cancellation(
             std::future::pending::<Result<Value, InvokeError>>(),
             None,
-            Some(10),
+            Some(Duration::from_millis(10)),
         )
         .await
         .unwrap_err();
 
         assert!(
             matches!(error, ExtensionError::Timeout(10)),
-            "per-tool timeout must win, got {error}"
+            "transport timeout must preserve its duration, got {error}"
         );
     }
 

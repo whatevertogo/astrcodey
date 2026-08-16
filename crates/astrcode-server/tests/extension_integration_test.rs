@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use astrcode_core::tool::{
-    ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolPlanningContext,
-    ToolResult, access::ResourceLease,
+    ToolDefinition, ToolExecutionContext, ToolOrigin, ToolPlanningContext, ToolResult,
+    access::ResourceLease,
 };
 use astrcode_extension_sdk::{
     builder::manifest,
@@ -115,8 +115,6 @@ impl Extension for EchoToolExtension {
                 }),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(EchoToolHandler),
         );
@@ -181,8 +179,6 @@ impl Extension for FixedToolExtension {
                 }),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(FixedToolHandler {
                 tool_name: tool_name.to_string(),

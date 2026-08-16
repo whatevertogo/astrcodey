@@ -64,7 +64,7 @@ pub(crate) fn responses_tools_json(
 
 #[cfg(test)]
 mod strict_tool_tests {
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::tool::ToolOrigin;
 
     use super::*;
 
@@ -80,8 +80,6 @@ mod strict_tool_tests {
             }),
             strict,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Parallel,
-            timeout_ms: None,
         }
     }
 

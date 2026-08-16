@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_extension_sdk::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
+use astrcode_extension_sdk::tool::{ToolDefinition, ToolOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -219,8 +219,6 @@ pub(crate) fn tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 

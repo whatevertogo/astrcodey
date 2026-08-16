@@ -108,6 +108,15 @@ def tool_event(arguments, phase: str = "execute", **scope_extra) -> dict:
 
 
 class ToolRoundTripTest(unittest.IsolatedAsyncioTestCase):
+    def test_tool_timeout_is_optional_manifest_policy(self) -> None:
+        plain = ToolDefinition(name="plain", description="", parameters={})
+        bounded = ToolDefinition(
+            name="bounded", description="", parameters={}, timeout_ms=5_000
+        )
+
+        self.assertNotIn("timeout_ms", plain.to_manifest())
+        self.assertEqual(bounded.to_manifest()["timeout_ms"], 5_000)
+
     async def test_tool_execute_and_plan(self) -> None:
         worker = Worker(EXT_ID, "0.1.0")
 

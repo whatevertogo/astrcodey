@@ -9,6 +9,7 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
+    builder::ExtensionToolDefinition,
     config::ModelSelection,
     wire::manifest::{
         InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
@@ -544,10 +545,11 @@ impl HandlerRegistry {
 
     pub(crate) fn register_tool(
         &mut self,
-        mut def: crate::tool::ToolDefinition,
+        def: ExtensionToolDefinition,
         planner: ToolPlannerFn,
         handler: ToolHandlerFn,
     ) -> Result<(), ErrorPayload> {
+        let (mut def, execution_policy, _) = def.into_parts();
         canonical_registration_name(&mut def.name);
         let name = def.name.clone();
         if has_duplicate_registration_name(self.tools.keys().map(String::as_str), &name) {
@@ -561,11 +563,28 @@ impl HandlerRegistry {
             description: def.description,
             parameters: def.parameters,
             strict: def.strict,
-            mode: match def.execution_mode {
+            mode: match execution_policy.mode {
                 crate::tool::ExecutionMode::Parallel => ManifestToolMode::Parallel,
                 crate::tool::ExecutionMode::Sequential => ManifestToolMode::Sequential,
             },
-            timeout_ms: def.timeout_ms,
+            timeout_ms: execution_policy
+                .timeout
+                .map(|timeout| {
+                    let timeout_ms = u64::try_from(timeout.as_millis()).map_err(|_| {
+                        ErrorPayload::new(
+                            WireErrorCode::InvalidInput,
+                            "tool timeout exceeds the S5R millisecond range",
+                        )
+                    })?;
+                    if timeout_ms == 0 {
+                        return Err(ErrorPayload::new(
+                            WireErrorCode::InvalidInput,
+                            "tool timeout must be at least one millisecond",
+                        ));
+                    }
+                    Ok(timeout_ms)
+                })
+                .transpose()?,
         });
         self.tools.insert(name, RegisteredTool { planner, handler });
         Ok(())
@@ -1125,6 +1144,19 @@ mod tests {
         assert_eq!(
             registry.manifest.custom_events[0].event_type,
             "review.completed"
+        );
+        assert_eq!(
+            registry
+                .register_tool(
+                    crate::builder::worker_tool("too-fast")
+                        .timeout(std::time::Duration::ZERO)
+                        .build(),
+                    Arc::clone(&tool_planner),
+                    Arc::clone(&tool_handler),
+                )
+                .expect_err("sub-millisecond wire timeouts must be rejected")
+                .code_enum(),
+            Some(WireErrorCode::InvalidInput)
         );
         assert_eq!(
             registry

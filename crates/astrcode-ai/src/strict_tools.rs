@@ -1214,7 +1214,7 @@ fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
 mod tests {
     use std::collections::BTreeMap;
 
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::tool::ToolOrigin;
     use astrcode_extension_sdk::extension::Registrar;
     use serde_json::json;
 
@@ -1227,8 +1227,6 @@ mod tests {
             parameters,
             strict: true,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Parallel,
-            timeout_ms: None,
         }
     }
 

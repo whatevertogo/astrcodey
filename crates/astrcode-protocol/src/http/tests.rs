@@ -124,8 +124,6 @@ fn tool_definition_dto_round_trips_and_requires_execution_contract() {
         parameters: serde_json::json!({"type": "object"}),
         strict: false,
         origin: astrcode_core::tool::ToolOrigin::Bundled,
-        execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
-        timeout_ms: None,
     }
     .into();
 
@@ -136,8 +134,7 @@ fn tool_definition_dto_round_trips_and_requires_execution_contract() {
             "description": "Read a file",
             "parameters": {"type": "object"},
             "strict": false,
-            "origin": "bundled",
-            "executionMode": "parallel"
+            "origin": "bundled"
         })
     );
 
@@ -154,8 +151,7 @@ fn tool_definition_dto_round_trips_and_requires_execution_contract() {
         "description": "",
         "parameters": {"type": "object"},
         "strict": true,
-        "origin": "extension",
-        "executionMode": "parallel"
+        "origin": "extension"
     }))
     .unwrap();
     assert!(strict.strict);

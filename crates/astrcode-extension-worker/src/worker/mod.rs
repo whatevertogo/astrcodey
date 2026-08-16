@@ -56,12 +56,12 @@ pub mod testing {
 }
 
 use crate::{
+    builder::ExtensionToolDefinition,
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
         HookMode, LifecycleEvent, TransportFeature,
     },
     s5r::{HandlerEffect, HandlerResult},
-    tool::ToolDefinition,
     worker::{
         host::{V3PeerHostApi, with_host_api},
         registry::HandlerRegistry,
@@ -130,7 +130,7 @@ impl Worker {
     /// 注册 tool：manifest 定义与 handler 一次完成，避免两处手动对齐。
     pub fn tool(
         &mut self,
-        def: impl Into<ToolDefinition>,
+        def: impl Into<ExtensionToolDefinition>,
         planner: ToolPlannerFn,
         handler: ToolHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {

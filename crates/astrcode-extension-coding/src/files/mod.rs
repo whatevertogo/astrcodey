@@ -11,7 +11,7 @@ use astrcode_extension_sdk::{
     builder::ExtensionToolDefinition,
     extension::Registrar,
     host::HostWorkspaceTextChange,
-    tool::{ToolPromptMetadata, ToolPromptTag},
+    tool::{ToolExecutionPolicy, ToolPromptMetadata, ToolPromptTag},
 };
 use serde_json::Value;
 
@@ -20,11 +20,13 @@ pub(super) fn register(registrar: &mut Registrar) {
         || ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::Filesystem);
     registrar.tool(
         ExtensionToolDefinition::from_definition(read::definition())
+            .with_execution_policy(ToolExecutionPolicy::PARALLEL)
             .with_prompt(filesystem_prompt()),
         Arc::new(read::ReadHandler),
     );
     registrar.tool(
         ExtensionToolDefinition::from_definition(tool_result::definition())
+            .with_execution_policy(ToolExecutionPolicy::PARALLEL)
             .with_prompt(filesystem_prompt()),
         Arc::new(tool_result::ReadToolResultHandler),
     );
@@ -45,7 +47,9 @@ pub(super) fn register(registrar: &mut Registrar) {
     );
     for (definition, handler) in search::handlers() {
         registrar.tool(
-            ExtensionToolDefinition::from_definition(definition).with_prompt(filesystem_prompt()),
+            ExtensionToolDefinition::from_definition(definition)
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL)
+                .with_prompt(filesystem_prompt()),
             handler,
         );
     }

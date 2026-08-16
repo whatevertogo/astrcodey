@@ -19,7 +19,9 @@ use super::{
 };
 use crate::{
     extension::{ToolContext, ToolPlanContext},
-    tool::{ToolDefinition, ToolExecutionResult, ToolPlan, ToolPromptMetadata},
+    tool::{
+        ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolPlan, ToolPromptMetadata,
+    },
 };
 
 /// 工具参数变换处理器。
@@ -155,6 +157,7 @@ pub trait CommandDiscoveryHandler: Send + Sync {
 #[derive(Clone)]
 pub struct DiscoveredTool {
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     handler: Arc<dyn ToolHandler>,
     prompt_metadata: Option<ToolPromptMetadata>,
 }
@@ -163,6 +166,7 @@ impl DiscoveredTool {
     pub fn new(definition: ToolDefinition, handler: Arc<dyn ToolHandler>) -> Self {
         Self {
             definition,
+            execution_policy: ToolExecutionPolicy::default(),
             handler,
             prompt_metadata: None,
         }
@@ -170,6 +174,11 @@ impl DiscoveredTool {
 
     pub fn prompt_metadata(mut self, metadata: ToolPromptMetadata) -> Self {
         self.prompt_metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_execution_policy(mut self, execution_policy: ToolExecutionPolicy) -> Self {
+        self.execution_policy = execution_policy;
         self
     }
 
@@ -181,6 +190,10 @@ impl DiscoveredTool {
         &self.handler
     }
 
+    pub fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
+    }
+
     pub fn prompt(&self) -> Option<&ToolPromptMetadata> {
         self.prompt_metadata.as_ref()
     }
@@ -189,10 +202,16 @@ impl DiscoveredTool {
         self,
     ) -> (
         ToolDefinition,
+        ToolExecutionPolicy,
         Arc<dyn ToolHandler>,
         Option<ToolPromptMetadata>,
     ) {
-        (self.definition, self.handler, self.prompt_metadata)
+        (
+            self.definition,
+            self.execution_policy,
+            self.handler,
+            self.prompt_metadata,
+        )
     }
 }
 

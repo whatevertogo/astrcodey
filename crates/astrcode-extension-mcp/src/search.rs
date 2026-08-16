@@ -253,7 +253,7 @@ impl ParsedToolName {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_extension_sdk::tool::ToolOrigin;
 
     use super::*;
 
@@ -323,8 +323,6 @@ mod tests {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Bundled,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             server: server.into(),
             tool: tool.into(),

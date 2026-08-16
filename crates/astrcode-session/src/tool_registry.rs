@@ -7,7 +7,8 @@ use std::{
 
 use astrcode_core::tool::{
     ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-    ToolExecutionResult, ToolPlanningContext, ToolPromptMetadata, access::ToolPlan,
+    ToolExecutionPolicy, ToolExecutionResult, ToolPlanningContext, ToolPromptMetadata,
+    access::ToolPlan,
 };
 use serde_json::Value;
 
@@ -16,6 +17,7 @@ use serde_json::Value;
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     prompt_metadata: Option<ToolPromptMetadata>,
 }
 
@@ -45,8 +47,8 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolRegistryError> {
-        let mut definition = tool.definition();
-        definition.execution_mode = tool.execution_mode();
+        let definition = tool.definition();
+        let execution_policy = tool.execution_policy();
         let name = definition.name.clone();
         let prompt_metadata = tool.prompt_metadata();
         if self.tools.contains_key(&name) {
@@ -57,6 +59,7 @@ impl ToolRegistry {
             RegisteredTool {
                 tool,
                 definition,
+                execution_policy,
                 prompt_metadata,
             },
         );
@@ -130,7 +133,7 @@ impl ToolRegistry {
     pub fn execution_mode(&self, name: &str) -> ExecutionMode {
         self.tools
             .get(name)
-            .map(|entry| entry.definition.execution_mode)
+            .map(|entry| entry.execution_policy.mode)
             .unwrap_or(ExecutionMode::Sequential)
     }
 
@@ -375,13 +378,14 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             }
         }
 
-        fn execution_mode(&self) -> ExecutionMode {
-            self.1
+        fn execution_policy(&self) -> ToolExecutionPolicy {
+            ToolExecutionPolicy {
+                mode: self.1,
+                ..ToolExecutionPolicy::SEQUENTIAL
+            }
         }
 
         async fn plan(
@@ -410,8 +414,6 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             }
         }
 
@@ -499,17 +501,6 @@ mod tests {
                 "gate={gate:?}, names={names:?}"
             );
         }
-    }
-
-    #[test]
-    fn list_definitions_carries_tool_execution_mode() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .register(Arc::new(NamedTool("parallel", ExecutionMode::Parallel)))
-            .unwrap();
-
-        let definition = registry.find_definition("parallel").unwrap();
-        assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
     }
 
     #[test]

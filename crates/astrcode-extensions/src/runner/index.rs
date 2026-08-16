@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::*,
-    tool::{ToolDefinition, ToolPromptMetadata},
+    tool::{ToolDefinition, ToolExecutionPolicy, ToolPromptMetadata},
 };
 
 use super::{
@@ -31,6 +31,7 @@ pub(super) struct ExtensionGenerationEntry {
 
 pub(super) struct StaticToolEntry {
     pub(super) definition: ToolDefinition,
+    pub(super) execution_policy: ToolExecutionPolicy,
     pub(super) prompt_metadata: Option<ToolPromptMetadata>,
     pub(super) handler: Arc<dyn ToolHandler>,
     pub(super) generation: Arc<ExtensionGenerationEntry>,
@@ -210,6 +211,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
                 .then(|| registration.prompt().clone());
             static_tools.push(StaticToolEntry {
                 definition: definition.clone(),
+                execution_policy: registration.execution_policy(),
                 prompt_metadata,
                 handler: Arc::clone(registration.handler()),
                 generation: Arc::clone(&generation_entry),

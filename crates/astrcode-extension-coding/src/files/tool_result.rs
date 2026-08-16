@@ -7,10 +7,7 @@ use astrcode_extension_sdk::{
         HOST_TOOL_RESULT_DEFAULT_MAX_BYTES, HOST_TOOL_RESULT_MAX_BYTES, HOST_TOOL_RESULT_MIN_BYTES,
         HostToolResultReadRequest,
     },
-    tool::{
-        ExecutionMode, HostResource, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
-        ToolResult,
-    },
+    tool::{HostResource, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
@@ -105,8 +102,6 @@ pub(super) fn definition() -> ToolDefinition {
         .into(),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

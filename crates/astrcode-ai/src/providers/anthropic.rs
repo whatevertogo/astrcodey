@@ -228,8 +228,6 @@ mod tests {
             parameters: serde_json::json!({"type": "string"}),
             strict: true,
             origin: astrcode_core::tool::ToolOrigin::Bundled,
-            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
-            timeout_ms: None,
         };
 
         let result = provider

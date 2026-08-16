@@ -584,7 +584,11 @@ mod tests {
     }
 
     fn visible_tool() -> ToolDefinition {
-        tool("visible").description("Visible tool").build().into()
+        tool("visible")
+            .description("Visible tool")
+            .build()
+            .definition()
+            .clone()
     }
 
     #[test]

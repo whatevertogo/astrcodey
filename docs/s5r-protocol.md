@@ -110,7 +110,8 @@ tool 名称或旧式 `on` 标签。`Plan` 先返回 `HandlerEffect::ToolPlan` �
 `astrcode.*` 调用仍会依据本次调用的 resource lease 再校验。Host 与 worker 对未知 phase、请求
 或 plan DTO 中的未知字段、以及错误 effect 都直接拒绝，不提供旧式单阶段或旧 envelope 回退。
 
-manifest 的工具条目可携带可选 `timeout_ms`，按工具覆盖宿主默认 invoke 超时；工具 effect 的
+manifest 的工具条目可携带可选 `timeout_ms`，在边界转换成宿主执行策略；缺失时 execute 使用
+S5R 的 120 秒默认值。该预算不约束 plan，并由宿主包住完整 execute/continuation 链。工具 effect 的
 output 可携带可选 `metadata`（如 presentation intent），供 UI 消费、不进入模型上下文。两个字段
 都受未知字段拒绝约束：旧版本宿主/worker 遇到它们会按严格性规则拒绝，发布时需同版本配套。
 

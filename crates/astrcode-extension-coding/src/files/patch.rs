@@ -5,10 +5,7 @@ use astrcode_extension_sdk::{
     host::{
         HostWorkspaceApplyPatchRequest, HostWorkspacePatchChangeKind, analyze_unified_diff_paths,
     },
-    tool::{
-        ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
-        ToolResult,
-    },
+    tool::{ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
@@ -127,8 +124,6 @@ pub(super) fn definition() -> ToolDefinition {
         .into(),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

@@ -374,7 +374,7 @@ fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole, thinking::ThinkingConfig},
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin},
     };
 
     use super::*;
@@ -466,8 +466,6 @@ mod tests {
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Parallel,
-            timeout_ms: None,
         }];
         let config = AnthropicRequestConfig {
             model_id: "claude-test",
@@ -511,8 +509,6 @@ mod tests {
                     parameters: serde_json::json!({"type": "object"}),
                     strict,
                     origin: ToolOrigin::Bundled,
-                    execution_mode: ExecutionMode::Parallel,
-                    timeout_ms: None,
                 }],
                 supported,
             );

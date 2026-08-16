@@ -12,8 +12,8 @@ use astrcode_extension_sdk::{
         ToolContext, ToolHandler, ToolPlanContext,
     },
     tool::{
-        ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
-        ToolPromptTag, ToolResult, tool_metadata,
+        HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -598,8 +598,6 @@ fn todo_write_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 

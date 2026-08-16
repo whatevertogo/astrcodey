@@ -8,10 +8,7 @@ use astrcode_extension_sdk::{
         PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext, ToolHandler,
         ToolPlanContext,
     },
-    tool::{
-        ExecutionMode, HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan,
-        ToolResult,
-    },
+    tool::{HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -50,8 +47,6 @@ pub(crate) fn memory_save_definition() -> ToolDefinition {
             },
             "required": ["content"]
         }),
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         strict: true,
         origin: ToolOrigin::Bundled,
     }
@@ -68,8 +63,6 @@ pub(crate) fn memory_delete_definition() -> ToolDefinition {
             },
             "required": ["match"]
         }),
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         strict: true,
         origin: ToolOrigin::Bundled,
     }
@@ -86,8 +79,6 @@ pub(crate) fn memory_list_definition() -> ToolDefinition {
                 "limit": { "type": "integer", "description": "Max entries (default 20, max 50)", "minimum": 1, "maximum": 50 }
             }
         }),
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         strict: true,
         origin: ToolOrigin::Bundled,
     }

@@ -5,7 +5,8 @@ use std::{
 };
 
 use astrcode_core::tool::{
-    Tool, ToolError, ToolExecutionContext, ToolExecutionResult, ToolPlanningContext,
+    Tool, ToolError, ToolExecutionContext, ToolExecutionPolicy, ToolExecutionResult,
+    ToolPlanningContext,
 };
 use astrcode_extension_sdk::{
     extension::{
@@ -16,7 +17,7 @@ use astrcode_extension_sdk::{
         ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogProvider, ToolCatalogScope,
         ToolCatalogSnapshot,
     },
-    tool::{ExecutionMode, ToolDefinition, ToolPlan, ToolResult},
+    tool::{ToolDefinition, ToolPlan, ToolResult},
 };
 
 use super::{
@@ -61,6 +62,7 @@ impl ExtensionView {
         for entry in &index.static_tools {
             tools.push(Arc::new(HandlerTool::new(
                 entry.definition.clone(),
+                entry.execution_policy,
                 Arc::clone(&entry.handler),
                 entry.prompt_metadata.clone(),
                 working_dir,
@@ -96,9 +98,11 @@ impl ExtensionView {
             match discovered {
                 Ok(discovered) => {
                     for discovered_tool in discovered.into_tools() {
-                        let (definition, handler, prompt_metadata) = discovered_tool.into_parts();
+                        let (definition, execution_policy, handler, prompt_metadata) =
+                            discovered_tool.into_parts();
                         tools.push(Arc::new(HandlerTool::new(
                             definition,
+                            execution_policy,
                             handler,
                             prompt_metadata,
                             working_dir,
@@ -157,6 +161,7 @@ impl ToolCatalogProvider for ExtensionView {
 /// 类型化工具适配器，将 `ToolHandler` 包装为 `Tool` trait 实现。
 struct HandlerTool {
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     handler: Arc<dyn ToolHandler>,
     prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
     working_dir: String,
@@ -171,6 +176,7 @@ struct HandlerTool {
 impl HandlerTool {
     fn new(
         definition: ToolDefinition,
+        execution_policy: ToolExecutionPolicy,
         handler: Arc<dyn ToolHandler>,
         prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
         working_dir: &str,
@@ -179,6 +185,7 @@ impl HandlerTool {
     ) -> Self {
         Self {
             definition,
+            execution_policy,
             handler,
             prompt_metadata,
             working_dir: working_dir.to_owned(),
@@ -198,8 +205,8 @@ impl Tool for HandlerTool {
         self.definition.clone()
     }
 
-    fn execution_mode(&self) -> ExecutionMode {
-        self.definition.execution_mode
+    fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
     }
 
     fn prompt_metadata(&self) -> Option<astrcode_extension_sdk::tool::ToolPromptMetadata> {
@@ -232,12 +239,8 @@ impl Tool for HandlerTool {
             arguments.clone(),
             cancellation.clone(),
         );
-        let timeout = self
-            .definition
-            .timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(self.operation_timeout);
-        let planning = tokio::time::timeout(timeout, self.handler.plan(plan_context));
+        let planning =
+            tokio::time::timeout(self.operation_timeout, self.handler.plan(plan_context));
         tokio::select! {
             biased;
             () = ctx.cancellation().cancelled() => {
@@ -250,7 +253,7 @@ impl Tool for HandlerTool {
             },
             result = planning => match result {
                 Ok(result) => result.map_err(extension_plan_error),
-                Err(_) => Err(ToolError::Timeout(timeout.as_millis() as u64)),
+                Err(_) => Err(ToolError::Timeout(self.operation_timeout.as_millis() as u64)),
             },
         }
     }
@@ -348,13 +351,10 @@ impl Tool for HandlerTool {
                 },
             }
         };
-        // 进程内工具执行默认不设超时；声明了 timeout_ms 的工具按其值强制限时。
-        let execution = match self.definition.timeout_ms {
-            Some(timeout_ms) => {
-                match tokio::time::timeout(Duration::from_millis(timeout_ms), execution).await {
-                    Ok(result) => result,
-                    Err(_) => Err(ExtensionError::Timeout(timeout_ms)),
-                }
+        let execution = match self.execution_policy.timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, execution).await {
+                Ok(result) => result,
+                Err(_) => Err(ExtensionError::Timeout(timeout.as_millis() as u64)),
             },
             None => execution.await,
         };

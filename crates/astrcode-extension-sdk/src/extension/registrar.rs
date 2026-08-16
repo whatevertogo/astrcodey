@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     builder::ExtensionToolDefinition,
-    tool::{ToolDefinition, ToolPromptMetadata},
+    tool::{ToolDefinition, ToolExecutionPolicy, ToolPromptMetadata},
 };
 
 // ─── Registrar ───────────────────────────────────────────────────
@@ -80,6 +80,7 @@ pub struct CustomEventRegistration {
 #[derive(Clone)]
 pub struct ToolRegistration {
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     prompt: ToolPromptMetadata,
     handler: Arc<dyn ToolHandler>,
 }
@@ -91,6 +92,10 @@ impl ToolRegistration {
 
     pub fn prompt(&self) -> &ToolPromptMetadata {
         &self.prompt
+    }
+
+    pub fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
     }
 
     pub fn handler(&self) -> &Arc<dyn ToolHandler> {
@@ -108,10 +113,11 @@ impl Registrar {
         definition: impl Into<ExtensionToolDefinition>,
         handler: Arc<dyn ToolHandler>,
     ) {
-        let (mut definition, prompt) = definition.into().into_parts();
+        let (mut definition, execution_policy, prompt) = definition.into().into_parts();
         canonical_registration_name(&mut definition.name);
         self.registrations.tools.push(ToolRegistration {
             definition,
+            execution_policy,
             prompt,
             handler,
         });

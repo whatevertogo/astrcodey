@@ -528,7 +528,7 @@ mod tests {
     fn prompt_cache_key_pinned_for_chat_and_responses() {
         use astrcode_core::{
             llm::{LlmMessage, thinking::ThinkingConfig},
-            tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+            tool::{ToolDefinition, ToolOrigin},
         };
         let thinking = ThinkingConfig {
             enabled: false,
@@ -541,8 +541,6 @@ mod tests {
             parameters: serde_json::json!({"type":"object"}),
             strict: false,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Parallel,
-            timeout_ms: None,
         };
         let messages = [
             Arc::new(LlmMessage::system("sys")),

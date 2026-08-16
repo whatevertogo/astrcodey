@@ -176,6 +176,10 @@ class Worker:
             raise S5rError.of(
                 WireErrorCode.INVALID_INPUT, f"unknown tool mode {definition.mode!r}"
             )
+        if definition.timeout_ms is not None and definition.timeout_ms <= 0:
+            raise S5rError.of(
+                WireErrorCode.INVALID_INPUT, "tool timeout_ms must be greater than zero"
+            )
         definition.name = name
         self._tools[name] = (planner, handler)
         self._tool_manifest.append(definition.to_manifest())

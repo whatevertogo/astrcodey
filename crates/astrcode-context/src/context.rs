@@ -333,7 +333,7 @@ pub fn is_prompt_too_long_message(message: &str) -> bool {
 mod tests {
     use astrcode_core::{
         llm::token_estimate::{estimate_provider_request_tokens, estimate_tool_definition_tokens},
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin},
     };
     use serde_json::json;
 
@@ -359,8 +359,6 @@ mod tests {
             parameters: json!({"type": "object"}),
             strict: false,
             origin: ToolOrigin::Bundled,
-            execution_mode: ExecutionMode::Sequential,
-            timeout_ms: None,
         }];
         let tools_tokens = estimate_tool_definition_tokens(&tools);
 

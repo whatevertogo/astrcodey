@@ -21,8 +21,8 @@ use astrcode_extension_sdk::{
     llm::LlmMessage,
     session::HostSessionTargetRequest,
     tool::{
-        ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
-        ToolPromptTag, ToolResult, tool_metadata,
+        HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
     },
     types::SessionId,
 };
@@ -754,8 +754,6 @@ fn get_goal_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 
@@ -781,8 +779,6 @@ fn create_goal_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 
@@ -804,8 +800,6 @@ fn update_goal_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 

@@ -9,8 +9,7 @@ use astrcode_core::{
     event::{PersistedSystemPrompt, SystemPromptSource},
     llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
-        ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolOrigin,
+        SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
     },
     types::{SessionId, ToolCallId, new_session_id, new_turn_id},
 };
@@ -86,8 +85,6 @@ impl Tool for NamedTool {
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
             origin: ToolOrigin::Extension,
-            execution_mode: ExecutionMode::Sequential,
-            timeout_ms: None,
         }
     }
 

@@ -21,7 +21,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     WireErrorCode,
-    builder::{command, custom_event, manifest},
+    builder::{ExtensionToolDefinition, command, custom_event, manifest},
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletionItem, CommandCompletions,
         CommandContext, CommandExecution, CommandHandler, ContinueAfterStopContext,
@@ -52,7 +52,7 @@ use astrcode_extension_sdk::{
         HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
     runtime_ports::{ToolCatalogCompleteness, ToolCatalogProvider},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
+    tool::{ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan, ToolResult},
 };
 use astrcode_storage::{
     SessionEventJournal, SessionPathResolver, SessionStore, testing::filesystem_session_repository,
@@ -460,8 +460,6 @@ impl Extension for StateProbeExtension {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(StateProbeTool),
         );
@@ -506,8 +504,6 @@ impl Extension for CallScopeProbeExtension {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(CallScopeProbeTool {
                 retained: Arc::clone(&self.retained),
@@ -550,8 +546,6 @@ impl Extension for ToolRetirementProbeExtension {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(StateProbeTool),
         );
@@ -718,8 +712,6 @@ impl Extension for SmallModelProbeExtension {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(SmallModelProbeTool),
         );
@@ -2140,15 +2132,17 @@ impl Extension for TimeoutProbeExtension {
 
     fn register(&self, reg: &mut Registrar) {
         reg.tool(
-            ToolDefinition {
+            ExtensionToolDefinition::from_definition(ToolDefinition {
                 name: "timeoutProbe".into(),
                 description: String::new(),
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: Some(50),
-            },
+            })
+            .with_execution_policy(ToolExecutionPolicy {
+                timeout: Some(Duration::from_millis(50)),
+                ..ToolExecutionPolicy::SEQUENTIAL
+            }),
             Arc::new(TimeoutProbeTool),
         );
     }
@@ -2172,7 +2166,7 @@ impl ToolHandler for TimeoutProbeTool {
 }
 
 #[tokio::test]
-async fn extension_tool_timeout_ms_applies_to_in_process_execution() {
+async fn extension_execution_policy_times_out_in_process_execution() {
     let runner = ExtensionRunner::new(Duration::from_secs(30));
     runner
         .register(Arc::new(TimeoutProbeExtension))

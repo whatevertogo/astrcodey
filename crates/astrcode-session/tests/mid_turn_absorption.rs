@@ -12,10 +12,7 @@ use std::sync::{
 use astrcode_core::{
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    tool::{
-        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
-        access::ToolPlan,
-    },
+    tool::{Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin, access::ToolPlan},
     types::{TurnId, new_turn_id},
     user_input::UserInput,
 };
@@ -42,8 +39,6 @@ impl Tool for SlowTool {
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
             origin: ToolOrigin::Extension,
-            execution_mode: ExecutionMode::Sequential,
-            timeout_ms: None,
         }
     }
 

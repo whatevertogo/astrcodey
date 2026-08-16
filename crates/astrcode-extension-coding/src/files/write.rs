@@ -1,10 +1,7 @@
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::HostWorkspaceWriteRequest,
-    tool::{
-        ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
-        ToolResult,
-    },
+    tool::{ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
@@ -72,8 +69,6 @@ pub(super) fn definition() -> ToolDefinition {
         .into(),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

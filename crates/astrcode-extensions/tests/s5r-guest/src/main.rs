@@ -401,6 +401,19 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.tool(
+        tool("timeout_probe")
+            .description("Tool execution timeout E2E")
+            .parameters(json!({ "type": "object" }))
+            .timeout(Duration::from_millis(50))
+            .build(),
+        no_resources(),
+        tool_handler(|_| async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(tool_text("unexpected completion", false))
+        }),
+    )?;
+
+    worker.tool(
         tool("slow")
             .description("Slow tool for cancel E2E")
             .parameters(json!({ "type": "object" }))

@@ -4,9 +4,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use astrcode_extension_sdk::tool::{
-    ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
-};
+use astrcode_extension_sdk::tool::{ToolDefinition, ToolOrigin, ToolResult, tool_metadata};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -56,8 +54,6 @@ pub(crate) fn switch_mode_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 
@@ -81,8 +77,6 @@ pub(crate) fn upsert_plan_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     }
 }
 

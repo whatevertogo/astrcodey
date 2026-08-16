@@ -13,7 +13,7 @@
 //! 本模块不含具体工具实现与调度逻辑（注册表、并行调度、权限门禁位于
 //! `astrcode-session` / 各工具 crate）。
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -52,12 +52,33 @@ pub struct ToolDefinition {
     pub strict: bool,
     /// 工具来源。来源只影响诊断、策略和优先级，不创建额外执行路径。
     pub origin: ToolOrigin,
-    /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
-    /// 单次工具调用的超时（毫秒）。`None` 表示使用宿主默认超时。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
+}
+
+/// 宿主执行工具时采用的静态策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolExecutionPolicy {
+    /// 该工具能否与同一批次中的其它工具并行执行。
+    pub mode: ExecutionMode,
+    /// `execute` 阶段的有效超时；`None` 表示宿主不额外限制执行时长。
+    pub timeout: Option<Duration>,
+}
+
+impl ToolExecutionPolicy {
+    pub const PARALLEL: Self = Self {
+        mode: ExecutionMode::Parallel,
+        timeout: None,
+    };
+
+    pub const SEQUENTIAL: Self = Self {
+        mode: ExecutionMode::Sequential,
+        timeout: None,
+    };
+}
+
+impl Default for ToolExecutionPolicy {
+    fn default() -> Self {
+        Self::SEQUENTIAL
+    }
 }
 
 /// 工具提示词元数据，**仅服务于 system prompt 中的"详细工具指引"段落**。
@@ -1144,9 +1165,9 @@ pub trait Tool: Send + Sync {
     /// 返回工具的定义，用于 LLM 函数调用。
     fn definition(&self) -> ToolDefinition;
 
-    /// 返回工具的执行模式偏好。
-    fn execution_mode(&self) -> ExecutionMode {
-        self.definition().execution_mode
+    /// 返回工具的宿主执行策略。
+    fn execution_policy(&self) -> ToolExecutionPolicy {
+        ToolExecutionPolicy::default()
     }
 
     /// Plan the resources required by the final, immutable tool arguments.
@@ -1182,30 +1203,6 @@ pub trait Tool: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tool_definition_timeout_ms_is_optional_on_the_wire() {
-        let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
-            "name": "probe",
-            "description": "",
-            "parameters": {"type": "object"},
-            "origin": "extension",
-        }))
-        .unwrap();
-        assert_eq!(definition.timeout_ms, None);
-
-        let serialized = serde_json::to_value(&definition).unwrap();
-        assert!(serialized.get("timeout_ms").is_none());
-
-        let with_timeout = ToolDefinition {
-            timeout_ms: Some(5_000),
-            ..definition
-        };
-        let serialized = serde_json::to_value(&with_timeout).unwrap();
-        assert_eq!(serialized["timeout_ms"], serde_json::json!(5_000));
-        let roundtrip: ToolDefinition = serde_json::from_value(serialized).unwrap();
-        assert_eq!(roundtrip.timeout_ms, Some(5_000));
-    }
 
     #[test]
     fn presentation_as_str_matches_serde_wire_values() {

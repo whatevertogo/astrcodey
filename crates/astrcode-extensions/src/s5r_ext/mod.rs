@@ -3,7 +3,7 @@
 mod session_support;
 mod v3_session;
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::{
     builder::manifest,
@@ -44,6 +44,8 @@ use crate::{
 pub struct S5rExtension {
     session: Arc<S5rSession>,
 }
+
+const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl S5rExtension {
     pub async fn load(
@@ -131,13 +133,14 @@ impl Extension for S5rExtension {
             );
         }
         for tool_def in &registration.tools {
+            let mut execution_policy = tool_def.execution_policy();
+            execution_policy.timeout = execution_policy.timeout.or(Some(DEFAULT_INVOKE_TIMEOUT));
             reg.tool(
-                tool_def.clone(),
+                tool_def.clone().with_execution_policy(execution_policy),
                 Arc::new(S5rToolHandler {
                     session: Arc::clone(&self.session),
                     extension_id: registration.extension_id.clone(),
-                    execution_mode: tool_def.execution_mode,
-                    timeout_ms: tool_def.timeout_ms,
+                    execution_mode: execution_policy.mode,
                 }),
             );
         }
@@ -365,7 +368,7 @@ async fn invoke_hook(
             json!({ "on": hook_name, "input": input }),
             invoke_context,
             ExecutionMode::Sequential,
-            None,
+            Some(DEFAULT_INVOKE_TIMEOUT),
         )
         .await
 }
@@ -397,7 +400,6 @@ struct S5rToolHandler {
     session: Arc<S5rSession>,
     extension_id: String,
     execution_mode: ExecutionMode,
-    timeout_ms: Option<u64>,
 }
 
 fn serialize_tool_invocation(request: ToolInvocationRequest) -> Result<Value, ExtensionError> {
@@ -436,7 +438,7 @@ impl ToolHandler for S5rToolHandler {
                 event,
                 &invoke_context,
                 self.execution_mode,
-                self.timeout_ms,
+                Some(DEFAULT_INVOKE_TIMEOUT),
             )
             .await?;
         if response.effect != HandlerEffect::ToolPlan {
@@ -474,13 +476,7 @@ impl ToolHandler for S5rToolHandler {
         let hid = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
         let resp = self
             .session
-            .invoke_handler_with_continuations(
-                &hid,
-                event,
-                &invoke_ctx,
-                self.execution_mode,
-                self.timeout_ms,
-            )
+            .invoke_handler_with_continuations(&hid, event, &invoke_ctx, self.execution_mode, None)
             .await?;
         parse_tool_result(&resp).map(Into::into)
     }
@@ -514,7 +510,7 @@ impl CommandHandler for S5rCommandHandler {
                 event,
                 &invoke_ctx,
                 ExecutionMode::Sequential,
-                None,
+                Some(DEFAULT_INVOKE_TIMEOUT),
             )
             .await?;
         parse_command_result(&resp)
@@ -545,7 +541,7 @@ impl CommandHandler for S5rCommandHandler {
                 event,
                 &invoke_ctx,
                 ExecutionMode::Sequential,
-                None,
+                Some(DEFAULT_INVOKE_TIMEOUT),
             )
             .await?;
         parse_command_completions(&response)
@@ -804,7 +800,7 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 }),
                 &invoke_ctx,
                 ExecutionMode::Sequential,
-                None,
+                Some(DEFAULT_INVOKE_TIMEOUT),
             )
             .await?;
         let reason = || {

@@ -7,10 +7,10 @@ use astrcode_core::{message_attachment::MessageAttachment, tool::SessionToolSele
 use serde::{Deserialize, Serialize};
 
 use crate::wire::{
-    ApprovalDecisionDto, ApprovalModeDto, ExecutionModeDto, ExtensionCapabilityDto,
-    ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto, PhaseDto,
-    ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto,
-    ToolOutputStreamDto, impl_wire_values,
+    ApprovalDecisionDto, ApprovalModeDto, ExtensionCapabilityDto, ExtensionHttpMethodDto,
+    ExtensionSourceDto, ExtensionStageStatusDto, PhaseDto, ProviderAuthSchemeDto,
+    ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto, ToolOutputStreamDto,
+    impl_wire_values,
 };
 pub use crate::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto, AgentSessionUpdateDto},
@@ -784,7 +784,6 @@ pub struct ToolDefinitionDto {
     pub parameters: serde_json::Value,
     pub strict: bool,
     pub origin: ToolOriginDto,
-    pub execution_mode: ExecutionModeDto,
 }
 
 impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
@@ -795,7 +794,6 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
             parameters: value.parameters,
             strict: value.strict,
             origin: value.origin.into(),
-            execution_mode: value.execution_mode.into(),
         }
     }
 }

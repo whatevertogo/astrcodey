@@ -5,8 +5,8 @@ use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{HOST_WORKSPACE_MAX_FILE_BYTES, HostWorkspaceReadOutput, HostWorkspaceReadRequest},
     tool::{
-        ExecutionMode, ReadToolInlinePayload, ResourceAccess, ToolDefinition, ToolExecutionResult,
-        ToolOrigin, ToolPlan, ToolResult,
+        ReadToolInlinePayload, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin,
+        ToolPlan, ToolResult,
     },
 };
 use serde::Deserialize;
@@ -220,8 +220,6 @@ pub(super) fn definition() -> ToolDefinition {
         .into(),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

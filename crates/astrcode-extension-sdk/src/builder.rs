@@ -1,6 +1,6 @@
 //! Convenience adapters for writing extension handlers and tool definitions.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use serde::de::DeserializeOwned;
 
@@ -16,8 +16,8 @@ use crate::{
         ToolHandler, ToolPlanContext,
     },
     tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
-        ToolPromptMetadata,
+        ExecutionMode, ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolOrigin,
+        ToolPlan, ToolPromptMetadata,
     },
     transport::TransportFeature,
 };
@@ -487,8 +487,7 @@ fn tool_with_origin(name: impl Into<String>, origin: ToolOrigin) -> ToolDefiniti
         description: String::new(),
         parameters: serde_json::json!({"type": "object"}),
         strict: false,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
+        execution_policy: ToolExecutionPolicy::default(),
         prompt: ToolPromptMetadata::default(),
         origin,
     }
@@ -501,6 +500,7 @@ fn tool_with_origin(name: impl Into<String>, origin: ToolOrigin) -> ToolDefiniti
 #[derive(Debug, Clone)]
 pub struct ExtensionToolDefinition {
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     prompt: ToolPromptMetadata,
 }
 
@@ -508,8 +508,14 @@ impl ExtensionToolDefinition {
     pub fn from_definition(definition: ToolDefinition) -> Self {
         Self {
             definition,
+            execution_policy: ToolExecutionPolicy::default(),
             prompt: ToolPromptMetadata::default(),
         }
+    }
+
+    pub fn with_execution_policy(mut self, execution_policy: ToolExecutionPolicy) -> Self {
+        self.execution_policy = execution_policy;
+        self
     }
 
     pub fn with_prompt(mut self, prompt: ToolPromptMetadata) -> Self {
@@ -525,8 +531,12 @@ impl ExtensionToolDefinition {
         &self.prompt
     }
 
-    pub fn into_parts(self) -> (ToolDefinition, ToolPromptMetadata) {
-        (self.definition, self.prompt)
+    pub fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
+    }
+
+    pub fn into_parts(self) -> (ToolDefinition, ToolExecutionPolicy, ToolPromptMetadata) {
+        (self.definition, self.execution_policy, self.prompt)
     }
 }
 
@@ -544,19 +554,12 @@ impl From<ToolDefinition> for ExtensionToolDefinition {
     }
 }
 
-impl From<ExtensionToolDefinition> for ToolDefinition {
-    fn from(definition: ExtensionToolDefinition) -> Self {
-        definition.definition
-    }
-}
-
 pub struct ToolDefinitionBuilder {
     name: String,
     description: String,
     parameters: serde_json::Value,
     strict: bool,
-    execution_mode: ExecutionMode,
-    timeout_ms: Option<u64>,
+    execution_policy: ToolExecutionPolicy,
     prompt: ToolPromptMetadata,
     origin: ToolOrigin,
 }
@@ -591,13 +594,13 @@ impl ToolDefinitionBuilder {
     }
 
     pub fn execution_mode(mut self, mode: ExecutionMode) -> Self {
-        self.execution_mode = mode;
+        self.execution_policy.mode = mode;
         self
     }
 
     /// Override the host-default invoke timeout for this tool.
-    pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = Some(timeout_ms);
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.execution_policy.timeout = Some(timeout);
         self
     }
 
@@ -614,9 +617,8 @@ impl ToolDefinitionBuilder {
                 parameters: self.parameters,
                 strict: self.strict,
                 origin: self.origin,
-                execution_mode: self.execution_mode,
-                timeout_ms: self.timeout_ms,
             },
+            execution_policy: self.execution_policy,
             prompt: self.prompt,
         }
     }
@@ -648,20 +650,28 @@ mod tests {
         assert_eq!(def.description, "A test tool");
         assert!(!def.strict);
         assert_eq!(def.origin, ToolOrigin::Bundled);
-        assert_eq!(def.execution_mode, ExecutionMode::Sequential);
+        assert_eq!(def.execution_policy(), ToolExecutionPolicy::default());
         assert_eq!(worker_tool("worker").build().origin, ToolOrigin::Extension);
 
         assert!(tool("strict").strict().build().strict);
         assert!(!tool("dynamic").strict().non_strict().build().strict);
 
-        assert_eq!(tool("plain").description("d").build().timeout_ms, None);
+        assert_eq!(
+            tool("plain")
+                .description("d")
+                .build()
+                .execution_policy()
+                .timeout,
+            None
+        );
         assert_eq!(
             tool("slow")
                 .description("d")
-                .timeout_ms(30_000)
+                .timeout(Duration::from_secs(30))
                 .build()
-                .timeout_ms,
-            Some(30_000)
+                .execution_policy()
+                .timeout,
+            Some(Duration::from_secs(30))
         );
     }
 

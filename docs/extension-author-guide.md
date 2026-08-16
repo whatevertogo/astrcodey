@@ -299,19 +299,23 @@ bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks()
 
 ## 工具超时
 
-宿主对单次工具调用有默认超时（S5R worker 为 120 秒）。需要更长或更短预算的工具，在定义时用
-`.timeout_ms()` 按工具覆盖：
+工具执行策略与发送给模型的 `ToolDefinition` 分离。需要限制 `execute` 阶段时，在作者 API 中用
+`Duration` 声明预算：
 
 ```rust
+use std::time::Duration;
+
 worker_tool("deploy")
     .description("Deploy the current release")
     .parameters(json!({"type": "object"}))
-    .timeout_ms(600_000) // 10 分钟
+    .timeout(Duration::from_secs(600))
     .build()
 ```
 
-bundled 扩展使用同一个 builder（`astrcode_extension_sdk::builder::tool`），行为一致：未声明
-`timeout_ms` 的工具沿用宿主默认。超时到达后 LLM 会看到带 `timeoutMs` 元数据的结构化错误结果。
+S5R manifest 在线缆边界使用 `timeout_ms`；未声明时沿用 S5R 的 120 秒默认值。bundled 扩展使用
+同一个 builder（`astrcode_extension_sdk::builder::tool`），未声明时不增加 tool execute 超时。
+`plan` 始终受宿主控制面超时约束；审批与 admission 等待不消耗 execute 预算；主 handler 与全部
+continuation 共享同一次预算。超时到达后 LLM 会看到带 `timeoutMs` 元数据的结构化错误结果。
 
 ## 结果呈现 intent
 

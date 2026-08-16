@@ -23,7 +23,7 @@ use astrcode_extension_sdk::{
         ToolDiscoveryHandler, ToolHandler, ToolPlanContext,
     },
     tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolOrigin, ToolPlan,
         ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
@@ -371,6 +371,7 @@ impl McpToolDiscovery {
                 tool_search_tool_definition(),
                 handler.clone() as Arc<dyn ToolHandler>,
             )
+            .with_execution_policy(ToolExecutionPolicy::PARALLEL)
             .prompt_metadata(tool_search_metadata()),
         ];
         for candidate in &entry.candidates {
@@ -620,8 +621,6 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
             .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
         strict: false,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
-        timeout_ms: None,
     })
 }
 
@@ -659,8 +658,6 @@ fn tool_search_tool_definition() -> ToolDefinition {
         }),
         strict: false,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
     }
 }
 
@@ -767,7 +764,6 @@ mod tests {
         let definition = tool_search_tool_definition();
         assert_eq!(definition.name, TOOL_SEARCH_TOOL_NAME);
         assert_eq!(definition.origin, ToolOrigin::Bundled);
-        assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
 
         let instruction = mcp_discovery_instructions();
         assert!(instruction.starts_with("MCP discovery workflow:"));

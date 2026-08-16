@@ -14,7 +14,7 @@ mod web_search;
 use std::{sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::{
-    builder::manifest,
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
         ExtensionManifest, ExtensionStartContext, Registrar, ToolContext, ToolHandler,
@@ -22,7 +22,7 @@ use astrcode_extension_sdk::{
     },
     host::{HOST_NETWORK_MAX_TIMEOUT_MS, ModelClient, NetworkClient},
     tool::{
-        ExecutionMode, HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan,
+        HostResource, ResourceAccess, ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan,
         ToolResult, tool_metadata,
     },
 };
@@ -150,13 +150,15 @@ impl Extension for WebToolsExtension {
     fn register(&self, reg: &mut Registrar) {
         let shared = Arc::clone(&self.shared);
         reg.tool(
-            web_search_tool_definition(),
+            ExtensionToolDefinition::from_definition(web_search_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL),
             Arc::new(WebSearchToolHandler {
                 shared: shared.clone(),
             }),
         );
         reg.tool(
-            fetch_url_tool_definition(),
+            ExtensionToolDefinition::from_definition(fetch_url_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL),
             Arc::new(FetchUrlToolHandler { shared }),
         );
     }
@@ -332,8 +334,6 @@ fn web_search_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
     }
 }
 
@@ -358,8 +358,6 @@ fn fetch_url_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
-        timeout_ms: None,
     }
 }
 

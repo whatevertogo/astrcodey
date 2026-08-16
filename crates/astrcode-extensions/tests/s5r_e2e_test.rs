@@ -570,7 +570,7 @@ async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
     let workspace_b = workspace_b.to_string_lossy().into_owned();
     let tool_a = runner_tool(&runner, "parallel_read_workspace", &workspace_a).await;
     let tool_b = runner_tool(&runner, "parallel_read_workspace", &workspace_b).await;
-    assert_eq!(tool_a.execution_mode(), ExecutionMode::Parallel);
+    assert_eq!(tool_a.execution_policy().mode, ExecutionMode::Parallel);
     let context_a = core_tool_ctx(&workspace_a);
     let context_b = core_tool_ctx(&workspace_b);
     let call_a = tool_a.execute(serde_json::json!({ "delay_ms": 150 }), &context_a);
@@ -808,6 +808,29 @@ async fn s5r_stop_shuts_down_process() {
         .await
         .expect("stop");
     ext.health().await.expect_err("process should be gone");
+}
+
+#[tokio::test]
+async fn s5r_tool_execution_policy_times_out_the_whole_remote_call() {
+    let runner = runner_with_s5r(minimal_router()).await;
+    let tool = runner_tool(&runner, "timeout_probe", "/tmp").await;
+
+    let result = tool
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
+        .await
+        .expect("tool timeout should be returned as a structured result");
+
+    assert!(result.is_error, "{}", result.content);
+    assert!(
+        result.content.contains("timed out after 50ms"),
+        "{}",
+        result.content
+    );
+    assert_eq!(
+        result.metadata.get("timeoutMs"),
+        Some(&serde_json::json!(50))
+    );
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]

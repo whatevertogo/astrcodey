@@ -16,7 +16,7 @@ use astrcode_extension_sdk::{
         ToolPlanContext,
         internal::{RuntimeHookCallContext, runtime_lifecycle_context},
     },
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
+    tool::{ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
 use astrcode_extensions::{HostBackends, HostRouter, testing::extension_runner_with_extensions};
 
@@ -120,8 +120,6 @@ impl Extension for ModelBindingProbeExtension {
                 parameters: serde_json::json!({ "type": "object" }),
                 strict: false,
                 origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-                timeout_ms: None,
             },
             Arc::new(ModelBindingProbeTool),
         );
