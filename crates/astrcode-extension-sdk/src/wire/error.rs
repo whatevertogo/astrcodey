@@ -53,6 +53,7 @@ wire_error_codes! {
     ResponseTooLarge => "response_too_large",
     SessionNotFound => "session_not_found",
     SessionBusy => "session_busy",
+    NoActiveTurn => "no_active_turn",
     SessionAlreadyExists => "session_already_exists",
     MaxDepthExceeded => "max_depth_exceeded",
     InternalError => "internal_error",

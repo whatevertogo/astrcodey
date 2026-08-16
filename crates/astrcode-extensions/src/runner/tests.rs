@@ -461,6 +461,7 @@ impl Extension for StateProbeExtension {
                 strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             Arc::new(StateProbeTool),
         );
@@ -506,6 +507,7 @@ impl Extension for CallScopeProbeExtension {
                 strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             Arc::new(CallScopeProbeTool {
                 retained: Arc::clone(&self.retained),
@@ -549,6 +551,7 @@ impl Extension for ToolRetirementProbeExtension {
                 strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             Arc::new(StateProbeTool),
         );
@@ -716,6 +719,7 @@ impl Extension for SmallModelProbeExtension {
                 strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             Arc::new(SmallModelProbeTool),
         );
@@ -2122,6 +2126,84 @@ async fn extension_tool_receives_session_state_by_default() {
 
     let result = tool.execute(json!({}), &ctx).await.unwrap();
     assert_eq!(result.content, "true");
+}
+
+struct TimeoutProbeExtension;
+
+struct TimeoutProbeTool;
+
+#[async_trait::async_trait]
+impl Extension for TimeoutProbeExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("timeout-probe", &[])
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool(
+            ToolDefinition {
+                name: "timeoutProbe".into(),
+                description: String::new(),
+                parameters: json!({"type": "object"}),
+                strict: false,
+                origin: ToolOrigin::Extension,
+                execution_mode: ExecutionMode::Sequential,
+                timeout_ms: Some(50),
+            },
+            Arc::new(TimeoutProbeTool),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for TimeoutProbeTool {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        std::future::pending::<
+            Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError>,
+        >()
+        .await
+    }
+}
+
+#[tokio::test]
+async fn extension_tool_timeout_ms_applies_to_in_process_execution() {
+    let runner = ExtensionRunner::new(Duration::from_secs(30));
+    runner
+        .register(Arc::new(TimeoutProbeExtension))
+        .await
+        .unwrap();
+    let tool = runner
+        .tool_catalog_snapshot_typed("D:/workspace")
+        .await
+        .tools
+        .into_iter()
+        .next()
+        .unwrap();
+    let ctx = ToolExecutionContext::new(
+        "session".into(),
+        "D:/workspace",
+        None,
+        None,
+        ToolCapabilities::default(),
+    )
+    .with_resource_lease(ResourceLease::from_plan(&ToolPlan::host(
+        HostResource::Session,
+    )));
+
+    let result = tool.execute(json!({}), &ctx).await.unwrap();
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("timed out after 50ms"),
+        "{}",
+        result.content
+    );
+    assert_eq!(result.metadata.get("timeoutMs"), Some(&json!(50)));
 }
 
 #[tokio::test]

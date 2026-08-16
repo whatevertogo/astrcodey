@@ -78,6 +78,10 @@ impl TurnEvents {
         self.session.read_model().await.map_err(TurnError::from)
     }
 
+    pub(crate) fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
     /// 持久化失败统一收尾：发 live 错误事件后返回原始错误。
     fn durable_failed(publisher: &TurnEvents, error: TurnError) -> TurnError {
         publisher.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);

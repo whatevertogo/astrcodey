@@ -132,6 +132,11 @@ session 用 plan 完成权限决策并签发 resource lease；`execute` 中的�
 均来自 runtime attribution。`ToolContext` 不暴露 core `ToolExecutionContext`、裸
 `SessionOperations` 或 event sink。
 
+`ToolContext::defer_context(content)` 向当前 session 的活跃 turn 追加一条 user message，
+在下一 agent step 边界进入模型上下文；不唤醒 session、不排队也不开新 turn，无活跃 turn 时
+返回类型化 `no_active_turn` 错误。与其他 session 输入投递操作一样需要 `session_control`
+capability。s5r worker 侧的对等入口是 `WorkerInvocationContext::defer_context`。
+
 ### 3.3 公共与专用 context
 
 所有 handler context 都包含同一组公共调用事实；具体 handler 再增加自己的最小输入。
@@ -161,7 +166,7 @@ session 用 plan 完成权限决策并签发 resource lease；`execute` 中的�
 | 入口 | Capability | 调用范围与示例 |
 |------|------------|----------------|
 | `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat` 默认使用 provider 输出上限；`llm_chat_request(...).with_max_output_tokens(n)` 配合对应的 `*_request` 入口可限制单次生成。`*_chat_events` 返回渐进式 `ModelStream`，`*_chat_collected` 返回最终 content 与 model。 |
-| `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
+| `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`inject_or_start` 在活跃 turn 注入、idle 开新 turn；`queue_or_start` 在活跃时 FIFO 排队、当前 turn 结束自动开新 turn；`defer_context` 只注入活跃 turn（下一 step 边界吸收），无活跃 turn 返回 `no_active_turn`，不开新 turn。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
 | `host.session_history()?` | `session_history` | 当前 session 及其已授权后代的 `list_summaries`、`transcript`、`provider_messages`、`token_usage`、`events_page` 与 `snapshot`。 |
 | `host.session_inspect()?` | `session_inspect` | 全局跨 session 只读能力；只授予确需全局观察的扩展。 |
 | `host.tool_results()?` | `tool_result_read` | `read(HostToolResultReadRequest)` 分页读取当前 session 的持久化工具结果；artifact ID 是不含路径语义的 opaque token。 |
@@ -336,7 +341,7 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `small_model` | `astrcode.llm.small_chat` | 调用宿主小模型。 |
 | `session_history` | `astrcode.session.history.*` / `astrcode.session.read_events` | 列出当前 session lineage 的稳定摘要，读取 transcript、provider messages、token usage、snapshot 或按游标读取 durable events；仅在 session-scoped 调用上下文中可用，不能读取无关顶层 session。 |
 | `input_delivery` | `astrcode.session.root.*` | 创建 extension-owned 顶层 session、向其提交输入并读取生命周期状态；用于 channel 等进程级入口，不授予任意 session 控制。 |
-| `session_control` | `astrcode.session.control.*` | 创建、提交、注入、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
+| `session_control` | `astrcode.session.control.*` | 创建、提交、注入（`inject_or_start`）、FIFO 排队（`queue_or_start`）、仅活跃 turn 注入（`defer_context`，无活跃 turn 返回 `no_active_turn`）、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
 | `session_inspect` | `astrcode.session.inspect.*` | 宿主级全局读取权限：跨 session lineage 列出所有宿主可见会话，读取快照、完整投影或 provider 可见消息。只应授予需要全局观察或后台接续会话的扩展。 |
 | `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
 | `authenticated_http` | 管理路由注册 | 注册复用宿主 bearer token、按扩展 id 隔离的 JSON HTTP 路由。 |

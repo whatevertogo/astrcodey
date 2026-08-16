@@ -407,6 +407,7 @@ fn glob_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -433,6 +434,7 @@ fn grep_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

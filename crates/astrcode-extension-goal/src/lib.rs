@@ -755,6 +755,7 @@ fn get_goal_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
     }
 }
 
@@ -781,6 +782,7 @@ fn create_goal_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
     }
 }
 
@@ -803,6 +805,7 @@ fn update_goal_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
     }
 }
 

@@ -324,6 +324,7 @@ mod tests {
                 strict: false,
                 origin: ToolOrigin::Bundled,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             server: server.into(),
             tool: tool.into(),

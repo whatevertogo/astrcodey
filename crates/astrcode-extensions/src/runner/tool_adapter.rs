@@ -232,8 +232,12 @@ impl Tool for HandlerTool {
             arguments.clone(),
             cancellation.clone(),
         );
-        let planning =
-            tokio::time::timeout(self.operation_timeout, self.handler.plan(plan_context));
+        let timeout = self
+            .definition
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.operation_timeout);
+        let planning = tokio::time::timeout(timeout, self.handler.plan(plan_context));
         tokio::select! {
             biased;
             () = ctx.cancellation().cancelled() => {
@@ -246,7 +250,7 @@ impl Tool for HandlerTool {
             },
             result = planning => match result {
                 Ok(result) => result.map_err(extension_plan_error),
-                Err(_) => Err(ToolError::Timeout(self.operation_timeout.as_millis() as u64)),
+                Err(_) => Err(ToolError::Timeout(timeout.as_millis() as u64)),
             },
         }
     }
@@ -335,12 +339,24 @@ impl Tool for HandlerTool {
             small_model_id,
             available_tools,
         );
-        let execution = tokio::select! {
-            biased;
-            result = self.handler.execute(ctx) => result,
-            () = draining.cancelled() => {
-                Err(generation.admission.draining_error())
+        let execution = async {
+            tokio::select! {
+                biased;
+                result = self.handler.execute(ctx) => result,
+                () = draining.cancelled() => {
+                    Err(generation.admission.draining_error())
+                },
+            }
+        };
+        // 进程内工具执行默认不设超时；声明了 timeout_ms 的工具按其值强制限时。
+        let execution = match self.definition.timeout_ms {
+            Some(timeout_ms) => {
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), execution).await {
+                    Ok(result) => result,
+                    Err(_) => Err(ExtensionError::Timeout(timeout_ms)),
+                }
             },
+            None => execution.await,
         };
         let result = match execution {
             Ok(result) => result,

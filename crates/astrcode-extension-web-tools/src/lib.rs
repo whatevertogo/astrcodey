@@ -333,6 +333,7 @@ fn web_search_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
     }
 }
 
@@ -358,6 +359,7 @@ fn fetch_url_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
     }
 }
 

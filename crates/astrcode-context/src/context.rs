@@ -360,6 +360,7 @@ mod tests {
             strict: false,
             origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Sequential,
+            timeout_ms: None,
         }];
         let tools_tokens = estimate_tool_definition_tokens(&tools);
 

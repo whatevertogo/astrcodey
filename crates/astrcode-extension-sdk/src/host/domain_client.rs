@@ -229,6 +229,24 @@ impl<T: HostClientTransport> SessionControlClient<T> {
         invoke::<operations::SessionControlInjectOrStart, _>(&self.transport, &request).await
     }
 
+    /// Queues input behind the active turn (started automatically when it finishes),
+    /// or starts a turn immediately when the session is idle.
+    pub async fn queue_or_start(
+        &self,
+        request: HostSessionInputRequest,
+    ) -> Result<HostSessionDeliveryOutput, T::Error> {
+        invoke::<operations::SessionControlQueueOrStart, _>(&self.transport, &request).await
+    }
+
+    /// Appends input to the active turn only; fails with `no_active_turn` when the
+    /// session is idle instead of starting or queueing a new turn.
+    pub async fn defer_context(
+        &self,
+        request: HostSessionInputRequest,
+    ) -> Result<HostSessionDeliveryOutput, T::Error> {
+        invoke::<operations::SessionControlDeferContext, _>(&self.transport, &request).await
+    }
+
     pub async fn interrupt_and_submit(
         &self,
         request: HostSessionInputRequest,

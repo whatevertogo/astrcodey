@@ -1,74 +1,75 @@
-//! Mid-turn 用户输入在 agent step 边界的同步检测。
+//! Mid-turn 用户输入的 accepted→absorbed 对账。
 //!
-//! 消息由 `TurnScheduler::inject_internal` 立即写入 durable `UserMessage`（无内存 buffer）。
-//! 本模块在每个 step 开始前统计读模型中的 user 条数；增量写入
-//! [`LifecyclePayload::mid_turn_user_messages_synced`] 并随 [`LifecycleEvent::StepStart`] 派发。
+//! 调度层（`TurnScheduler::inject_internal` / queue）接受输入时只写 durable
+//! `UserInputAccepted`（steering 输入的信封归属活跃 `turn_id`），不进 transcript。
+//! turn 在每个 agent step 边界（上一轮工具结果已配对落盘之后）把归属自己的 accepted
+//! 输入按 `accepted_seq` 顺序吸收为 `UserMessage { accepted_seq: Some(..) }`，projection
+//! 据此将条目移出 `pending_inputs`。归属给其它（已结束）turn 的遗留条目留在队列，
+//! 由 queue 链路 FIFO 启动为新 turn。
 
-use astrcode_context::is_synthetic_context_message;
-use astrcode_core::llm::LlmRole;
-use astrcode_session_projection::SessionReadModel;
+use astrcode_core::types::TurnId;
+use astrcode_session_projection::{PendingInput, SessionReadModel};
 
-/// 统计读模型中 provider 可见的非合成 user 消息条数。
-pub(crate) fn count_visible_user_messages(model: &SessionReadModel) -> usize {
+/// 归属本 turn、尚未吸收的 accepted 输入。
+///
+/// `pending_inputs` 按 durable seq 追加，迭代序即 `accepted_seq` 升序。
+pub(crate) fn absorbable_inputs_for_turn<'a>(
+    model: &'a SessionReadModel,
+    turn_id: &TurnId,
+) -> impl Iterator<Item = &'a PendingInput> {
     model
-        .model_context
-        .messages
+        .execution
+        .pending_inputs
         .iter()
-        .filter(|entry| {
-            entry.message.role == LlmRole::User && !is_synthetic_context_message(&entry.message)
-        })
-        .count()
-}
-
-/// 是否存在尚未并入 LLM 上下文的 mid-turn user 消息。
-pub(crate) fn has_pending_mid_turn_user_messages(
-    model: &SessionReadModel,
-    tracked_count: usize,
-) -> bool {
-    count_visible_user_messages(model) > tracked_count
+        .filter(move |input| input.turn_id.as_ref() == Some(turn_id))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use astrcode_core::{llm::LlmMessage, types::SessionId};
-    use astrcode_session_projection::SequencedLlmMessage;
+    use astrcode_core::{
+        event::{DurableEvent, DurableEventPayload, StoredEvent},
+        types::{SessionId, new_turn_id},
+        user_input::UserInput,
+    };
+    use astrcode_session_projection::reduce;
 
     use super::*;
     use crate::test_support::read_model;
 
-    fn model_with_messages(messages: Vec<LlmMessage>) -> SessionReadModel {
-        let mut model = read_model(SessionId::new("s-test"));
-        model.model_context.messages = messages
-            .into_iter()
-            .enumerate()
-            .map(|(updated_seq, message)| SequencedLlmMessage {
-                message: Arc::new(message),
-                updated_seq: updated_seq as u64,
-                origin: None,
-            })
+    #[test]
+    fn absorbable_inputs_match_only_the_owning_turn() {
+        let session_id = SessionId::new("s-steer");
+        let turn_a = new_turn_id();
+        let turn_b = new_turn_id();
+        let mut model = read_model(session_id.clone());
+        let accepted = [
+            (Some(turn_a.clone()), "for a"),
+            (None, "queued"),
+            (Some(turn_b), "for b"),
+            (Some(turn_a.clone()), "for a again"),
+        ];
+        for (index, (turn_id, text)) in accepted.into_iter().enumerate() {
+            let event = StoredEvent::new(
+                index as u64 + 1,
+                DurableEvent::new(
+                    session_id.clone(),
+                    turn_id,
+                    DurableEventPayload::UserInputAccepted {
+                        input: UserInput::text_only(text),
+                    },
+                ),
+            );
+            reduce(&event, &mut model).unwrap();
+        }
+
+        let absorbable: Vec<_> = absorbable_inputs_for_turn(&model, &turn_a)
+            .map(|input| (input.accepted_seq, input.input.text.as_str()))
             .collect();
-        model
-    }
-
-    #[test]
-    fn count_visible_user_messages_excludes_compact_summary_marker() {
-        let model = model_with_messages(vec![
-            LlmMessage::user("real"),
-            LlmMessage::user("<compact_summary>summary</compact_summary>"),
-            LlmMessage::user("also real"),
-        ]);
-        assert_eq!(count_visible_user_messages(&model), 2);
-    }
-
-    #[test]
-    fn has_pending_mid_turn_user_messages_detects_unsynced_inject() {
-        let model = model_with_messages(vec![
-            LlmMessage::user("hello"),
-            LlmMessage::user("mid-turn injected user message"),
-        ]);
-        assert!(!has_pending_mid_turn_user_messages(&model, 2));
-        assert!(has_pending_mid_turn_user_messages(&model, 1));
+        assert_eq!(absorbable, [(1, "for a"), (4, "for a again")]);
+        assert!(
+            absorbable_inputs_for_turn(&model, &new_turn_id())
+                .next()
+                .is_none()
+        );
     }
 }

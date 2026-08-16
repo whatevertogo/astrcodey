@@ -18,7 +18,10 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::CancelToken;
+use super::{
+    CancelToken,
+    host::{HostClient, HostSessionDeliveryOutput, HostSessionInputRequest},
+};
 use crate::{
     WireErrorCode,
     extension::{
@@ -165,6 +168,24 @@ impl WorkerInvocationContext {
 
     pub fn working_dir(&self) -> &Path {
         &self.scoped.working_dir
+    }
+
+    /// Appends a user message to the current session, to be absorbed into the model context
+    /// at the next agent step boundary of the active turn.
+    ///
+    /// The call never wakes the session, queues input, or starts a new turn: when no turn
+    /// is active it fails with a typed `no_active_turn` error. Requires the host to have
+    /// granted the `session_control` capability.
+    pub async fn defer_context(
+        &self,
+        content: impl Into<String>,
+    ) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
+        HostClient::session_control()
+            .defer_context(HostSessionInputRequest {
+                target_session_id: self.session_id().to_owned(),
+                content: content.into(),
+            })
+            .await
     }
 
     pub fn cancel_token(&self) -> &CancelToken {
@@ -544,6 +565,7 @@ impl HandlerRegistry {
                 crate::tool::ExecutionMode::Parallel => ManifestToolMode::Parallel,
                 crate::tool::ExecutionMode::Sequential => ManifestToolMode::Sequential,
             },
+            timeout_ms: def.timeout_ms,
         });
         self.tools.insert(name, RegisteredTool { planner, handler });
         Ok(())

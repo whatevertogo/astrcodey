@@ -111,6 +111,7 @@ fn agent_tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
     }
 }
 

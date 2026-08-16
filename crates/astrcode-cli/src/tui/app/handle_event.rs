@@ -352,8 +352,13 @@ fn apply_event(app: &mut App, event: &Event) {
                     None,
                 );
             } else {
-                // Try custom tool renderer for rich display.
-                if let Some(renderer) = app.tool_renderers.get(tool_name) {
+                // Try custom tool renderer for rich display: exact tool name first,
+                // then the presentation intent declared in result metadata.
+                let renderer = app.tool_renderers.get(tool_name).or_else(|| {
+                    crate::tui::ext::builtin::intent_renderer_name(result)
+                        .and_then(|name| app.tool_renderers.get(name))
+                });
+                if let Some(renderer) = renderer {
                     let ctx = ToolRenderCtx { tool_name };
                     if let Some(spec) = renderer.render_result(result, &ctx) {
                         let fallback =

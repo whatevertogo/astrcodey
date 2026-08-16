@@ -121,6 +121,7 @@ impl Extension for ModelBindingProbeExtension {
                 strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             },
             Arc::new(ModelBindingProbeTool),
         );

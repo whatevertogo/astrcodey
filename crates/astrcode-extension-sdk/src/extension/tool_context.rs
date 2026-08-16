@@ -10,7 +10,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext};
-use crate::{WireErrorCode, host::HostError};
+use crate::{
+    WireErrorCode,
+    host::{HostError, HostSessionDeliveryOutput, HostSessionInputRequest},
+};
 
 /// Immutable input and scoped host capabilities for one extension tool call.
 ///
@@ -107,6 +110,25 @@ impl ToolContext {
 
     pub fn session_id(&self) -> &SessionId {
         self.call.session_id()
+    }
+
+    /// Appends a user message to this tool's own session, to be absorbed into the model
+    /// context at the next agent step boundary of the active turn.
+    ///
+    /// The call never wakes the session, queues input, or starts a new turn: when no turn
+    /// is active it fails with a typed `no_active_turn` host error. Requires the
+    /// `session_control` capability, like the other session input delivery operations.
+    pub async fn defer_context(
+        &self,
+        content: impl Into<String>,
+    ) -> Result<HostSessionDeliveryOutput, HostError> {
+        self.host()
+            .session_control()?
+            .defer_context(HostSessionInputRequest {
+                target_session_id: self.session_id().to_string(),
+                content: content.into(),
+            })
+            .await
     }
 
     pub fn turn_id(&self) -> Option<&str> {

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use astrcode_core::tool::ToolResult;
+use astrcode_core::tool::{ToolPresentation, ToolResult};
 
 use super::{
     fallback::DefaultToolRenderer,
@@ -551,6 +551,20 @@ impl ToolRenderer for UpsertSessionPlanRenderer {
 
 // ─── Registration ─────────────────────────────────────────────────────────
 
+/// presentation intent 对应的内置 renderer 名。
+///
+/// 工具名未命中注册表时（如扩展工具），按结果声明的 intent 复用内置渲染；
+/// `Generic` 或未声明返回 `None`，回退默认摘要。
+pub fn intent_renderer_name(result: &ToolResult) -> Option<&'static str> {
+    match result.presentation() {
+        Some(ToolPresentation::Terminal) => Some("shell"),
+        Some(ToolPresentation::Diff) => Some("write"),
+        Some(ToolPresentation::Search) => Some("grep"),
+        Some(ToolPresentation::Read) => Some("read"),
+        Some(ToolPresentation::Generic) | None => None,
+    }
+}
+
 /// Register all built-in tool renderers.
 pub fn register_builtin(tool_reg: &mut ToolRendererRegistry) {
     tool_reg.register(Arc::new(ReadRenderer));
@@ -563,4 +577,26 @@ pub fn register_builtin(tool_reg: &mut ToolRendererRegistry) {
     tool_reg.register(Arc::new(AgentRenderer));
     tool_reg.register(Arc::new(SwitchModeRenderer));
     tool_reg.register(Arc::new(UpsertSessionPlanRenderer));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_renderer_name_maps_presentation_to_builtin_renderers() {
+        let cases = [
+            (ToolPresentation::Terminal, Some("shell")),
+            (ToolPresentation::Diff, Some("write")),
+            (ToolPresentation::Search, Some("grep")),
+            (ToolPresentation::Read, Some("read")),
+            (ToolPresentation::Generic, None),
+        ];
+        for (presentation, expected) in cases {
+            let result = ToolResult::success("ok").with_presentation(presentation);
+            assert_eq!(intent_renderer_name(&result), expected, "{presentation:?}");
+        }
+
+        assert_eq!(intent_renderer_name(&ToolResult::success("ok")), None);
+    }
 }

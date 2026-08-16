@@ -33,6 +33,42 @@
 - [ ] ACP 协议完善
 - [ ] CodeGraph
 
+## 扩展能力对齐(deepseek-harness 对照,2026-08 缺口分析)
+
+> 完整分析见 `artifacts/tmp/extension-gap-analysis.md`。P0 已完成(queue_or_start/defer_context、timeout_ms、presentation intent、Python s5r SDK);以下为 P1(纯新增)与 P2(大工程/需架构决策)。
+
+### P1 — 纯新增能力
+
+- [ ] **request-error 接管**:新增 `on_provider_error` hook,扩展可对 LLM 调用失败返回 Retry/Abort;与 reactive compaction 重试(`turn_runner.rs:325`)协调顺序
+- [ ] **around-execute hook**:包裹工具执行(换 signal/超时/重试/metrics),现有只有 pre/post;注意与 plan/execute 资源租约的交互
+- [ ] **concludeTurn**:工具正常收官当前 turn(区别于 `cancel_turn` 的 abort 语义,`lifecycle.rs:75`)
+- [ ] **LSP host 领域 client**:locations/hover;按 wire 协议 + SDK + host_router 三处改动套路新增
+- [ ] **settings 宿主服务**:命名空间 + schema 注册 + get/update/watch + 变更推送(现仅静态 `ExtensionConfig`)
+- [ ] **credentials 宿主服务**:凭据引用(resolve/describe/set/unset),替代各扩展自管密钥
+- [ ] **jobs 统一后台任务抽象**:持久句柄 + 完成事件;整合 Session 寿命进程、后台 submit_turn、ExtensionTasks 三件近似物
+- [ ] **LLM provider 注册 seam**:新 capability + registerAdapter/registerModelDiscovery 对等物,放开 `provider_catalog.rs` 编译期常量表(生态生死项)
+- [ ] **subagent 外部委派**:ACP client 侧 provider,可委派给 codex/claude-code 等外部 agent CLI(现仅有 ACP server 侧)
+- [ ] **session_control 补强**:`when_idle` await 式操作、`cancel_turn` 带 `keep_inbox` 选项
+- [ ] **per-call 并发分类器**:`ToolDefinition` 可选 `is_concurrency_safe(args)` 回调(现为静态 `ExecutionMode`;s5r 需权衡往返开销)
+- [ ] **skill provider 注册**:开放 skill catalog 贡献 seam(现来源固定磁盘)
+- [ ] **goal/planMode 程序化服务面**:跨扩展编排用的类型化契约(现为内置扩展,只能靠 session_state/自定义事件交互)
+- [ ] **结构化多内容块工具结果**:`ToolResult` 从单一 String 演进为类型化 content blocks(是 UI 呈现 intent 完整版的前提)
+- [ ] **外部 hooks 桥**:读 Claude Code / Codex `hooks.json` shell hook 配置映射到现有 hook 点(生态迁移 shim)
+
+### P2 — 大工程 / 需架构决策
+
+- [ ] **Code Mode**:`present_as` + codeRuntime + `run_code` 传输 + code-dispatch-log(模型交互协议、执行沙箱、日志管线三层)
+- [ ] **OS 级 sandbox**:landlock / sandbox-exec(现为策略级圈禁;有不可信扩展场景再做)
+- [ ] **PTY terminals**:持久 PTY 会话(现持久进程走管道,无 portable-pty 依赖)
+- [ ] **workflowEngine**:workflow 脚本引擎 + WorkflowRun + workflow/* 事件
+- [ ] **插件包管理/分发**:install 子命令、profile/bundle 组合、版本解析(现为手动拷目录 + `runtime.extensionStates` 开关)
+- [ ] **agent 自修改**:运行时动态加载/卸载扩展 + 审批流(现仅人用的 reload_extensions 路由;安全敏感需先设计)
+- [ ] **逐 chunk stream 拦截**:与 transcript 完整性原则冲突,先决策(现 after-response 只改 final_text 展示)
+- [ ] **system prompt 组装管线**:命名有序 section / 变量插值 / 整体改写;与 KV cache 前缀稳定(`prompt_engine.rs:260`)权衡,先决策
+- [ ] **session title provider / telemetry / spillStore**:小 seam,按需开
+- [ ] **扩展配置 schema 声明**:让宿主/UI 能理解扩展配置(现 `ExtensionConfig` 为黑盒 JSON)
+- [ ] **approval answerer 可替换**:headless 自动审批(现 answerer 固定为前端 UI)
+
 ## 较低优先级
 
 - [ ] 会话 Fork 分支点管理

@@ -914,6 +914,9 @@ impl ExtensionRunner {
             .collect()
     }
 
+    // ExtensionOrigin::Direct 仅存在于 test/testing cfg;非 testing 构建中该 None 臂被编译掉,
+    // filter_map 看似可退化为 map,但 testing 构建需要它——lint 对跨 cfg 形态属误报。
+    #[allow(clippy::unnecessary_filter_map)]
     pub(crate) async fn registered_source_extensions(&self) -> Vec<RegisteredSourceExtension> {
         self.registry
             .extensions

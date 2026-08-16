@@ -106,6 +106,7 @@ pub(super) fn definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

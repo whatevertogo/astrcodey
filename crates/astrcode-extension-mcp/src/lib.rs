@@ -621,6 +621,7 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
         strict: false,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
     })
 }
 
@@ -659,6 +660,7 @@ fn tool_search_tool_definition() -> ToolDefinition {
         strict: false,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
+        timeout_ms: None,
     }
 }
 

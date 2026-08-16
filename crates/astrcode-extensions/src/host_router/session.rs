@@ -136,6 +136,18 @@ impl SessionGroup {
                 }))
                 .await
             },
+            HostOperation::SessionControlQueueOrStart => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    queue_or_start_input(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlDeferContext => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    defer_context(request, ctx)
+                }))
+                .await
+            },
             HostOperation::SessionControlCancelTurn => {
                 Box::pin(dispatch(operation, &input, |request| {
                     cancel_turn(request, ctx)
@@ -835,6 +847,26 @@ async fn inject_input(
     .await
 }
 
+async fn queue_or_start_input(
+    request: HostSessionInputRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
+    deliver_session_input(ctx, request, |ops, access, content| async move {
+        ops.queue_or_start(access.as_access(), content).await
+    })
+    .await
+}
+
+async fn defer_context(
+    request: HostSessionInputRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
+    deliver_session_input(ctx, request, |ops, access, content| async move {
+        ops.defer_context(access.as_access(), content).await
+    })
+    .await
+}
+
 async fn interrupt_and_submit(
     request: HostSessionInputRequest,
     ctx: &InvokeContext,
@@ -944,9 +976,9 @@ where
     Ok(map_output(result))
 }
 
-/// `inject_or_start`/`interrupt_and_submit` 共用的输入投递管线：校验顺序、访问对与
-/// delivery outcome 映射完全一致，仅 ops 方法不同。owned 参数的原因同
-/// `session_target_call`。
+/// 输入投递类操作（`inject_or_start`/`queue_or_start`/`defer_context`/`interrupt_and_submit`）
+/// 共用的投递管线：校验顺序、访问对与 delivery outcome 映射完全一致，仅 ops 方法不同。
+/// owned 参数的原因同 `session_target_call`。
 async fn deliver_session_input<Fut>(
     ctx: &InvokeContext,
     request: HostSessionInputRequest,
@@ -1156,6 +1188,10 @@ mod tests {
             (
                 SessionApiError::SessionBusy("active turn".into()),
                 WireErrorCode::SessionBusy,
+            ),
+            (
+                SessionApiError::NoActiveTurn("child".into()),
+                WireErrorCode::NoActiveTurn,
             ),
             (
                 SessionApiError::MaxDepthExceeded { current: 4, max: 4 },

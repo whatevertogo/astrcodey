@@ -40,6 +40,9 @@ pub struct ManifestTool {
     pub strict: bool,
     #[serde(default)]
     pub mode: ManifestToolMode,
+    /// Per-tool invoke timeout in milliseconds; absent means the host default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1228,6 +1228,7 @@ mod tests {
             strict: true,
             origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
+            timeout_ms: None,
         }
     }
 

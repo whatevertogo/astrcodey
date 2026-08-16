@@ -58,6 +58,7 @@ impl WireError for SessionApiError {
             Self::NotFound(_) => WireErrorCode::SessionNotFound,
             Self::PermissionDenied(_) => WireErrorCode::PermissionDenied,
             Self::SessionBusy(_) => WireErrorCode::SessionBusy,
+            Self::NoActiveTurn(_) => WireErrorCode::NoActiveTurn,
             Self::MaxDepthExceeded { .. } => WireErrorCode::MaxDepthExceeded,
             Self::Unsupported(_) => WireErrorCode::Unsupported,
             Self::Internal(_) => WireErrorCode::InternalError,

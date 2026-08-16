@@ -488,6 +488,7 @@ fn tool_with_origin(name: impl Into<String>, origin: ToolOrigin) -> ToolDefiniti
         parameters: serde_json::json!({"type": "object"}),
         strict: false,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
         prompt: ToolPromptMetadata::default(),
         origin,
     }
@@ -555,6 +556,7 @@ pub struct ToolDefinitionBuilder {
     parameters: serde_json::Value,
     strict: bool,
     execution_mode: ExecutionMode,
+    timeout_ms: Option<u64>,
     prompt: ToolPromptMetadata,
     origin: ToolOrigin,
 }
@@ -593,6 +595,12 @@ impl ToolDefinitionBuilder {
         self
     }
 
+    /// Override the host-default invoke timeout for this tool.
+    pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
     pub fn prompt(mut self, prompt: ToolPromptMetadata) -> Self {
         self.prompt = prompt;
         self
@@ -607,6 +615,7 @@ impl ToolDefinitionBuilder {
                 strict: self.strict,
                 origin: self.origin,
                 execution_mode: self.execution_mode,
+                timeout_ms: self.timeout_ms,
             },
             prompt: self.prompt,
         }
@@ -644,6 +653,16 @@ mod tests {
 
         assert!(tool("strict").strict().build().strict);
         assert!(!tool("dynamic").strict().non_strict().build().strict);
+
+        assert_eq!(tool("plain").description("d").build().timeout_ms, None);
+        assert_eq!(
+            tool("slow")
+                .description("d")
+                .timeout_ms(30_000)
+                .build()
+                .timeout_ms,
+            Some(30_000)
+        );
     }
 
     #[test]

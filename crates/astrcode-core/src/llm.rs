@@ -456,7 +456,17 @@ fn provider_visible_entries<E: ProviderVisibleEntry>(messages: Vec<E>) -> Vec<E>
         .filter(|entry| entry.message().has_provider_visible_content())
         .collect();
     normalize_tool_call_entries(&mut messages);
+    // 写入侧(accepted→absorbed 管线 + turn repair)健康时,这里的截断只对
+    // 崩溃尾部/日志损坏触发;触发即意味着写入侧违规,必须可见。
+    let before_truncate = messages.len();
     truncate_incomplete_tool_entries(&mut messages);
+    if messages.len() < before_truncate {
+        tracing::warn!(
+            dropped = before_truncate - messages.len(),
+            "provider normalization dropped incomplete tool-round entries; transcript write-side \
+             invariant violated"
+        );
+    }
     messages
 }
 
@@ -484,12 +494,18 @@ fn normalize_tool_call_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
 fn truncate_incomplete_tool_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
     use std::collections::HashSet;
 
+    let mut out: Vec<E> = Vec::with_capacity(messages.len());
+    // 未结算工具轮次:assistant 消息在 out 中的位置、全部 call_id、已收结果 id。
     let mut pending: Option<(usize, HashSet<String>, HashSet<String>)> = None;
+    // 轮次未结算时到达的非 Tool 消息(典型:用户在工具执行中插话)。缓冲到该轮
+    // 结算后移动到结果之后,保持「assistant tool_calls 后紧跟 tool results」的
+    // 协议顺序;若该轮到结尾都未结算,则随截断一起丢弃(沿用旧语义)。
+    let mut buffered: Vec<E> = Vec::new();
 
-    for index in 0..messages.len() {
-        let message = messages[index].message();
-        if message.role == LlmRole::Tool {
-            let tool_result_ids: Vec<String> = message
+    for entry in std::mem::take(messages) {
+        if entry.message().role == LlmRole::Tool {
+            let tool_result_ids: Vec<String> = entry
+                .message()
                 .content
                 .iter()
                 .filter_map(|content| match content {
@@ -497,34 +513,39 @@ fn truncate_incomplete_tool_entries<E: ProviderVisibleEntry>(messages: &mut Vec<
                     _ => None,
                 })
                 .collect();
-            if tool_result_ids.is_empty() {
-                messages.truncate(index);
-                return;
-            }
-            let Some((_, call_ids, answered)) = pending.as_mut() else {
-                messages.truncate(index);
+            let matches_pending = !tool_result_ids.is_empty()
+                && pending.as_mut().is_some_and(|(_, call_ids, answered)| {
+                    tool_result_ids
+                        .iter()
+                        .all(|id| call_ids.contains(id) && !answered.contains(id))
+                });
+            let Some((_, call_ids, answered)) = pending.as_mut().filter(|_| matches_pending) else {
+                // 协议异常(空结果、孤儿结果、重复结果)或新一轮 assistant 插断:
+                // 裁掉未结算的那一轮,保持 provider 请求合法。
+                let cut = pending.map(|(start, ..)| start).unwrap_or(out.len());
+                out.truncate(cut);
+                *messages = out;
                 return;
             };
             for tool_call_id in tool_result_ids {
-                if !call_ids.contains(&tool_call_id) || answered.contains(&tool_call_id) {
-                    messages.truncate(index);
-                    return;
-                }
                 answered.insert(tool_call_id);
             }
+            out.push(entry);
             if call_ids.iter().all(|id| answered.contains(id)) {
                 pending = None;
+                out.append(&mut buffered);
             }
             continue;
         }
 
-        if let Some((start, _, _)) = pending {
-            messages.truncate(start);
-            return;
+        if pending.is_some() {
+            buffered.push(entry);
+            continue;
         }
 
-        if message.role == LlmRole::Assistant {
-            let call_ids: HashSet<String> = message
+        if entry.message().role == LlmRole::Assistant {
+            let call_ids: HashSet<String> = entry
+                .message()
                 .content
                 .iter()
                 .filter_map(|content| match content {
@@ -533,14 +554,16 @@ fn truncate_incomplete_tool_entries<E: ProviderVisibleEntry>(messages: &mut Vec<
                 })
                 .collect();
             if !call_ids.is_empty() {
-                pending = Some((index, call_ids, HashSet::new()));
+                pending = Some((out.len(), call_ids, HashSet::new()));
             }
         }
+        out.push(entry);
     }
 
-    if let Some((start, _, _)) = pending {
-        messages.truncate(start);
+    if let Some((start, ..)) = pending {
+        out.truncate(start);
     }
+    *messages = out;
 }
 
 /// 单次 LLM 调用的 token 使用统计。
@@ -1185,6 +1208,89 @@ mod tests {
 
         let visible = provider_visible_messages(messages);
 
+        assert_eq!(visible, vec![LlmMessage::user("start")]);
+    }
+
+    #[test]
+    fn provider_visible_messages_moves_mid_tool_round_user_message_after_the_results() {
+        let assistant_call = LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call-1".into(),
+                name: "askUser".into(),
+                arguments: serde_json::json!({"question": "which one?"}),
+                raw_arguments: None,
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+        let interleaved_user = LlmMessage::user("typed while the tool was pending");
+        let result = LlmMessage::tool("askUser", "call-1", "answer", false);
+        let followup = LlmMessage::assistant("continued");
+        let messages = vec![
+            LlmMessage::user("start"),
+            assistant_call.clone(),
+            interleaved_user.clone(),
+            result.clone(),
+            followup.clone(),
+        ];
+
+        // 用户插话落在未结算的工具轮次里:截断会让之后的一切从 provider 上下文
+        // 永久消失(模型因上下文冻结而原地复读)。正确做法是保持协议顺序,把插话
+        // 移到结果之后,内容全部保留。
+        let visible = provider_visible_messages(messages);
+        assert_eq!(
+            visible,
+            vec![
+                LlmMessage::user("start"),
+                assistant_call.clone(),
+                result.clone(),
+                interleaved_user.clone(),
+                followup.clone(),
+            ]
+        );
+
+        let shared: Vec<Arc<LlmMessage>> = vec![
+            LlmMessage::user("start"),
+            assistant_call,
+            interleaved_user,
+            result,
+            followup,
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let shared_visible = provider_visible_shared_messages(shared);
+        assert_eq!(
+            shared_visible
+                .iter()
+                .map(|message| (**message).clone())
+                .collect::<Vec<_>>(),
+            visible
+        );
+    }
+
+    #[test]
+    fn provider_visible_messages_drops_unsettled_round_before_orphan_result() {
+        let messages = vec![
+            LlmMessage::user("start"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "sleep"}),
+                    raw_arguments: None,
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::tool("shell", "call-other", "orphan", false),
+            LlmMessage::user("after corruption"),
+        ];
+
+        // 孤儿结果属日志损坏:未结算的轮次本身不合法,一并裁掉。
+        let visible = provider_visible_messages(messages);
         assert_eq!(visible, vec![LlmMessage::user("start")]);
     }
 

@@ -137,6 +137,7 @@ impl Extension for S5rExtension {
                     session: Arc::clone(&self.session),
                     extension_id: registration.extension_id.clone(),
                     execution_mode: tool_def.execution_mode,
+                    timeout_ms: tool_def.timeout_ms,
                 }),
             );
         }
@@ -364,6 +365,7 @@ async fn invoke_hook(
             json!({ "on": hook_name, "input": input }),
             invoke_context,
             ExecutionMode::Sequential,
+            None,
         )
         .await
 }
@@ -395,6 +397,7 @@ struct S5rToolHandler {
     session: Arc<S5rSession>,
     extension_id: String,
     execution_mode: ExecutionMode,
+    timeout_ms: Option<u64>,
 }
 
 fn serialize_tool_invocation(request: ToolInvocationRequest) -> Result<Value, ExtensionError> {
@@ -428,7 +431,13 @@ impl ToolHandler for S5rToolHandler {
         let handler = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
         let response = self
             .session
-            .invoke_handler_once(&handler, event, &invoke_context, self.execution_mode)
+            .invoke_handler_once(
+                &handler,
+                event,
+                &invoke_context,
+                self.execution_mode,
+                self.timeout_ms,
+            )
             .await?;
         if response.effect != HandlerEffect::ToolPlan {
             return Err(ExtensionError::Internal(format!(
@@ -465,7 +474,13 @@ impl ToolHandler for S5rToolHandler {
         let hid = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
         let resp = self
             .session
-            .invoke_handler_with_continuations(&hid, event, &invoke_ctx, self.execution_mode)
+            .invoke_handler_with_continuations(
+                &hid,
+                event,
+                &invoke_ctx,
+                self.execution_mode,
+                self.timeout_ms,
+            )
             .await?;
         parse_tool_result(&resp).map(Into::into)
     }
@@ -494,7 +509,13 @@ impl CommandHandler for S5rCommandHandler {
         let hid = handler_id(&self.extension_id, HandlerKind::Command, ctx.command_name())?;
         let resp = self
             .session
-            .invoke_handler_with_continuations(&hid, event, &invoke_ctx, ExecutionMode::Sequential)
+            .invoke_handler_with_continuations(
+                &hid,
+                event,
+                &invoke_ctx,
+                ExecutionMode::Sequential,
+                None,
+            )
             .await?;
         parse_command_result(&resp)
     }
@@ -524,6 +545,7 @@ impl CommandHandler for S5rCommandHandler {
                 event,
                 &invoke_ctx,
                 ExecutionMode::Sequential,
+                None,
             )
             .await?;
         parse_command_completions(&response)
@@ -782,6 +804,7 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 }),
                 &invoke_ctx,
                 ExecutionMode::Sequential,
+                None,
             )
             .await?;
         let reason = || {

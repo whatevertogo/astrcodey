@@ -13,8 +13,8 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
-    types::{SessionId, new_message_id, new_session_id, new_turn_id},
+    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, LlmRole, ModelLimits},
+    types::{SessionId, ToolCallId, new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     builder::manifest,
@@ -56,7 +56,7 @@ impl UntrackedStartForTest for TurnScheduler {
 struct StaticTextLlm;
 struct PendingLlm;
 struct GateFirstLlm {
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
 }
 struct FailSecondEnvelope {
@@ -346,9 +346,17 @@ async fn concurrent_start_with_completion_accepts_only_one_turn() {
 }
 
 #[tokio::test]
-async fn running_inject_writes_user_message_under_active_turn() {
+async fn running_inject_is_accepted_for_the_active_turn_then_absorbed() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let scheduler = build_scheduler(Arc::clone(&store));
+    let release = Arc::new(Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let scheduler = build_scheduler_with_llm(
+        Arc::clone(&store),
+        Arc::new(GateFirstLlm {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        }),
+    );
     let sid = seed_session(&store).await;
 
     let started = scheduler
@@ -356,6 +364,15 @@ async fn running_inject_writes_user_message_under_active_turn() {
         .await
         .unwrap();
     let turn_id = started.turn_id.clone();
+    // 等 turn 进入首个 provider 调用：step 0 的吸收点已过，inject 必然落在 step 内部。
+    for _ in 0..100 {
+        if calls.load(Ordering::Acquire) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(calls.load(Ordering::Acquire) > 0, "turn must be active");
+
     let outcome = scheduler
         .deliver_input(
             sid.clone(),
@@ -371,17 +388,55 @@ async fn running_inject_writes_user_message_under_active_turn() {
         }
     );
 
+    // 接受 ≠ 进入 transcript：只落归属活跃 turn 的 UserInputAccepted。
     let events = store.replay_events(&sid).await.unwrap();
-    let injected = events
+    let accepted = events
         .iter()
-        .find(|e| {
+        .find(|event| {
             matches!(
-                &e.payload,
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "inject me"
+            )
+        })
+        .expect("inject must durably accept the input");
+    assert_eq!(accepted.turn_id.as_ref(), Some(&turn_id));
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::UserMessage { text, .. } if text == "inject me"
+        )),
+        "accepted input must not enter the transcript before the next step boundary"
+    );
+
+    release.add_permits(1);
+    let result = started.handle.wait().await.unwrap();
+    assert!(result.output.is_ok(), "{:?}", result.output);
+
+    // step 边界吸收：UserMessage 归属同一 turn 并按 accepted_seq 回链。
+    let events = store.replay_events(&sid).await.unwrap();
+    let absorbed = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
                 DurableEventPayload::UserMessage { text, .. } if text == "inject me"
             )
         })
-        .expect("injected message");
-    assert_eq!(injected.turn_id.as_ref(), Some(&turn_id));
+        .expect("absorbed UserMessage must be durable after the turn continues");
+    assert_eq!(absorbed.turn_id.as_ref(), Some(&turn_id));
+    let DurableEventPayload::UserMessage { accepted_seq, .. } = &absorbed.payload else {
+        unreachable!()
+    };
+    assert_eq!(*accepted_seq, Some(accepted.seq));
+    assert!(
+        store
+            .session_read_model(&sid)
+            .await
+            .unwrap()
+            .execution
+            .pending_inputs
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -546,7 +601,7 @@ async fn queued_input_retries_after_a_transient_start_failure() {
     let scheduler = build_scheduler_with_runtime(
         Arc::clone(&store),
         Arc::new(GateFirstLlm {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             release: Arc::clone(&release),
         }),
         extension_runner,
@@ -600,7 +655,7 @@ async fn completion_handoff_never_overtakes_an_older_queued_input() {
     let scheduler = build_scheduler_with_llm(
         Arc::clone(&store),
         Arc::new(GateFirstLlm {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             release: Arc::clone(&release),
         }),
     );
@@ -1035,5 +1090,95 @@ async fn queue_drains_turn_finished_but_not_settled() {
     assert_eq!(
         user_messages, 2,
         "second input must be consumed into a new turn"
+    );
+}
+
+#[tokio::test]
+async fn repair_stale_repairs_trailing_unanswered_tool_call() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+    let turn_id = new_turn_id();
+
+    // 崩溃尾部:tool call 已请求但终结事件未落盘,turn 已被终态事件收口(phase 回到 Idle)。
+    for payload in [
+        DurableEventPayload::TurnStarted,
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: "do something".into(),
+            attachments: Vec::new(),
+            accepted_seq: None,
+        },
+        DurableEventPayload::AssistantMessageCompleted {
+            message_id: new_message_id(),
+            text: String::new(),
+            reasoning_content: None,
+        },
+        DurableEventPayload::ToolCallRequested {
+            call_id: ToolCallId::new("call-orphan"),
+            tool_name: "read".into(),
+            arguments: serde_json::json!({}),
+            raw_arguments: None,
+        },
+        DurableEventPayload::TurnCompleted {
+            finish_reason: "interrupted".into(),
+        },
+    ] {
+        store
+            .append_event(DurableEvent::new(
+                sid.clone(),
+                Some(turn_id.clone()),
+                payload,
+            ))
+            .await
+            .unwrap();
+    }
+
+    scheduler.repair_stale(&sid).await.unwrap();
+
+    let events = store.replay_events(&sid).await.unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::ToolCallFailed { call_id, .. } if call_id.as_str() == "call-orphan"
+        )),
+        "repair must append a durable ToolCallFailed for the trailing unanswered call"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DurableEventPayload::TurnAbortedContext)),
+        "repair must append TurnAbortedContext alongside the failure"
+    );
+
+    // provider 可见上下文恢复合法:assistant tool_calls 后紧跟其 tool 结果。
+    let model = store.session_read_model(&sid).await.unwrap();
+    let messages = astrcode_core::llm::provider_visible_messages(
+        model
+            .model_context
+            .messages
+            .iter()
+            .map(|message| (*message.message).clone())
+            .collect(),
+    );
+    let assistant_pos = messages
+        .iter()
+        .position(|message| {
+            message.role == LlmRole::Assistant
+                && message.content.iter().any(|content| {
+                    matches!(content, LlmContent::ToolCall { call_id, .. } if call_id == "call-orphan")
+                })
+        })
+        .expect("assistant tool call must remain visible");
+    assert!(
+        matches!(
+            messages.get(assistant_pos + 1),
+            Some(message) if message.role == LlmRole::Tool
+                && message.content.iter().any(|content| matches!(
+                    content,
+                    LlmContent::ToolResult { tool_call_id, .. } if tool_call_id == "call-orphan"
+                ))
+        ),
+        "tool result must immediately follow the assistant tool call after repair: {messages:?}"
     );
 }

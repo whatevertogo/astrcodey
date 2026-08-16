@@ -110,6 +110,10 @@ tool 名称或旧式 `on` 标签。`Plan` 先返回 `HandlerEffect::ToolPlan` �
 `astrcode.*` 调用仍会依据本次调用的 resource lease 再校验。Host 与 worker 对未知 phase、请求
 或 plan DTO 中的未知字段、以及错误 effect 都直接拒绝，不提供旧式单阶段或旧 envelope 回退。
 
+manifest 的工具条目可携带可选 `timeout_ms`，按工具覆盖宿主默认 invoke 超时；工具 effect 的
+output 可携带可选 `metadata`（如 presentation intent），供 UI 消费、不进入模型上下文。两个字段
+都受未知字段拒绝约束：旧版本宿主/worker 遇到它们会按严格性规则拒绝，发布时需同版本配套。
+
 `host_operations` 是去重的 operation 名字符串列表，只表示该 Host 版本实现了哪些 operation。
 operation 的类型化参数、返回值、能力要求和 stream/cancel 属性由共享 wire 模块定义，不在握手中
 重复传输。Worker 可通过
@@ -143,4 +147,6 @@ cargo run -p astrcode-extension-sdk --features conformance --bin s5r-conformance
 `--extension-id` 是 Host 在 Initialize 中指定的权威预期身份。套件覆盖 initialize、activate、
 unary、stream、cancel、nested invoke、未知错误码、clean shutdown，
 以及畸形/超大帧拒绝。Rust 参考 guest 位于
-`crates/astrcode-extensions/tests/s5r-guest/`。
+`crates/astrcode-extensions/tests/s5r-guest/`。注意套件比运行时宿主更严格：它把三个 v1
+feature（`nested_invoke_v1`、`model_stream_v1`、`custom_event_v1`）全部设为 required，
+只声明 `nested_invoke_v1` 的 worker 能跑通真实宿主但过不了 conformance。

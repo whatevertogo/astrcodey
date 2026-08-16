@@ -87,6 +87,7 @@ impl Tool for NamedTool {
             strict: false,
             origin: ToolOrigin::Extension,
             execution_mode: ExecutionMode::Sequential,
+            timeout_ms: None,
         }
     }
 

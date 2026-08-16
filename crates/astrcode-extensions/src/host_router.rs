@@ -2190,6 +2190,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_session_queue_or_start_and_defer_context_return_delivery_outcomes() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(Arc::new(CapturingSessionOps::default())),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+        let input = json!({
+            "target_session_id": "child",
+            "content": "continue"
+        });
+
+        let queued = router
+            .invoke(
+                "astrcode.session.control.queue_or_start",
+                input.clone(),
+                &ctx,
+            )
+            .await
+            .expect("queue session input");
+        assert_eq!(queued, json!({ "status": "queued", "queue_len": 1 }));
+
+        let deferred = router
+            .invoke("astrcode.session.control.defer_context", input, &ctx)
+            .await
+            .expect("defer session input");
+        assert_eq!(
+            deferred,
+            json!({ "status": "injected", "turn_id": "turn-deferred" })
+        );
+
+        let unauthorized = InvokeContext {
+            declared_capabilities: Vec::new(),
+            ..ctx
+        };
+        for capability in [
+            "astrcode.session.control.queue_or_start",
+            "astrcode.session.control.defer_context",
+        ] {
+            let error = router
+                .invoke(
+                    capability,
+                    json!({ "target_session_id": "child", "content": "continue" }),
+                    &unauthorized,
+                )
+                .await
+                .expect_err("session_control operations require the declared capability");
+            assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+        }
+    }
+
+    #[tokio::test]
     async fn invoke_session_lifecycle_apis_forward_scoped_target() {
         let router = HostRouter::from_backends(HostBackends::default());
         let ops = Arc::new(CapturingSessionOps::default());
@@ -2894,6 +2947,24 @@ mod tests {
         ) -> Result<SessionDeliveryOutcome, SessionApiError> {
             Ok(SessionDeliveryOutcome::Injected {
                 turn_id: "turn-injected".into(),
+            })
+        }
+
+        async fn queue_or_start(
+            &self,
+            _access: SessionAccess<'_>,
+            _content: String,
+        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+            Ok(SessionDeliveryOutcome::Queued { queue_len: 1 })
+        }
+
+        async fn defer_context(
+            &self,
+            _access: SessionAccess<'_>,
+            _content: String,
+        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+            Ok(SessionDeliveryOutcome::Injected {
+                turn_id: "turn-deferred".into(),
             })
         }
 

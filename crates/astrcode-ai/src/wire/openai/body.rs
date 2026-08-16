@@ -542,6 +542,7 @@ mod tests {
             strict: false,
             origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
+            timeout_ms: None,
         };
         let messages = [
             Arc::new(LlmMessage::system("sys")),

@@ -272,6 +272,16 @@ host_operations! {
         response: crate::wire::session::HostCreateSessionOutput,
         description: "Create a child session",
     }
+    SessionControlDeferContext {
+        name: "astrcode.session.control.defer_context",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        request: crate::wire::host::HostSessionInputRequest,
+        response: crate::wire::host::HostSessionDeliveryOutput,
+        description: "Append input to the active turn without starting or queueing a new one",
+    }
     SessionControlDispose {
         name: "astrcode.session.control.dispose",
         required: Some(ExtensionCapability::SessionControl),
@@ -311,6 +321,16 @@ host_operations! {
         request: crate::wire::host::HostSessionInputRequest,
         response: crate::wire::host::HostSessionDeliveryOutput,
         description: "Interrupt the active turn and submit new input",
+    }
+    SessionControlQueueOrStart {
+        name: "astrcode.session.control.queue_or_start",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        request: crate::wire::host::HostSessionInputRequest,
+        response: crate::wire::host::HostSessionDeliveryOutput,
+        description: "Queue input behind the active turn or start a turn when idle",
     }
     SessionControlReactivate {
         name: "astrcode.session.control.reactivate",

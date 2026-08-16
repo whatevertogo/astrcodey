@@ -18,9 +18,42 @@ import {
   ShellToolDetails,
   ToolResultDetails,
 } from './details'
-import { registerToolRenderer } from './registry'
+import { registerToolRenderer, type ToolJsonRecord } from './registry'
 import { todoWriteRenderSpec, todoWriteSummaryLine } from './todoWrite'
 import { RenderSpecViewer } from '../RenderSpecViewer'
+
+// Presentation intents declared via ToolResult metadata key `presentation`.
+// Values mirror the snake_case wire strings of astrcode-core `ToolPresentation`;
+// each maps to an existing built-in details component — no new renderers here.
+const presentationIntentRenderers = {
+  terminal: ShellToolDetails,
+  diff: FileToolDetails,
+  search: SearchToolDetails,
+  read: ReadToolDetails,
+} as const
+
+type PresentationIntent = keyof typeof presentationIntentRenderers
+
+function presentationIntentOf(
+  meta: ToolJsonRecord
+): PresentationIntent | undefined {
+  const intent = stringValue(meta, 'presentation')
+  return intent != null && intent in presentationIntentRenderers
+    ? (intent as PresentationIntent)
+    : undefined
+}
+
+registerToolRenderer({
+  id: 'builtin:presentation-intent',
+  priority: 50,
+  match: ({ meta }) => presentationIntentOf(meta) !== undefined,
+  render: ({ block, meta }) => {
+    const intent = presentationIntentOf(meta)
+    if (!intent) return undefined
+    const Details = presentationIntentRenderers[intent]
+    return <Details block={block} />
+  },
+})
 
 registerToolRenderer({
   id: 'builtin:read',

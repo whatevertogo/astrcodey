@@ -2016,6 +2016,8 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         ops.scheduler.registry().has_active(&child_id),
         "child turn should be active before inject"
     );
+    // 等 turn 进入首个 provider 调用：step 0 的吸收点已过，inject 必然落在 step 内部。
+    release.wait_until_started().await;
 
     let outcome = ops
         .inject_message(
@@ -2025,26 +2027,58 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         .await
         .unwrap();
 
+    // 接受 ≠ 进入 transcript：只落归属活跃 turn 的 UserInputAccepted。
     let events = store.replay_events(&child_id).await.unwrap();
-    let injected = events
+    let accepted = events
         .iter()
-        .find(|e| {
+        .find(|event| {
             matches!(
-                &e.payload,
-                DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "mid-turn inject"
             )
         })
-        .expect("injected UserMessage must be durable");
-    assert!(
-        injected.turn_id.is_some(),
-        "active-turn inject must bind turn_id (same as TurnScheduler::inject)"
-    );
+        .expect("inject must durably accept the input");
+    let injected_turn_id = accepted
+        .turn_id
+        .as_ref()
+        .expect("active-turn inject must bind turn_id")
+        .clone();
     assert_eq!(
         outcome,
         SessionDeliveryOutcome::Injected {
-            turn_id: injected.turn_id.as_ref().unwrap().to_string(),
+            turn_id: injected_turn_id.to_string(),
         }
     );
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+        )),
+        "accepted input must not enter the transcript before the next step boundary"
+    );
+
+    // step 边界吸收：放行首个 provider 响应后,turn 为吸收再跑一个 step。
+    release.notify_one();
+    let mut absorbed = None;
+    for _ in 0..100 {
+        let events = store.replay_events(&child_id).await.unwrap();
+        absorbed = events.into_iter().find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+            )
+        });
+        if absorbed.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let absorbed = absorbed.expect("absorbed UserMessage must be durable");
+    assert_eq!(absorbed.turn_id.as_ref(), Some(&injected_turn_id));
+    let DurableEventPayload::UserMessage { accepted_seq, .. } = &absorbed.payload else {
+        unreachable!()
+    };
+    assert_eq!(*accepted_seq, Some(accepted.seq));
 
     release.notify_one();
     for _ in 0..100 {
@@ -2194,6 +2228,237 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
         injected.turn_id.as_ref(),
         Some(&first_turn_id),
         "late injected user message must start a fresh turn, not attach to the completed one"
+    );
+}
+
+#[tokio::test]
+async fn queue_or_start_when_idle_starts_turn() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "queued user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+
+    for _ in 0..50 {
+        if ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        ops.scheduler.registry().has_active(&session_id),
+        "idle queue_or_start must start a turn"
+    );
+
+    release.notify_one();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn queue_or_start_during_active_turn_queues_fifo() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "first user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+    release.wait_until_started().await;
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "queued follow-up".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, SessionDeliveryOutcome::Queued { queue_len: 1 });
+
+    // 排队 ≠ 注入：pending 输入不归属当前活跃 turn。
+    let events = store.replay_events(&session_id).await.unwrap();
+    let accepted = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "queued follow-up"
+            )
+        })
+        .expect("queued input must be durably accepted");
+    assert!(
+        accepted.turn_id.is_none(),
+        "queued input must not bind the active turn"
+    );
+
+    // 当前 turn 结束后,队列自动开新 turn 并吸收该输入。
+    release.notify_one();
+    let mut drained = false;
+    for _ in 0..100 {
+        let events = store.replay_events(&session_id).await.unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserMessage { text, .. } if text == "queued follow-up"
+            )
+        }) {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(drained, "queued input must start a follow-up turn");
+
+    release.notify_waiters();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn defer_context_during_active_turn_binds_turn_id() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "first user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+    release.wait_until_started().await;
+    let active_turn_id = ops
+        .scheduler
+        .registry()
+        .active_turn_id(&session_id)
+        .expect("turn must be active before defer_context");
+
+    let outcome = ops
+        .defer_context(
+            SessionAccess::same(session_id.as_str()),
+            "deferred context".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        SessionDeliveryOutcome::Injected {
+            turn_id: active_turn_id.to_string(),
+        }
+    );
+
+    let events = store.replay_events(&session_id).await.unwrap();
+    let accepted = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "deferred context"
+            )
+        })
+        .expect("defer_context must durably accept the input");
+    assert_eq!(accepted.turn_id.as_ref(), Some(&active_turn_id));
+
+    release.notify_waiters();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn defer_context_when_idle_returns_no_active_turn() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+    assert!(!ops.scheduler.registry().has_active(&session_id));
+
+    let error = ops
+        .defer_context(
+            SessionAccess::same(session_id.as_str()),
+            "deferred context".into(),
+        )
+        .await
+        .expect_err("idle defer_context must fail instead of starting a turn");
+    assert!(
+        matches!(error, astrcode_core::tool::SessionApiError::NoActiveTurn(_)),
+        "idle defer_context must return a typed no-active-turn error, got {error:?}"
+    );
+    assert!(!ops.scheduler.registry().has_active(&session_id));
+    assert!(
+        store
+            .replay_events(&session_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "deferred context"
+            )),
+        "failed defer_context must not durably accept the input"
     );
 }
 

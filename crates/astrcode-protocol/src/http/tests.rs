@@ -125,6 +125,7 @@ fn tool_definition_dto_round_trips_and_requires_execution_contract() {
         strict: false,
         origin: astrcode_core::tool::ToolOrigin::Bundled,
         execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
+        timeout_ms: None,
     }
     .into();
 

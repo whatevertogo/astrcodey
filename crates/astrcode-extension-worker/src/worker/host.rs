@@ -566,6 +566,8 @@ mod host_tests {
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
             HostOperation::SessionControlInjectOrStart,
+            HostOperation::SessionControlQueueOrStart,
+            HostOperation::SessionControlDeferContext,
             HostOperation::SessionControlInterruptAndSubmit,
             HostOperation::SessionControlCancelTurn,
             HostOperation::SessionControlExecutionView,
@@ -666,6 +668,8 @@ mod host_tests {
             ))
             .await;
             expect_backend_error(HostClient::session_control().inject_or_start(input())).await;
+            expect_backend_error(HostClient::session_control().queue_or_start(input())).await;
+            expect_backend_error(HostClient::session_control().defer_context(input())).await;
             expect_backend_error(HostClient::session_control().interrupt_and_submit(input())).await;
             expect_backend_error(HostClient::session_control().cancel_turn(target())).await;
             expect_backend_error(HostClient::session_control().execution_view(target())).await;

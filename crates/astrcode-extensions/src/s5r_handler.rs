@@ -74,7 +74,7 @@ pub(crate) fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, Exte
             Ok(ToolResult::text(
                 outcome.content,
                 outcome.is_error,
-                Default::default(),
+                outcome.metadata,
             ))
         },
         effect => Err(unexpected_effect("tool", effect)),

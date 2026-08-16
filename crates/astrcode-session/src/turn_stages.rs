@@ -130,8 +130,9 @@ pub(crate) struct TurnState {
     transcript: TurnTranscript,
     reactive_compact_used: bool,
     continue_after_stop_count: u32,
-    /// 已并入 LLM 上下文的非合成 user 消息数（用于 steer flush 检测）。
-    synced_user_message_count: usize,
+    /// 最近一个 step 的 provider `input_tokens` 与连续相同计数(frozen 视图检测)。
+    last_step_input_tokens: Option<u64>,
+    same_input_tokens_streak: u32,
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
@@ -165,7 +166,8 @@ impl TurnState {
             transcript: TurnTranscript::default(),
             reactive_compact_used: false,
             continue_after_stop_count: 0,
-            synced_user_message_count: 0,
+            last_step_input_tokens: None,
+            same_input_tokens_streak: 0,
             active_deferred_tools,
             all_tools,
             visible_tools,
@@ -210,12 +212,15 @@ impl TurnState {
         self.continue_after_stop_count = self.continue_after_stop_count.saturating_add(1);
     }
 
-    pub(crate) fn synced_user_message_count(&self) -> usize {
-        self.synced_user_message_count
-    }
-
-    pub(crate) fn set_synced_user_message_count(&mut self, count: usize) {
-        self.synced_user_message_count = count;
+    /// 记录本 step 的 provider `input_tokens`,返回连续相同计数(含本次)。
+    pub(crate) fn record_step_input_tokens(&mut self, input_tokens: u64) -> u32 {
+        if self.last_step_input_tokens == Some(input_tokens) {
+            self.same_input_tokens_streak = self.same_input_tokens_streak.saturating_add(1);
+        } else {
+            self.last_step_input_tokens = Some(input_tokens);
+            self.same_input_tokens_streak = 1;
+        }
+        self.same_input_tokens_streak
     }
 
     pub(crate) fn record_tool_result(&mut self, result: ToolResult) {

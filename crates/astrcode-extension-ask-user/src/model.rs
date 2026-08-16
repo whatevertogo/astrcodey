@@ -220,6 +220,7 @@ pub(crate) fn tool_definition() -> ToolDefinition {
         strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
+        timeout_ms: None,
     }
 }
 

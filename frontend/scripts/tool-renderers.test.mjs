@@ -54,3 +54,37 @@ assert.equal(shellRenderer?.id, 'builtin:shell')
 const shellDetails = renderToStaticMarkup(shellRenderer.render?.(shellContext))
 assert.match(shellDetails, /timeout.*180s/)
 assert.doesNotMatch(shellDetails, /timeout.*30s/)
+
+// Presentation intent: an extension tool (no name-matched renderer) declares
+// metadata.presentation and is dispatched to the mapped built-in renderer.
+const intentContext = toolContext(
+  'acme_deploy',
+  { target: 'prod' },
+  { presentation: 'terminal', command: 'deploy --prod', exitCode: 0 },
+  'deployed'
+)
+const intentRenderer = getToolRenderer(intentContext)
+assert.equal(intentRenderer?.id, 'builtin:presentation-intent')
+const intentDetails = renderToStaticMarkup(
+  intentRenderer.render?.(intentContext)
+)
+assert.match(intentDetails, /deploy --prod/)
+assert.match(intentDetails, /deployed/)
+
+// Unknown intent values fall through to the generic rendering path.
+const unknownIntentContext = toolContext(
+  'acme_deploy',
+  { target: 'prod' },
+  { presentation: 'hologram' },
+  'done'
+)
+assert.equal(getToolRenderer(unknownIntentContext), undefined)
+
+// Name-matched built-in renderers still win over a declared intent.
+const namedWithIntent = toolContext(
+  'read',
+  { path: 'src/lib.rs' },
+  { presentation: 'terminal' },
+  'content'
+)
+assert.equal(getToolRenderer(namedWithIntent)?.id, 'builtin:read')

@@ -20,6 +20,9 @@ pub struct PendingToolApprovalView {
 pub struct PendingInput {
     pub accepted_seq: u64,
     pub input: UserInput,
+    /// 接受时归属的 turn(steering inject);排队输入为 `None`,由后续 turn FIFO 启动。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +82,7 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
             execution.pending_inputs.push(PendingInput {
                 accepted_seq: event.seq,
                 input: input.clone(),
+                turn_id: event.turn_id.clone(),
             });
         },
         DurableEventPayload::UserMessage { accepted_seq, .. } => {
@@ -161,14 +165,16 @@ mod tests {
     #[test]
     fn matching_user_message_consumes_accepted_input() {
         let session_id = SessionId::new("session-pending");
+        let turn_id = astrcode_core::types::new_turn_id();
         let input = UserInput::text_only("queued");
         let mut execution = SessionExecutionState::default();
 
         apply_event(
             &StoredEvent::new(
                 1,
-                DurableEvent::session(
+                DurableEvent::new(
                     session_id.clone(),
+                    Some(turn_id.clone()),
                     DurableEventPayload::UserInputAccepted {
                         input: input.clone(),
                     },
@@ -177,6 +183,11 @@ mod tests {
             &mut execution,
         );
         assert_eq!(execution.pending_inputs.len(), 1);
+        assert_eq!(
+            execution.pending_inputs[0].turn_id.as_ref(),
+            Some(&turn_id),
+            "pending input must keep the accepting turn attribution from the envelope"
+        );
 
         apply_event(
             &StoredEvent::new(

@@ -29,8 +29,8 @@ pub mod event {
 
 pub mod tool {
     pub use astrcode_core::tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata,
-        ToolPromptTag, ToolResult,
+        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPresentation,
+        ToolPromptMetadata, ToolPromptTag, ToolResult,
         access::{FileOperation, HostResource, ResourceAccess, ToolPlan},
         read_image::ReadToolInlinePayload,
         tool_metadata,

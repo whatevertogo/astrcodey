@@ -297,6 +297,44 @@ worker 的长时间 tool 应等待或轮询 `WorkerInvocationContext::cancel_tok
 bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks().cancellation()` 或把调用取消
 令牌克隆进受管任务。两种 token 来源不能跨 prelude 混用。
 
+## 工具超时
+
+宿主对单次工具调用有默认超时（S5R worker 为 120 秒）。需要更长或更短预算的工具，在定义时用
+`.timeout_ms()` 按工具覆盖：
+
+```rust
+worker_tool("deploy")
+    .description("Deploy the current release")
+    .parameters(json!({"type": "object"}))
+    .timeout_ms(600_000) // 10 分钟
+    .build()
+```
+
+bundled 扩展使用同一个 builder（`astrcode_extension_sdk::builder::tool`），行为一致：未声明
+`timeout_ms` 的工具沿用宿主默认。超时到达后 LLM 会看到带 `timeoutMs` 元数据的结构化错误结果。
+
+## 结果呈现 intent
+
+工具结果可以声明呈现 intent，让前端和 TUI 选用对应的内置渲染（终端、diff、搜索结果、文件读取），
+而不是落到通用渲染。intent 写在 `ToolResult` 的 metadata 里，不进 LLM prompt，也不影响运行时控制流：
+
+```rust
+use astrcode_extension_sdk::tool::{ToolPresentation, ToolResult};
+
+// bundled handler 直接返回 ToolResult：
+Ok(ToolResult::success(output).with_presentation(ToolPresentation::Terminal))
+
+// worker handler 用 tool_result 携带 metadata 返回：
+Ok(tool_result(
+    ToolResult::success(output).with_presentation(ToolPresentation::Terminal),
+))
+```
+
+可选值：`Generic`（默认，等同不声明）、`Terminal`、`Diff`、`Search`、`Read`。无法识别的 intent
+字符串按未声明处理，因此旧版本宿主/前端遇到新 intent 时安全回退到通用渲染。声明 intent 只是选择
+渲染种类；配套的展示字段（如终端渲染读取的 `command`、`exitCode`）仍按对应内置工具的约定放进
+metadata，缺失时渲染组件会降级显示。
+
 ## Durable custom event 与幂等
 
 session durable custom event 是 **at-least-once** 投递：handler 成功返回只代表本次副作用完成，

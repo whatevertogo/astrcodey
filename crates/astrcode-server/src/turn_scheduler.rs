@@ -7,12 +7,13 @@
 //! | 策略 | running | idle | 典型调用方 |
 //! |------|---------|------|------------|
 //! | [`InputDelivery::StartNew`] | busy | 开 turn | 测试、必须独占 turn 的路径 |
-//! | [`InputDelivery::InjectOnly`] | durable `UserMessage`（同 `turn_id`） | no active turn | HTTP `POST .../inject` |
-//! | [`InputDelivery::InjectIfRunningElseStart`] | durable `UserMessage`（同 `turn_id`） | 开 turn | `SessionOperations::inject_message`、子 session 完成通知 |
-//! | [`InputDelivery::QueueIfRunningElseStart`] | durable pending FIFO | 开 turn | HTTP/ACP `submit_input`（连发 prompt 不打断当前 turn） |
+//! | [`InputDelivery::InjectOnly`] | durable `UserInputAccepted`（归属活跃 `turn_id`） | no active turn | HTTP `POST .../inject`、扩展 `defer_context` |
+//! | [`InputDelivery::InjectIfRunningElseStart`] | durable `UserInputAccepted`（归属活跃 `turn_id`） | 开 turn | `SessionOperations::inject_message`、子 session 完成通知 |
+//! | [`InputDelivery::QueueIfRunningElseStart`] | durable pending FIFO | 开 turn | HTTP/ACP `submit_input`（连发 prompt 不打断当前 turn）、扩展 `queue_or_start` |
 //!
-//! **Steer** 不是第三种策略：它是 `Inject` 写 EventLog 后，由 `TurnRunner` 在下一 agent step
-//! 将消息并入 LLM 上下文（见 `astrcode_session::steer`）。
+//! **Steer** 不是第三种策略：inject 与 queue 共用 accepted→absorbed 管线——接受时只落
+//! `UserInputAccepted`（不进 transcript），由被归属的 turn 在 agent step 边界（上一轮工具
+//! 结果已配对落盘之后）按 `accepted_seq` 吸收为 `UserMessage`（见 `astrcode_session::steer`）。
 //!
 //! # Cancel / Abort 分层
 //!
@@ -116,7 +117,8 @@ pub enum InputDelivery {
     StartNew,
     /// 必须 running；否则返回 [`TurnScheduleError::NoActiveTurn`]。
     InjectOnly,
-    /// running 时写入当前 turn 的 durable `UserMessage`（mid-turn steer）；idle 时 start。
+    /// running 时落归属当前 turn 的 durable `UserInputAccepted`（mid-turn steer，由该 turn
+    /// 在 step 边界吸收）；idle 时 start。
     InjectIfRunningElseStart,
     /// running 时入队，当前 turn 结束后 FIFO 开新 turn；idle 时 start。
     QueueIfRunningElseStart,
@@ -127,9 +129,17 @@ pub enum InputDelivery {
 /// 输入投递结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryOutcome {
-    Started { turn_id: TurnId },
-    Injected { turn_id: TurnId },
-    Queued { queue_len: usize },
+    Started {
+        turn_id: TurnId,
+    },
+    /// 输入已 durable 接受并归属该 turn(`UserInputAccepted`);进入 transcript 的
+    /// `UserMessage` 由该 turn 在下一 step 边界吸收时提交。
+    Injected {
+        turn_id: TurnId,
+    },
+    Queued {
+        queue_len: usize,
+    },
 }
 
 pub struct StartedExecution {

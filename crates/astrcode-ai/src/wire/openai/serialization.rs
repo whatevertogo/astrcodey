@@ -81,6 +81,7 @@ mod strict_tool_tests {
             strict,
             origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
+            timeout_ms: None,
         }
     }
 

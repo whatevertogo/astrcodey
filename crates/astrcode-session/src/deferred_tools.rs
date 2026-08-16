@@ -181,6 +181,7 @@ mod tests {
             strict: false,
             origin: ToolOrigin::Bundled,
             execution_mode: Default::default(),
+            timeout_ms: None,
         }
     }
 

@@ -49,6 +49,9 @@ pub struct ProviderContributionData {
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
+    /// UI-facing result metadata (e.g. presentation intent); not part of the LLM prompt.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

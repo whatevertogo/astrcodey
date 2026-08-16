@@ -438,6 +438,7 @@ mod tests {
             strict: false,
             origin,
             execution_mode: ExecutionMode::Sequential,
+            timeout_ms: None,
         }
     }
 

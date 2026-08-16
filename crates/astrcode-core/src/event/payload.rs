@@ -143,7 +143,7 @@ pub enum DurableEventPayload {
         message_id: MessageId,
         text: String,
         attachments: Vec<MessageAttachment>,
-        /// 对应 `UserInputAccepted` 的 durable seq；直接启动或 turn 中注入时为空。
+        /// 对应 `UserInputAccepted` 的 durable seq；仅 turn 启动直接提交时为空。
         #[serde(skip_serializing_if = "Option::is_none")]
         accepted_seq: Option<u64>,
     },

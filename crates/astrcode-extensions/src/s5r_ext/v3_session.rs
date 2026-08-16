@@ -42,7 +42,6 @@ use crate::{
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
 const INVOKE_TIMEOUT_MS: u64 = 120_000;
-const INVOKE_TIMEOUT: Duration = Duration::from_millis(INVOKE_TIMEOUT_MS);
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const MAX_PARALLEL_INVOKES: u32 = 8;
 const MAX_CONTINUATION_DEPTH: u32 = 16;
@@ -354,7 +353,7 @@ impl S5rV3Session {
             .acquire_many_owned(permits)
             .await
             .map_err(|_| self.draining_error())?;
-        self.invoke_handler_unadmitted(handler_id, event, invoke_context)
+        self.invoke_handler_unadmitted(handler_id, event, invoke_context, None)
             .await
     }
 
@@ -363,6 +362,7 @@ impl S5rV3Session {
         handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
+        timeout_ms: Option<u64>,
     ) -> Result<HandlerResult, ExtensionError> {
         let handle = self
             .handle
@@ -386,7 +386,8 @@ impl S5rV3Session {
                 ExtensionError::Internal(format!("serialize handler request: {error}"))
             })?,
         );
-        let output = run_with_cancellation(invoke, invoke_context.cancel_token.as_ref()).await?;
+        let output =
+            run_with_cancellation(invoke, invoke_context.cancel_token.as_ref(), timeout_ms).await?;
         serde_json::from_value(output)
             .map_err(|error| ExtensionError::Internal(format!("parse HandlerResult: {error}")))
     }
@@ -397,6 +398,7 @@ impl S5rV3Session {
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
+        timeout_ms: Option<u64>,
     ) -> Result<HandlerResult, ExtensionError> {
         let attribution = HandlerAttribution::from_event(&event);
         let mut stack = vec![(handler_id.clone(), event, 0u32)];
@@ -414,7 +416,7 @@ impl S5rV3Session {
                 )));
             }
             let mut result = self
-                .invoke_handler_unadmitted(&handler_id, event, invoke_context)
+                .invoke_handler_unadmitted(&handler_id, event, invoke_context, timeout_ms)
                 .await?;
             let continuations = std::mem::take(&mut result.continuations);
             if first.is_none() {
@@ -436,6 +438,7 @@ impl S5rV3Session {
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
+        timeout_ms: Option<u64>,
     ) -> Result<HandlerResult, ExtensionError> {
         let permits = invocation_permit_count(execution_mode);
         let _permit = Arc::clone(&self.admission)
@@ -443,7 +446,7 @@ impl S5rV3Session {
             .await
             .map_err(|_| self.draining_error())?;
         let result = self
-            .invoke_handler_unadmitted(handler_id, event, invoke_context)
+            .invoke_handler_unadmitted(handler_id, event, invoke_context, timeout_ms)
             .await?;
         if !result.continuations.is_empty() {
             return Err(ExtensionError::Internal(
@@ -531,20 +534,23 @@ impl Drop for S5rV3Session {
 async fn run_with_cancellation(
     invoke: impl std::future::Future<Output = Result<Value, InvokeError>>,
     cancellation: Option<&CancellationToken>,
+    timeout_ms: Option<u64>,
 ) -> Result<Value, ExtensionError> {
+    let timeout_ms = timeout_ms.unwrap_or(INVOKE_TIMEOUT_MS);
+    let timeout = Duration::from_millis(timeout_ms);
     let result = if let Some(cancellation) = cancellation {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
                 return Err(ExtensionError::Cancelled);
             },
-            result = tokio::time::timeout(INVOKE_TIMEOUT, invoke) => result,
+            result = tokio::time::timeout(timeout, invoke) => result,
         }
     } else {
-        tokio::time::timeout(INVOKE_TIMEOUT, invoke).await
+        tokio::time::timeout(timeout, invoke).await
     };
     result
-        .map_err(|_| ExtensionError::Timeout(INVOKE_TIMEOUT_MS))?
+        .map_err(|_| ExtensionError::Timeout(timeout_ms))?
         .map_err(invoke_error_to_extension_error)
 }
 
@@ -657,7 +663,7 @@ mod tests {
             ),
             (InvokeError::PeerClosed, WireErrorCode::PeerClosed, false),
         ] {
-            let error = run_with_cancellation(async { Err(invoke_error) }, None)
+            let error = run_with_cancellation(async { Err(invoke_error) }, None, None)
                 .await
                 .unwrap_err();
 
@@ -679,6 +685,7 @@ mod tests {
         let error = run_with_cancellation(
             std::future::pending::<Result<Value, InvokeError>>(),
             Some(&cancellation),
+            None,
         )
         .await
         .unwrap_err();
@@ -686,6 +693,22 @@ mod tests {
         assert!(
             matches!(error, ExtensionError::Cancelled),
             "cancellation must not collapse into ExtensionError::Internal, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_tool_timeout_overrides_the_default_invoke_timeout() {
+        let error = run_with_cancellation(
+            std::future::pending::<Result<Value, InvokeError>>(),
+            None,
+            Some(10),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ExtensionError::Timeout(10)),
+            "per-tool timeout must win, got {error}"
         );
     }
 

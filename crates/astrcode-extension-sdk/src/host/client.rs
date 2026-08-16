@@ -164,6 +164,8 @@ mod tests {
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
             HostOperation::SessionControlInjectOrStart,
+            HostOperation::SessionControlQueueOrStart,
+            HostOperation::SessionControlDeferContext,
             HostOperation::SessionControlInterruptAndSubmit,
             HostOperation::SessionControlCancelTurn,
             HostOperation::SessionControlExecutionView,
@@ -292,6 +294,8 @@ mod tests {
         ))
         .await;
         expect_backend_error(host.session_control().unwrap().inject_or_start(input())).await;
+        expect_backend_error(host.session_control().unwrap().queue_or_start(input())).await;
+        expect_backend_error(host.session_control().unwrap().defer_context(input())).await;
         expect_backend_error(
             host.session_control()
                 .unwrap()

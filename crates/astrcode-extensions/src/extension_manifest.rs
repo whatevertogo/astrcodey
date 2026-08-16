@@ -194,6 +194,7 @@ fn normalize_tool(tool: ManifestTool) -> Result<ToolDefinition, String> {
         strict: tool.strict,
         origin: ToolOrigin::Extension,
         execution_mode,
+        timeout_ms: tool.timeout_ms,
     })
 }
 
@@ -307,6 +308,12 @@ mod tests {
                     "description": "",
                     "parameters": {"type": "object"},
                     "strict": true
+                },
+                {
+                    "name": "slow",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "timeout_ms": 300000
                 }
             ],
             "commands": [{
@@ -349,6 +356,9 @@ mod tests {
             ExecutionMode::Sequential
         );
         assert!(registration.tools[1].strict);
+        assert_eq!(registration.tools[0].timeout_ms, None);
+        assert_eq!(registration.tools[1].timeout_ms, None);
+        assert_eq!(registration.tools[2].timeout_ms, Some(300_000));
         assert!(registration.capabilities.is_empty());
         assert!(registration.http_routes.is_empty());
         assert_eq!(registration.commands[0].description, "Command metadata");

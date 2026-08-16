@@ -432,3 +432,18 @@ pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {
         }),
     )
 }
+
+/// 携带完整 [`ToolResult`](crate::tool::ToolResult)（含 metadata）的工具结果。
+///
+/// `metadata` 随 ToolOutcome 传给宿主并流向 UI（如 `presentation` 呈现 intent），
+/// 不进入 LLM prompt。
+pub fn tool_result(result: crate::tool::ToolResult) -> HandlerResult {
+    HandlerResult::effect(
+        HandlerEffect::ToolOutcome,
+        json!({
+            "content": result.content,
+            "is_error": result.is_error,
+            "metadata": result.metadata,
+        }),
+    )
+}

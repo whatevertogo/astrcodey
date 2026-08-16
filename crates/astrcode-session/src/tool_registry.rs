@@ -376,6 +376,7 @@ mod tests {
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             }
         }
 
@@ -410,6 +411,7 @@ mod tests {
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
+                timeout_ms: None,
             }
         }
 

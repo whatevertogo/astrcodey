@@ -657,6 +657,8 @@ HostRouter/S5R transport adapter。
 | `configure_tools(request)` | 只影响目标 session 后续 turn；不能扩大父链已经限制的工具集合。 |
 | `submit_turn(request)` | 向已有 session 提交 turn；`wait_for_result=false` 只表示提交成功，不表示运行完成。 |
 | `inject_or_start(request)` | 活跃 turn 时注入，否则原子启动新 turn；返回 Started、Injected 或 Queued。 |
+| `queue_or_start(request)` | 活跃 turn 时排队 FIFO、当前 turn 结束后自动开新 turn；idle 时直接开新 turn。 |
+| `defer_context(request)` | 仅在有活跃 turn 时注入，下一 step 边界进入上下文，不唤醒也不开新 turn；无活跃 turn 返回 `no_active_turn`。`ToolContext::defer_context` 以其当前 session 为 target。 |
 | `interrupt_and_submit(request)` | 在同一 delivery gate 中取消当前 turn 并提交新输入，避免中间空窗。 |
 | `cancel_turn(target)` | 返回类型化 `HostSessionCancelOutput { cancelled }`；`cancelled=false` 明确表示没有活跃 turn 的幂等 no-op。 |
 | `execution_view(target)` | 返回热状态：phase、active turn 和队列长度，不读取完整历史。 |

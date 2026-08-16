@@ -38,7 +38,7 @@ use crate::{
     projection_context::context_snapshot,
     session::Session,
     session_runtime_services::RuntimeGenerationView,
-    steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
+    steer::absorbable_inputs_for_turn,
     tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
@@ -80,6 +80,9 @@ struct StepHooks<'a> {
     lifecycle_ctx: &'a RuntimeLifecycleContext,
     publisher: &'a Arc<TurnEvents>,
 }
+
+/// 连续相同 `input_tokens` 达到该步数时告警(frozen provider 视图检测)。
+const FROZEN_INPUT_TOKENS_STREAK_WARN: u32 = 3;
 
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
@@ -232,16 +235,12 @@ impl TurnLoop {
                 .ok()
                 .and_then(|model| model.execution.active_step.as_ref()),
         );
-        match initial_model {
-            Ok(model) => state.set_synced_user_message_count(count_visible_user_messages(&model)),
-            Err(error) => {
-                // 降级为 0 会让首 step 把全部历史 user 消息误判为 mid-turn 新增，必须可观测。
-                tracing::warn!(
-                    error = %error,
-                    "failed to snapshot model for mid-turn user message tracking; \
-                     treating all user messages as unsynced"
-                );
-            },
+        if let Err(error) = &initial_model {
+            // 拿不到快照就丢失 active_step 恢复信息,必须可观测。
+            tracing::warn!(
+                error = %error,
+                "failed to snapshot model at turn start; resuming without active step state"
+            );
         }
 
         // Step
@@ -308,7 +307,7 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
-        let mid_turn_synced = self.sync_mid_turn_user_messages(publisher, state).await?;
+        let mid_turn_synced = self.sync_mid_turn_user_messages(publisher).await?;
         let step_ctx = runtime_lifecycle_for_step_start(lifecycle_ctx.clone(), mid_turn_synced);
 
         extension_runner
@@ -418,7 +417,7 @@ impl TurnLoop {
                 })
                 .await?;
         }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
             .await?;
         self.acknowledge_provider_request(
             hooks.extension_runner,
@@ -442,7 +441,7 @@ impl TurnLoop {
         }
 
         if self
-            .has_pending_mid_turn_user_messages(hooks.publisher, state)
+            .has_pending_mid_turn_user_messages(hooks.publisher)
             .await?
         {
             tracing::debug!("pending mid-turn user messages; running one more agent step");
@@ -503,7 +502,7 @@ impl TurnLoop {
                 })
                 .await?;
         }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
             .await?;
 
         self.tools_stage(hooks, request, state, &tool_calls, early_results)
@@ -655,13 +654,29 @@ impl TurnLoop {
     }
 
     /// 持久化 token usage（若 provider 提供了统计）。
+    ///
+    /// 同一会话连续多个 step `input_tokens` 恒定时打 frozen 告警——写入侧保证 durable
+    /// transcript 永远 provider-valid 之后,恒定不变通常意味着 provider 视图被冻结
+    /// (如上下文在同一位置被反复截断)。
     async fn persist_token_usage(
         &self,
         publisher: &TurnEvents,
         usage: Option<LlmTokenUsage>,
         model_context_window: usize,
+        state: &mut TurnState,
     ) -> Result<(), TurnError> {
         if let Some(usage) = usage {
+            if let Some(input_tokens) = usage.input_tokens {
+                let streak = state.record_step_input_tokens(input_tokens);
+                if streak >= FROZEN_INPUT_TOKENS_STREAK_WARN {
+                    tracing::warn!(
+                        target: "astrcode::perf",
+                        input_tokens,
+                        streak,
+                        "input_tokens identical across consecutive steps; provider view may be frozen"
+                    );
+                }
+            }
             publisher
                 .durable(DurableEventPayload::TokenUsageRecorded {
                     usage,
@@ -982,38 +997,46 @@ impl TurnLoop {
         }
     }
 
-    /// 每个 agent step 开始前：重载读模型，返回自上次 step 以来新增的 durable user 消息条数。
-    async fn sync_mid_turn_user_messages(
-        &self,
-        publisher: &TurnEvents,
-        state: &mut TurnState,
-    ) -> Result<u32, TurnError> {
+    /// 每个 agent step 开始前：把归属本 turn 的 accepted 输入吸收为 durable `UserMessage`。
+    ///
+    /// 吸收点位于上一轮工具结果配对落盘之后，因此插话永远不会进入未结算的工具轮次;
+    /// 返回值（吸收条数）随 `LifecycleEvent::StepStart` 作为 `mid_turn_user_messages_synced`
+    /// 派发。
+    async fn sync_mid_turn_user_messages(&self, publisher: &TurnEvents) -> Result<u32, TurnError> {
         let model = publisher.snapshot_model().await?;
-        let current = count_visible_user_messages(&model);
-        let previous = state.synced_user_message_count();
-        let synced = current.saturating_sub(previous) as u32;
+        let absorbable: Vec<_> = absorbable_inputs_for_turn(&model, publisher.turn_id())
+            .map(|input| (input.accepted_seq, input.input.clone()))
+            .collect();
+        let synced = absorbable.len() as u32;
+        for (accepted_seq, input) in absorbable {
+            publisher
+                .durable(DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: input.text,
+                    attachments: input.attachments,
+                    accepted_seq: Some(accepted_seq),
+                })
+                .await?;
+        }
         if synced > 0 {
             tracing::debug!(
                 synced,
-                previous,
-                current,
-                "mid-turn user messages synced into context for next step"
+                "mid-turn user messages absorbed into transcript at step boundary"
             );
         }
-        state.set_synced_user_message_count(current);
         Ok(synced)
     }
 
+    /// 是否存在归属本 turn、尚未吸收的 accepted 输入（complete step 据此再跑一个 step
+    /// 完成吸收，而不是把输入留到 turn 结束后由队列启动）。
     async fn has_pending_mid_turn_user_messages(
         &self,
         publisher: &TurnEvents,
-        state: &TurnState,
     ) -> Result<bool, TurnError> {
         let model = publisher.snapshot_model().await?;
-        Ok(has_pending_mid_turn_user_messages(
-            &model,
-            state.synced_user_message_count(),
-        ))
+        Ok(absorbable_inputs_for_turn(&model, publisher.turn_id())
+            .next()
+            .is_some())
     }
 
     async fn should_continue_after_stop(

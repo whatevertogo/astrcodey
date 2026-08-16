@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::{DurableEventPayload, Phase},
-    types::{SessionId, TurnId, new_message_id},
+    types::{SessionId, TurnId},
     user_input::UserInput,
 };
 use astrcode_session::{
@@ -592,6 +592,8 @@ impl TurnScheduler {
         Ok(())
     }
 
+    /// Mid-turn 注入只落 `UserInputAccepted`(归属活跃 turn),不写 transcript;
+    /// 由该 turn 在 step 边界吸收为 `UserMessage`(见 `astrcode_session::steer`)。
     pub(super) async fn inject_internal(
         &self,
         turn_id: &TurnId,
@@ -601,12 +603,7 @@ impl TurnScheduler {
         session
             .emit_durable(
                 Some(turn_id),
-                DurableEventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: input.text,
-                    attachments: input.attachments,
-                    accepted_seq: None,
-                },
+                DurableEventPayload::UserInputAccepted { input },
             )
             .await
             .map_err(TurnScheduleError::EventEmit)?;

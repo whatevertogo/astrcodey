@@ -467,6 +467,7 @@ mod tests {
             strict: false,
             origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
+            timeout_ms: None,
         }];
         let config = AnthropicRequestConfig {
             model_id: "claude-test",
@@ -511,6 +512,7 @@ mod tests {
                     strict,
                     origin: ToolOrigin::Bundled,
                     execution_mode: ExecutionMode::Parallel,
+                    timeout_ms: None,
                 }],
                 supported,
             );

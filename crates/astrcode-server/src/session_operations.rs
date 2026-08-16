@@ -15,7 +15,7 @@ use astrcode_core::{
 use crate::{
     child_session::{ChildCleanup, ChildSessionCoordinator},
     session_manager::SessionManager,
-    turn_scheduler::{InputDelivery, TurnScheduler},
+    turn_scheduler::{InputDelivery, TurnScheduleError, TurnScheduler},
 };
 
 pub struct ServerSessionOperations {
@@ -169,6 +169,40 @@ impl SessionOperations for ServerSessionOperations {
     ) -> Result<SessionDeliveryOutcome, SessionApiError> {
         self.deliver_message(access, content, InputDelivery::InjectIfRunningElseStart)
             .await
+    }
+
+    async fn queue_or_start(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        self.deliver_message(access, content, InputDelivery::QueueIfRunningElseStart)
+            .await
+    }
+
+    async fn defer_context(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        let (_, target_sid) = self.verified_session_ids(access).await?;
+        let outcome = self
+            .scheduler
+            .deliver_input(
+                target_sid.clone(),
+                astrcode_core::user_input::UserInput::text_only(content),
+                InputDelivery::InjectOnly,
+            )
+            .await
+            .map_err(|error| match error {
+                TurnScheduleError::NoActiveTurn => {
+                    SessionApiError::NoActiveTurn(target_sid.to_string())
+                },
+                error => SessionApiError::internal(error),
+            })?;
+
+        self.session_manager.sync_durable_events(&target_sid).await;
+        Ok(delivery_outcome(outcome))
     }
 
     async fn interrupt_and_submit(

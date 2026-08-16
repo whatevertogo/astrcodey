@@ -55,6 +55,9 @@ pub struct ToolDefinition {
     /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。
     #[serde(default)]
     pub execution_mode: ExecutionMode,
+    /// 单次工具调用的超时（毫秒）。`None` 表示使用宿主默认超时。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// 工具提示词元数据，**仅服务于 system prompt 中的"详细工具指引"段落**。
@@ -276,6 +279,58 @@ impl ToolResult {
         self.duration_ms = duration_ms;
         self
     }
+
+    /// 声明本次结果的呈现 intent，供 UI 选择对应的内置渲染。
+    ///
+    /// 只写入 [`PRESENTATION_METADATA_KEY`] 元数据；metadata 不进 LLM prompt，
+    /// 运行时不得据此改变控制流。
+    pub fn with_presentation(mut self, presentation: ToolPresentation) -> Self {
+        self.metadata.insert(
+            PRESENTATION_METADATA_KEY.to_owned(),
+            serde_json::Value::String(presentation.as_str().to_owned()),
+        );
+        self
+    }
+
+    /// 读取结果声明的呈现 intent；未声明或值无法识别时返回 `None`。
+    pub fn presentation(&self) -> Option<ToolPresentation> {
+        serde_json::from_value(self.metadata.get(PRESENTATION_METADATA_KEY)?.clone()).ok()
+    }
+}
+
+/// `ToolResult.metadata` 中呈现 intent 的键。前端/TUI 按此键拾取 intent。
+pub const PRESENTATION_METADATA_KEY: &str = "presentation";
+
+/// 工具结果的呈现 intent。
+///
+/// 每个变体对应 UI 的一种内置渲染（与前端/TUI 注册表中的渲染种类一一对应），
+/// 序列化为 snake_case 字符串。未知字符串由消费方按未声明处理，保证向前兼容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPresentation {
+    /// 默认通用渲染（与不声明 intent 等价）。
+    Generic,
+    /// 终端/命令输出风格渲染。
+    Terminal,
+    /// 文件变更/diff 风格渲染。
+    Diff,
+    /// 搜索结果风格渲染。
+    Search,
+    /// 文件读取风格渲染。
+    Read,
+}
+
+impl ToolPresentation {
+    /// wire 字符串值，与 serde 的 snake_case 表示一致（由测试保证）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Terminal => "terminal",
+            Self::Diff => "diff",
+            Self::Search => "search",
+            Self::Read => "read",
+        }
+    }
 }
 
 /// 工具执行的显式终态。
@@ -423,6 +478,30 @@ pub trait SessionOperations: Send + Sync {
         access: SessionAccess<'_>,
         content: String,
     ) -> Result<SessionDeliveryOutcome, SessionApiError>;
+
+    /// 目标 session 运行中时将输入排入 FIFO 队列（当前 turn 结束后自动开新 turn），
+    /// idle 时直接开新 turn。
+    async fn queue_or_start(
+        &self,
+        _access: SessionAccess<'_>,
+        _content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "queue_or_start is not supported by this host".into(),
+        ))
+    }
+
+    /// 仅向目标 session 的活跃 turn 注入一条 UserMessage（下一 step 边界吸收）；
+    /// 无活跃 turn 时返回 [`SessionApiError::NoActiveTurn`]，不排队也不开新 turn。
+    async fn defer_context(
+        &self,
+        _access: SessionAccess<'_>,
+        _content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "defer_context is not supported by this host".into(),
+        ))
+    }
 
     /// 中断目标会话的活跃 turn，并提交新的用户输入。
     async fn interrupt_and_submit(
@@ -740,6 +819,8 @@ pub enum SessionApiError {
     PermissionDenied(String),
     #[error("session busy: {0}")]
     SessionBusy(String),
+    #[error("no active turn in session: {0}")]
+    NoActiveTurn(String),
     #[error("max depth exceeded: current={current}, max={max}")]
     MaxDepthExceeded { current: usize, max: usize },
     #[error("unsupported session operation: {0}")]
@@ -1096,4 +1177,65 @@ pub trait Tool: Send + Sync {
         arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definition_timeout_ms_is_optional_on_the_wire() {
+        let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "probe",
+            "description": "",
+            "parameters": {"type": "object"},
+            "origin": "extension",
+        }))
+        .unwrap();
+        assert_eq!(definition.timeout_ms, None);
+
+        let serialized = serde_json::to_value(&definition).unwrap();
+        assert!(serialized.get("timeout_ms").is_none());
+
+        let with_timeout = ToolDefinition {
+            timeout_ms: Some(5_000),
+            ..definition
+        };
+        let serialized = serde_json::to_value(&with_timeout).unwrap();
+        assert_eq!(serialized["timeout_ms"], serde_json::json!(5_000));
+        let roundtrip: ToolDefinition = serde_json::from_value(serialized).unwrap();
+        assert_eq!(roundtrip.timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn presentation_as_str_matches_serde_wire_values() {
+        for presentation in [
+            ToolPresentation::Generic,
+            ToolPresentation::Terminal,
+            ToolPresentation::Diff,
+            ToolPresentation::Search,
+            ToolPresentation::Read,
+        ] {
+            let wire = serde_json::to_value(presentation).unwrap();
+            assert_eq!(wire, serde_json::json!(presentation.as_str()));
+        }
+    }
+
+    #[test]
+    fn presentation_intent_roundtrips_through_metadata() {
+        let result = ToolResult::success("ok").with_presentation(ToolPresentation::Terminal);
+        assert_eq!(result.presentation(), Some(ToolPresentation::Terminal));
+        assert_eq!(
+            result.metadata[PRESENTATION_METADATA_KEY],
+            serde_json::json!("terminal")
+        );
+
+        assert_eq!(ToolResult::success("ok").presentation(), None);
+
+        let unknown = ToolResult::success("ok").with_metadata(tool_metadata([(
+            PRESENTATION_METADATA_KEY,
+            serde_json::json!("future_intent"),
+        )]));
+        assert_eq!(unknown.presentation(), None);
+    }
 }
