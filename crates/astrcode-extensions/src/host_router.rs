@@ -288,7 +288,8 @@ pub struct InvokeContext {
     pub generation_gate: ExtensionGenerationGate,
     /// Extension-to-extension HTTP dispatcher bound to the caller's runtime snapshot.
     pub(crate) public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
-    /// 当前调用是否在 peer 专用 I/O 线程上（同步 host import；IPC 子进程共用）。
+    /// 调用是否来自 handler 上下文（有父调用，可能持有 admission permit)。
+    /// 是 `wait_for_result` 死锁防护的唯一判据；后台任务（无父调用）不持有 permit。
     pub on_peer_io_thread: bool,
 }
 
@@ -1963,6 +1964,99 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code_enum(), Some(WireErrorCode::InvalidRequest));
+
+        let root_ctx = InvokeContext {
+            extension_id: "test-extension".into(),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            on_peer_io_thread: true,
+            ..Default::default()
+        };
+        let err = router
+            .invoke(
+                "astrcode.session.root.submit_turn",
+                json!({
+                    "target_session_id": "root",
+                    "user_prompt": "hello",
+                    "wait_for_result": true
+                }),
+                &root_ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code_enum(), Some(WireErrorCode::InvalidRequest));
+    }
+
+    #[tokio::test]
+    async fn invoke_root_submit_allows_wait_for_result_without_parent_invoke() {
+        let store = Arc::new(InMemoryEventStore::new());
+        seed_session(&store, "owned-root", None, Some("channel-a")).await;
+        let session_reader: Arc<dyn SessionReader> = store;
+        let router = HostRouter::from_backends(HostBackends {
+            session_reader: Some(session_reader),
+            ..Default::default()
+        });
+        let ops = Arc::new(CapturingSessionOps::default());
+        // 无父调用的后台上下文:无 session/working_dir,不持有 admission permit。
+        let ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            on_peer_io_thread: false,
+            ..Default::default()
+        };
+
+        let output = router
+            .invoke(
+                "astrcode.session.root.submit_turn",
+                json!({
+                    "target_session_id": "owned-root",
+                    "user_prompt": "hello",
+                    "wait_for_result": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("background root submit may wait for the result");
+        assert_eq!(output["status"], "completed");
+        assert_eq!(output["content"], "done");
+    }
+
+    #[tokio::test]
+    async fn invoke_root_submit_returns_turn_failure_details_to_the_caller() {
+        let store = Arc::new(InMemoryEventStore::new());
+        seed_session(&store, "owned-root", None, Some("channel-a")).await;
+        let session_reader: Arc<dyn SessionReader> = store;
+        let router = HostRouter::from_backends(HostBackends {
+            session_reader: Some(session_reader),
+            ..Default::default()
+        });
+        let ops = Arc::new(CapturingSessionOps::default());
+        let ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            session_ops: Some(ops),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            on_peer_io_thread: false,
+            ..Default::default()
+        };
+
+        // wait_for_result 的 turn 失败时,失败详情随错误响应返回,调用方无需刮内部日志。
+        let err = router
+            .invoke(
+                "astrcode.session.root.submit_turn",
+                json!({
+                    "target_session_id": "owned-root",
+                    "user_prompt": "fail",
+                    "wait_for_result": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("failed turn must surface as an error response");
+        assert_eq!(err.code_enum(), Some(WireErrorCode::InternalError));
+        assert!(
+            err.message.contains("quota exhausted"),
+            "turn failure detail must reach the caller: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -2574,6 +2668,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_create_resolves_working_dir_from_request_or_context() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let explicit = tempfile::tempdir().expect("explicit working_dir");
+        let ops = Arc::new(CapturingSessionOps::default());
+        let router = HostRouter::from_backends(HostBackends::default());
+        let detached_ctx = || InvokeContext {
+            extension_id: "channel-a".into(),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            ..Default::default()
+        };
+
+        // 显式 working_dir:detached 上下文(无 ctx.working_dir)也可创建。
+        let created = router
+            .invoke(
+                "astrcode.session.root.create",
+                json!({ "working_dir": explicit.path().to_string_lossy() }),
+                &detached_ctx(),
+            )
+            .await
+            .expect("explicit working_dir creates root without workspace context");
+        assert_eq!(created["session_id"], "root");
+        {
+            let root_creates = ops.root_creates.lock().expect("root creates lock");
+            assert_eq!(
+                root_creates[0].working_dir,
+                std::fs::canonicalize(explicit.path())
+                    .expect("canonicalize explicit working_dir")
+                    .to_string_lossy()
+            );
+        }
+
+        // 省略 working_dir:回退 ctx.working_dir(handler 内调用的既有行为)。
+        let created = router
+            .invoke(
+                "astrcode.session.root.create",
+                json!({}),
+                &InvokeContext {
+                    working_dir: Some(workspace.path().to_string_lossy().into_owned()),
+                    ..detached_ctx()
+                },
+            )
+            .await
+            .expect("legacy empty request falls back to the call context");
+        assert_eq!(created["session_id"], "root");
+        {
+            let root_creates = ops.root_creates.lock().expect("root creates lock");
+            assert_eq!(
+                root_creates[1].working_dir,
+                workspace.path().to_string_lossy()
+            );
+        }
+
+        // 请求与上下文都缺 working_dir:context_unavailable。
+        let missing = router
+            .invoke("astrcode.session.root.create", json!({}), &detached_ctx())
+            .await
+            .expect_err("create without any working_dir must fail");
+        assert_eq!(missing.code_enum(), Some(WireErrorCode::ContextUnavailable));
+
+        // 显式 working_dir 必须是已存在的目录。
+        let invalid = router
+            .invoke(
+                "astrcode.session.root.create",
+                json!({ "working_dir": explicit.path().join("missing").to_string_lossy() }),
+                &detached_ctx(),
+            )
+            .await
+            .expect_err("nonexistent working_dir must be rejected");
+        assert_eq!(invalid.code_enum(), Some(WireErrorCode::InvalidInput));
+    }
+
+    #[tokio::test]
+    async fn dispose_root_recycles_only_owned_top_level_sessions() {
+        let store = Arc::new(InMemoryEventStore::new());
+        seed_session(&store, "owned-root", None, Some("channel-a")).await;
+        seed_session(&store, "foreign-root", None, Some("channel-b")).await;
+        seed_session(&store, "owned-child", Some("owned-root"), Some("channel-a")).await;
+        let session_reader: Arc<dyn SessionReader> = store;
+        let router = HostRouter::from_backends(HostBackends {
+            session_reader: Some(session_reader),
+            ..Default::default()
+        });
+        let ops = Arc::new(CapturingSessionOps::default());
+        let ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            ..Default::default()
+        };
+
+        let disposed = router
+            .invoke(
+                "astrcode.session.root.dispose",
+                json!({ "target_session_id": "owned-root" }),
+                &ctx,
+            )
+            .await
+            .expect("dispose owned root");
+        assert_eq!(disposed, json!({ "ok": true }));
+        {
+            let calls = ops.lifecycle_calls.lock().expect("lifecycle calls");
+            assert_eq!(
+                calls.as_slice(),
+                &[("recycle".into(), "owned-root".into(), "owned-root".into())]
+            );
+        }
+
+        for target in ["foreign-root", "owned-child"] {
+            let error = router
+                .invoke(
+                    "astrcode.session.root.dispose",
+                    json!({ "target_session_id": target }),
+                    &ctx,
+                )
+                .await
+                .expect_err("foreign or child session must be rejected");
+            assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+        }
+        assert_eq!(
+            ops.lifecycle_calls.lock().expect("lifecycle calls").len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn invoke_stream_rejects_precancelled_token() {
         let router = HostRouter::from_backends(HostBackends::default());
         let token = CancellationToken::new();
@@ -2999,7 +3219,21 @@ mod tests {
             &self,
             request: SubmitTurnRequest,
         ) -> Result<SubmitTurnResult, SessionApiError> {
+            let wait_for_result = request.wait_for_result;
+            // 触发器:user_prompt 为 "fail" 时模拟 turn 失败(对应 server 侧
+            // TurnScheduleError::Turn 经 SessionApiError::internal 保留的错误消息)。
+            let failed = request.user_prompt == "fail";
             self.submits.lock().expect("submits lock").push(request);
+            if failed {
+                return Err(SessionApiError::internal_msg(
+                    "turn failed: provider exploded: quota exhausted",
+                ));
+            }
+            if wait_for_result {
+                return Ok(SubmitTurnResult::Completed {
+                    content: "done".into(),
+                });
+            }
             Ok(SubmitTurnResult::Backgrounded {
                 task_id: "task".into(),
                 session_id: "child".into(),
@@ -3040,7 +3274,12 @@ mod tests {
             })
         }
 
-        async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            self.lifecycle_calls.lock().expect("lifecycle calls").push((
+                "recycle".into(),
+                access.caller_session_id.into(),
+                access.target_session_id.into(),
+            ));
             Ok(())
         }
 

@@ -5,7 +5,7 @@
 - [ ] **插件系统 / 扩展（s5r + SDK）**
   - [ ] **宿主能力补齐（`HostRouter` / wire）**
     - [x] `astrcode.session.control.create` 透出 `tool_selection`（外置 agent 禁嵌套 `agent`）
-    - [ ] 外置扩展安全路径下的同步子 Agent（`wait_for_result` 与 peer I/O 线程死锁方案）— 当前仅有 guard（peer 线程拒绝 `wait_for_result: true` 并降级为 `false`），外置扩展无法同步等待子 agent 结果
+    - [x] 外置扩展安全路径下的同步子 Agent — 已落地后台路径：`Worker::background_host()` + root session 域（`create_root` 显式 `working_dir`、unscoped `submit_root_turn(wait_for_result: true)`、`root_state` / `dispose_root`）；handler 内 `wait_for_result: true` 维持拒绝（有意，防 admission permit 死锁）
     - [x] 实现 `astrcode.process.spawn`、`astrcode.network.client`（并发、总超时、取消与 I/O 大小均有上限）
     - [x] 实现 public HTTP 路由与跨插件公开路由分发（含 s5r manifest/handler E2E）
     - [x] 实现 workspace `list` / `grep` / `glob` 与 session 中断、注入、取消、执行视图
@@ -18,6 +18,7 @@
     - [x] Handler 错误类型 `ErrorPayload`；`HostApi` + task-scoped `with_host_api` transport seam 可测
     - [x] [`extension-author-guide.md`](extension-author-guide.md)（含外置 agent-tool 指引）
     - [ ] `#[handler]` 过程宏（可选，进一步减样板）
+    - [ ] Python SDK 对齐 `BackgroundHost` 等价物（Rust 已先行；Python `ContextVar` 模型下的对应物是 asyncio task 外的显式 binding）
     - [ ] Handler 运行时进度 / 日志上报通道（协议 + SDK API）
     - [ ] 合并 / 澄清 `prelude` 与 `worker_prelude` 文档入口（README 链到 author guide）— 两个模块都存在且 author guide 已有解释，但 SDK crate 无 README 链接
   - [ ] **内置扩展 vs 外置部署策略**

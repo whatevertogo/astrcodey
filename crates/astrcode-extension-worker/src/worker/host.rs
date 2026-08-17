@@ -41,10 +41,11 @@ pub use crate::{
         HostWorkspaceWriteRequest, llm_chat_request,
     },
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
-        HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
-        HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+        HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEvent,
+        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
+        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest,
     },
 };
 
@@ -148,6 +149,103 @@ impl HostClientTransport for WorkerHostTransport {
 
     fn payload_error(error: ErrorPayload) -> Self::Error {
         error
+    }
+}
+
+/// 持有 `Arc<dyn HostApi>` 的传输实现,与 task-local 的 `WorkerHostTransport` 平行。
+///
+/// 直接调用注入的 API,不做 task-local 解析与 host_supports 预检;支持性查询走
+/// [`BackgroundHost::host_supports`],不支持的操作由宿主侧返回 `UnknownCapability`。
+#[derive(Clone)]
+pub(crate) struct BoundHostTransport {
+    api: Arc<dyn HostApi>,
+}
+
+#[async_trait]
+impl HostClientTransport for BoundHostTransport {
+    type Error = ErrorPayload;
+
+    async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
+        self.api.call(operation.wire_name(), input).await
+    }
+
+    async fn invoke_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<ModelStream, Self::Error> {
+        self.api.open_stream(operation.wire_name(), input).await
+    }
+
+    fn client_error(code: WireErrorCode, message: String) -> Self::Error {
+        ErrorPayload::new(code, message)
+    }
+
+    fn payload_error(error: ErrorPayload) -> Self::Error {
+        error
+    }
+}
+
+/// 可逃逸出 handler 的宿主句柄:无 turn 作用域,仅暴露 root session 域。
+///
+/// 由根部 `PeerHandle` 构造(`parent_invoke_id` 为 `None`),宿主侧按 detached context
+/// 处理,Session/Workspace 上下文要求的操作会失败关闭。经
+/// [`Worker::background_host`](crate::Worker::background_host) 注册的通道在 transport
+/// handshake 完成后交付。
+#[derive(Clone)]
+pub struct BackgroundHost {
+    transport: BoundHostTransport,
+}
+
+impl BackgroundHost {
+    pub(crate) fn new(api: Arc<dyn HostApi>) -> Self {
+        Self {
+            transport: BoundHostTransport { api },
+        }
+    }
+
+    pub fn host_supports(&self, operation: HostOperation) -> bool {
+        self.transport.api.host_supports(operation)
+    }
+
+    /// 窄 session 面:只含无 session 上下文的 root 域方法。
+    pub fn root_sessions(&self) -> BackgroundRootSessionClient {
+        BackgroundRootSessionClient {
+            inner: TypedSessionControlClient::new(self.transport.clone()),
+        }
+    }
+}
+
+/// [`BackgroundHost`] 的 root session 域客户端。
+#[derive(Clone)]
+pub struct BackgroundRootSessionClient {
+    inner: TypedSessionControlClient<BoundHostTransport>,
+}
+
+impl BackgroundRootSessionClient {
+    pub async fn create_root(
+        &self,
+        request: HostCreateRootSessionRequest,
+    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
+        self.inner.create_root(request).await
+    }
+
+    pub async fn submit_root_turn(
+        &self,
+        request: HostRootSubmitTurnRequest,
+    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
+        self.inner.submit_root_turn(request).await
+    }
+
+    pub async fn root_state(
+        &self,
+        target: HostSessionTargetRequest,
+    ) -> Result<HostSessionStateOutput, ErrorPayload> {
+        self.inner.root_state(target).await
+    }
+
+    pub async fn dispose_root(&self, target: HostSessionTargetRequest) -> Result<(), ErrorPayload> {
+        self.inner.dispose_root(target).await
     }
 }
 
@@ -550,6 +648,7 @@ mod host_tests {
             HostOperation::SessionRootCreate,
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
+            HostOperation::SessionRootDispose,
             HostOperation::SessionControlInjectOrStart,
             HostOperation::SessionControlQueueOrStart,
             HostOperation::SessionControlDeferContext,
@@ -640,13 +739,22 @@ mod host_tests {
                 ),
             ))
             .await;
-            expect_backend_error(HostClient::session_control().create_root()).await;
+            expect_backend_error(
+                HostClient::session_control().create_root(HostCreateRootSessionRequest::default()),
+            )
+            .await;
             expect_backend_error(
                 HostClient::session_control()
                     .submit_root_turn(HostRootSubmitTurnRequest::new("root-1", "continue")),
             )
             .await;
             expect_backend_error(HostClient::session_control().root_state(
+                HostSessionTargetRequest {
+                    target_session_id: "root-1".into(),
+                },
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().dispose_root(
                 HostSessionTargetRequest {
                     target_session_id: "root-1".into(),
                 },
@@ -826,7 +934,10 @@ mod host_tests {
                 .unwrap();
             assert_eq!(history.sessions[0].session_id.as_str(), "session-1");
 
-            let root = HostClient::session_control().create_root().await.unwrap();
+            let root = HostClient::session_control()
+                .create_root(HostCreateRootSessionRequest::default())
+                .await
+                .unwrap();
             assert_eq!(root.session_id, "root-1");
 
             let created = HostClient::session_control()
@@ -900,5 +1011,214 @@ mod host_tests {
         .await;
         assert_eq!(error.code_enum(), Some(WireErrorCode::ContextUnavailable));
         assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn background_host_routes_root_domain_operations_and_reads_the_catalog() {
+        let host = Arc::new(RecordingHost::default());
+        let background = BackgroundHost::new(host.clone());
+        let sessions = background.root_sessions();
+        expect_backend_error(sessions.create_root(HostCreateRootSessionRequest::default())).await;
+        expect_backend_error(
+            sessions.submit_root_turn(HostRootSubmitTurnRequest::new("root-1", "continue")),
+        )
+        .await;
+        expect_backend_error(sessions.root_state(HostSessionTargetRequest {
+            target_session_id: "root-1".into(),
+        }))
+        .await;
+        expect_backend_error(sessions.dispose_root(HostSessionTargetRequest {
+            target_session_id: "root-1".into(),
+        }))
+        .await;
+        assert_eq!(
+            *host.operations.lock().unwrap(),
+            [
+                HostOperation::SessionRootCreate,
+                HostOperation::SessionRootSubmitTurn,
+                HostOperation::SessionRootState,
+                HostOperation::SessionRootDispose,
+            ]
+        );
+
+        let limited = BackgroundHost::new(Arc::new(LimitedHost::default()));
+        assert!(limited.host_supports(HostOperation::EventEmit));
+        assert!(!limited.host_supports(HostOperation::SessionRootState));
+    }
+
+    /// 跨 crate 无法复用 sdk 内部的 loopback 传输,测试内按帧格式(`{len}\n{payload}`)写一个。
+    struct DuplexTransport {
+        reader: Arc<tokio::sync::Mutex<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+        writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    }
+
+    impl DuplexTransport {
+        fn pair() -> (Self, Self) {
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let (left_reader, left_writer) = tokio::io::split(left);
+            let (right_reader, right_writer) = tokio::io::split(right);
+            (
+                Self {
+                    reader: Arc::new(tokio::sync::Mutex::new(left_reader)),
+                    writer: Arc::new(tokio::sync::Mutex::new(left_writer)),
+                },
+                Self {
+                    reader: Arc::new(tokio::sync::Mutex::new(right_reader)),
+                    writer: Arc::new(tokio::sync::Mutex::new(right_writer)),
+                },
+            )
+        }
+    }
+
+    #[async_trait]
+    impl astrcode_extension_sdk::wire::FrameTransport for DuplexTransport {
+        async fn read_frame(
+            &self,
+        ) -> Result<Vec<u8>, astrcode_extension_sdk::wire::frame::FrameError> {
+            use tokio::io::AsyncReadExt;
+            let mut header = Vec::new();
+            let mut reader = self.reader.lock().await;
+            loop {
+                let byte = reader.read_u8().await?;
+                if byte == b'\n' {
+                    break;
+                }
+                header.push(byte);
+            }
+            let size = std::str::from_utf8(&header)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let mut payload = vec![0; size];
+            reader.read_exact(&mut payload).await?;
+            Ok(payload)
+        }
+
+        async fn write_frame(
+            &self,
+            payload: &[u8],
+        ) -> Result<(), astrcode_extension_sdk::wire::frame::FrameError> {
+            use tokio::io::AsyncWriteExt;
+            let mut writer = self.writer.lock().await;
+            writer
+                .write_all(format!("{}\n", payload.len()).as_bytes())
+                .await?;
+            writer.write_all(payload).await?;
+            writer.flush().await?;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RootStateHostHandler {
+        parents: Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl astrcode_extension_sdk::wire::PeerInvokeHandler for RootStateHostHandler {
+        async fn invoke(
+            &self,
+            invocation: astrcode_extension_sdk::wire::InboundInvoke,
+        ) -> Result<
+            astrcode_extension_sdk::wire::InvocationResponse,
+            astrcode_extension_sdk::wire::protocol::ErrorPayload,
+        > {
+            self.parents
+                .lock()
+                .unwrap()
+                .push(invocation.request.parent_invoke_id.clone());
+            assert_eq!(invocation.request.operation, "astrcode.session.root.state");
+            Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
+                json!({
+                    "lifecycle": "active",
+                    "phase": "idle",
+                    "active_turn_id": null,
+                    "queued_inputs": 0,
+                    "message_count": 0
+                }),
+            ))
+        }
+    }
+
+    struct RejectAllWorkerHandler;
+
+    #[async_trait]
+    impl astrcode_extension_sdk::wire::PeerInvokeHandler for RejectAllWorkerHandler {
+        async fn invoke(
+            &self,
+            _invocation: astrcode_extension_sdk::wire::InboundInvoke,
+        ) -> Result<
+            astrcode_extension_sdk::wire::InvocationResponse,
+            astrcode_extension_sdk::wire::protocol::ErrorPayload,
+        > {
+            Err(astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
+                WireErrorCode::UnknownHandler,
+                "unexpected host invoke",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn background_host_invokes_over_real_peer_without_parent_invoke_id() {
+        use astrcode_extension_sdk::wire::{
+            FeatureName, HostInitialization, Peer, PeerInfo, WorkerInitialization,
+            manifest::InitializeManifest,
+        };
+
+        let features = std::collections::BTreeSet::from([
+            FeatureName::nested_invoke_v1(),
+            FeatureName::model_stream_v1(),
+        ]);
+        let (host_transport, worker_transport) = DuplexTransport::pair();
+        let info = |name: &str| PeerInfo {
+            name: name.into(),
+            version: None,
+        };
+        let host = Peer::new(host_transport, info("host"));
+        let worker = Peer::new(worker_transport, info("test-extension"));
+
+        let mut host_initialization = HostInitialization::new("initialize-1", "test-extension");
+        host_initialization.supported_features = features.clone();
+        host_initialization.host_operations = vec!["astrcode.session.root.state".into()];
+        let worker_initialization = WorkerInitialization {
+            supported_features: features,
+            ..WorkerInitialization::new(InitializeManifest::default())
+        };
+        let (host, worker) = tokio::join!(
+            host.initialize(host_initialization),
+            worker.accept(worker_initialization)
+        );
+        let (host, worker) = tokio::join!(
+            host.unwrap().0.activate("activate-1", Value::Null),
+            worker.unwrap().accept_activation(|_| async { Ok(()) })
+        );
+        let (_host_handle, host_driver) = host.unwrap().into_runtime();
+        let (worker_handle, worker_driver) = worker.unwrap().into_runtime();
+
+        let handler = Arc::new(RootStateHostHandler::default());
+        let host_task = tokio::spawn(host_driver.run(Arc::clone(&handler)));
+        let worker_task = tokio::spawn(worker_driver.run(Arc::new(RejectAllWorkerHandler)));
+
+        let background = BackgroundHost::new(Arc::new(V3PeerHostApi::new(worker_handle)));
+        assert!(background.host_supports(HostOperation::SessionRootState));
+        assert!(!background.host_supports(HostOperation::WorkspaceRead));
+
+        let state = tokio::spawn(async move {
+            background
+                .root_sessions()
+                .root_state(HostSessionTargetRequest {
+                    target_session_id: "root-1".into(),
+                })
+                .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(state.phase, crate::session::SessionPhaseDto::Idle);
+
+        assert_eq!(*handler.parents.lock().unwrap(), vec![None]);
+
+        host_task.abort();
+        worker_task.abort();
     }
 }

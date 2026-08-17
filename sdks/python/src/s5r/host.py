@@ -59,6 +59,7 @@ class HostOperation:
     SESSION_INSPECT_SNAPSHOT = "astrcode.session.inspect.snapshot"
     SESSION_READ_EVENTS = "astrcode.session.read_events"
     SESSION_ROOT_CREATE = "astrcode.session.root.create"
+    SESSION_ROOT_DISPOSE = "astrcode.session.root.dispose"
     SESSION_ROOT_STATE = "astrcode.session.root.state"
     SESSION_ROOT_SUBMIT_TURN = "astrcode.session.root.submit_turn"
     SESSION_STATE_READ = "astrcode.session.state.read"
@@ -165,8 +166,14 @@ class ModelClient:
 
 
 class SessionControlClient:
-    async def create_root(self) -> Any:
-        return await _call(HostOperation.SESSION_ROOT_CREATE, None)
+    async def create_root(self, working_dir: str | None = None) -> Any:
+        """Create a top-level session attributed to this extension.
+
+        `working_dir` overrides the session working directory; when omitted the
+        host falls back to the calling context's working directory.
+        """
+        request = {"working_dir": working_dir} if working_dir is not None else None
+        return await _call(HostOperation.SESSION_ROOT_CREATE, request)
 
     async def submit_root_turn(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.SESSION_ROOT_SUBMIT_TURN, request)

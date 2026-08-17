@@ -31,12 +31,12 @@ use astrcode_extension_sdk::{
     },
     s5r::ErrorPayload,
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
-        HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
-        HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
-        SessionLifecycleStateDto, SessionMessageOriginDto, SessionToolSelectionDto,
-        tool_selection_to_dto,
+        HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEvent,
+        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
+        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionLifecycleStateDto, SessionMessageOriginDto,
+        SessionToolSelectionDto, tool_selection_to_dto,
     },
     wire::{
         WireErrorCode,
@@ -89,8 +89,8 @@ impl SessionGroup {
                 .await
             },
             HostOperation::SessionRootCreate => {
-                Box::pin(dispatch(operation, &input, |_: EmptyRequest| {
-                    create_root_session(operation, ctx)
+                Box::pin(dispatch(operation, &input, |request| {
+                    create_root_session(operation, request, ctx)
                 }))
                 .await
             },
@@ -103,6 +103,12 @@ impl SessionGroup {
             HostOperation::SessionRootSubmitTurn => {
                 Box::pin(dispatch(operation, &input, |request| {
                     self.submit_root_turn(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionRootDispose => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.dispose_root_session(request, ctx)
                 }))
                 .await
             },
@@ -534,6 +540,21 @@ impl SessionGroup {
         Ok(session_state_output(state))
     }
 
+    async fn dispose_root_session(
+        &self,
+        request: HostSessionTargetRequest,
+        ctx: &InvokeContext,
+    ) -> Result<Acknowledgement, ErrorPayload> {
+        let reader = self.session_reader()?;
+        let ops = required_session_ops(ctx)?;
+        let extension_id = required_extension_id(ctx)?.to_owned();
+        authorize_owned_root(&reader, &request.target_session_id, &extension_id).await?;
+        ops.recycle_session(SessionAccessPair::same(&request.target_session_id).as_access())
+            .await
+            .map_err(session_api_error)?;
+        Ok(acknowledgement())
+    }
+
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
         self.session_reader
             .as_ref()
@@ -671,7 +692,10 @@ fn storage_read_error(error: StorageError) -> ErrorPayload {
     }
 }
 
-/// `on_peer_io_thread` 上等待结果会与 s5r 同步调用形成死锁，两种 submit 入口共用该检查。
+/// handler 上下文里 `wait_for_result` 会与 admission permit 形成互等:handler 持有 permit
+/// (Sequential 模式占满该扩展全部 permit),而被等待的 turn 可能需要回调本扩展的 hook/tool
+/// (需要 ≥1 个 permit)。后台调用（无父调用，`on_peer_io_thread == false`）不持有 permit,
+/// 允许同步等待。两种 submit 入口共用该检查。
 fn reject_wait_for_result_on_peer_thread(
     wait_for_result: bool,
     ctx: &InvokeContext,
@@ -688,26 +712,59 @@ fn reject_wait_for_result_on_peer_thread(
 
 async fn create_root_session(
     operation: HostOperation,
+    request: HostCreateRootSessionRequest,
     ctx: &InvokeContext,
 ) -> Result<HostCreateSessionOutput, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
+    let (working_dir, explicit) = match request.working_dir {
+        Some(dir) => (canonicalize_existing_dir(&dir)?, true),
+        None => (
+            ctx.working_dir.clone().ok_or_else(|| {
+                ErrorPayload::new(
+                    WireErrorCode::ContextUnavailable,
+                    format!(
+                        "{} requires a workspace-scoped call context",
+                        operation.wire_name()
+                    ),
+                )
+            })?,
+            false,
+        ),
+    };
     let request = CoreCreateRootSessionRequest {
-        working_dir: ctx.working_dir.clone().ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::ContextUnavailable,
-                format!(
-                    "{} requires a workspace-scoped call context",
-                    operation.wire_name()
-                ),
-            )
-        })?,
+        working_dir: working_dir.clone(),
         source_extension: Some(required_extension_id(ctx)?.to_owned()),
     };
     let handle = ops
         .create_root_session(request)
         .await
         .map_err(session_api_error)?;
+    if explicit {
+        tracing::info!(
+            extension_id = %ctx.extension_id,
+            working_dir = %working_dir,
+            session_id = %handle.session_id,
+            "extension created root session with explicit working_dir"
+        );
+    }
     Ok(create_session_output(handle))
+}
+
+/// 显式 `working_dir` 的边界校验：解析为规范的绝对路径且必须已存在为目录。
+fn canonicalize_existing_dir(dir: &str) -> Result<String, ErrorPayload> {
+    let canonicalized = std::fs::canonicalize(dir).map_err(|error| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("working_dir {dir} is not an existing directory: {error}"),
+        )
+    })?;
+    if !canonicalized.is_dir() {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("working_dir {dir} is not a directory"),
+        ));
+    }
+    Ok(canonicalized.to_string_lossy().into_owned())
 }
 
 async fn authorize_owned_root(

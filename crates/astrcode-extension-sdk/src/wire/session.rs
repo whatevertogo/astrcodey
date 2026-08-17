@@ -96,6 +96,15 @@ pub struct HostCreateSessionOutput {
     pub session_id: String,
 }
 
+/// `astrcode.session.root.create` 的线缆请求。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostCreateRootSessionRequest {
+    /// 省略时回退到调用上下文的 working_dir(handler 内调用的既有行为)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
 /// 插件 session control 操作的目标。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -381,6 +390,20 @@ mod tests {
         ] {
             assert_strict_round_trip(&output);
         }
+    }
+
+    #[test]
+    fn create_root_session_request_round_trip_and_defaults() {
+        let default = HostCreateRootSessionRequest::default();
+        assert_eq!(serde_json::to_value(&default).unwrap(), json!({}));
+        assert_strict_round_trip(&default);
+        assert_strict_round_trip(&HostCreateRootSessionRequest {
+            working_dir: Some("/worktree".into()),
+        });
+
+        let explicit_null: HostCreateRootSessionRequest =
+            serde_json::from_value(json!({ "working_dir": null })).unwrap();
+        assert_eq!(explicit_null, default);
     }
 
     #[test]

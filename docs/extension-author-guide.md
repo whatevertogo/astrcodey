@@ -145,6 +145,12 @@ workspace/process/network/session/model/event operation 在 HostRouter 再按 le
 声明不足会在执行边界失败，声明过宽则会触发更宽权限，因此 planner 应精确、确定且无副作用。
 
 钩子同理：`hook_handler_args` + `parse_hook_input`（反序列化 `event["input"]`）。
+固定模式 hook 有类型化构造器,输入是宿主载荷的强类型镜像、输出是 SDK 的 hook 结果枚举,
+优先于手写 JSON:`pre_tool_use_handler`、`tool_input_transform_handler`、
+`post_tool_use_handler`、`provider_handler`、`provider_contribution_handler`、
+`continue_after_stop_handler`、`prompt_build_handler`、`pre_compact_handler`、
+`post_compact_handler`(输入 DTO 见 `astrcode_extension_sdk::s5r::hooks`)。注意
+`PreCompactResult::Block` 在 S5R 上不受支持,类型化构造器会提前拒绝。
 
 ## 调用宿主能力
 
@@ -201,9 +207,11 @@ let model = HostClient::session_inspect()
     .read_model(&sessions.sessions[0].session_id)
     .await?;
 
-// 在当前 handler 的 workspace context 中创建独立 root session；不接受调用方路径参数
+// 创建归属本扩展的独立 root session；省略 working_dir 时回退到调用上下文的工作目录
 worker.capability(ExtensionCapability::InputDelivery);
-let root = HostClient::session_control().create_root().await?;
+let root = HostClient::session_control()
+    .create_root(HostCreateRootSessionRequest::default())
+    .await?;
 
 // 注册公开 JSON 路由；路由和 handler 从同一注册调用生成 manifest
 worker.capability(ExtensionCapability::PublicHttp);
@@ -227,6 +235,10 @@ let response = HostClient::extension_http().dispatch_public(
 
 `max_output_tokens` 必须大于 0；Host 把它作为本次 provider request 的上限，provider 仍会将其
 限制在模型配置的最大输出内。这是模型生成预算，不是 tool result 的字节截断参数。
+
+`create_root` 的 `working_dir` 显式指定时必须是已存在的目录（宿主做 canonicalize 与存在性
+校验）；该 root session 内的宿主工具将在指定目录运行，**超出 workspace 圈禁**，宿主会记录
+`(extension_id, working_dir)` 归因日志。只在确需驱动其它目录的顶层会话时显式指定。
 
 在具有 turn attribution 的 hook 或 tool handler 中，`ModelClient` 使用 Session 为该 turn 固定的
 main/small provider binding；运行中 reload 不会把旧 turn 切到新 provider。只有 startup 或其他
@@ -466,7 +478,7 @@ let output = with_host_api(Arc::new(MockHost), async {
 | 与内置 agent-tools 完全等价（同步等待子 Agent、`tool_selection` 禁嵌套 agent 等） | 在仓库内新增 `astrcode-extension-*` **bundled**  crate，用 `prelude` |
 | 独立安装包、`extension.json` 启动、用户目录分发 | s5r **Worker** + 下文结构 |
 | 仅需「后台派生子 Agent + 完成后通知」 | 外置 Worker **可行**（`wait_for_result: false`） |
-| 必须在 tool 内**同步阻塞**等子 Agent 跑完 | 外置目前受限：peer 线程上 `wait_for_result: true` 会死锁，宿主会拒绝 |
+| 必须由外置插件**同步等待**长任务结果 | 用 `Worker::background_host()` + root session 域（见下文「后台任务与外置 agent」）；handler 内 `wait_for_result: true` 仍被宿主拒绝 |
 
 ### 目录与安装
 
@@ -632,9 +644,64 @@ let submitted = HostClient::session_control().submit_turn(request).await?;
 // HostSubmitTurnOutput::Backgrounded { .. } → 返回说明文本给主 Agent
 ```
 
-若用户传 `waitForResult: true`，外置实现应降级为 `false` 并说明「外置插件仅支持后台子 Agent」，或返回带 hint 的 `ErrorPayload`。
+若用户传 `waitForResult: true`，外置实现应降级为 `false` 并说明「外置插件仅支持后台子 Agent」，或返回带 hint 的 `ErrorPayload`；需要同步等待结果的整段 pipeline 改用下文 `BackgroundHost` 的 root session 域。
 
 `tool_call_id` 由宿主从当前调用上下文写入 create/submit 的内部请求，worker 不能在 wire 请求中指定或伪造。
+
+### 后台任务与外置 agent（`BackgroundHost`）
+
+`HostClient` 只在 handler 调用作用域内可用（task-local），`tokio::spawn` 创建的任务里调用
+会得到 `context_unavailable`。需要在 handler 之外长期驱动宿主的插件（轮询循环、外置 agent
+pipeline）使用 `Worker::background_host()`：
+
+```rust
+let mut worker = Worker::new("my-agent-tools", "0.1.0");
+worker.capability(ExtensionCapability::InputDelivery);
+
+let host_rx = worker.background_host();
+tokio::spawn(async move {
+    // transport handshake 完成后交付
+    let host = host_rx.await.expect("background host handle");
+    let sessions = host.root_sessions();
+    let root = sessions
+        .create_root(HostCreateRootSessionRequest {
+            working_dir: Some("/path/to/worktree".into()),
+        })
+        .await?;
+    // 默认 wait_for_result: true,同步等待 turn 完成,结果文本随响应返回;
+    // turn 失败时返回 Err(ErrorPayload),其 message 即失败详情
+    let output = sessions
+        .submit_root_turn(HostRootSubmitTurnRequest::new(&root.session_id, "review"))
+        .await?;
+    // ... 长 pipeline 循环结束后回收:
+    sessions
+        .dispose_root(HostSessionTargetRequest {
+            target_session_id: root.session_id,
+        })
+        .await
+});
+worker.run_stdio().await
+```
+
+约束与语义：
+
+- `BackgroundHost` 由根部 peer handle 构造，**结构上不带父调用上下文**；宿主按 detached
+  context 处理，要求 Session/Workspace 上下文的操作（child create、workspace 等）失败关闭。
+  因此它只暴露 root session 域（`create_root` / `submit_root_turn` / `root_state` /
+  `dispose_root`）与 `host_supports`。
+- 后台 `submit_root_turn` 允许 `wait_for_result: true`（默认值）：后台任务不持有 handler
+  admission permit，不会与被提交 turn 的回调形成互等。**handler 内**的
+  `submit_turn(wait_for_result: true)` 仍被宿主拒绝；长任务不要塞进 handler——宿主→worker
+  的 handler 调用 120s 超时是有意的，handler 只做短交互（status tool、command），长
+  pipeline 放后台任务。
+- 后台无调用上下文，`create_root` 必须显式给出 `working_dir`（省略且上下文也没有时返回
+  `context_unavailable`）。
+- worker 崩溃后正在跑的 turn 会变孤儿：插件重启后凭 `root_state` 检查自己持有的 root
+  session（`active_turn_id` 残留、phase 归 idle 即已完成/失败），再 `dispose_root` 回收；
+  宿主侧不做 GC。
+- 每个并发等待中的 turn 占用一个宿主重入槽（上限 8），超出报 `ReentrancyExceeded`；串行
+  pipeline 不受影响。旧宿主没有 root 域操作时，用
+  `host_supports(HostOperation::SessionRootDispose)` 等预检并保留既有回退路径。
 
 ### 会话状态与扩展事件
 

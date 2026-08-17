@@ -25,10 +25,10 @@ use crate::{
     llm::LlmMessage,
     model_stream::ModelStream,
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
-        HostSubmitTurnOutput, HostSubmitTurnRequest,
+        HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEventsPageOutput,
+        HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
+        HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
     },
     wire::{
         HostOp, WireErrorCode, operations,
@@ -204,8 +204,11 @@ impl<T: HostClientTransport> ModelClient<T> {
 }
 
 impl<T: HostClientTransport> SessionControlClient<T> {
-    pub async fn create_root(&self) -> Result<HostCreateSessionOutput, T::Error> {
-        invoke::<operations::SessionRootCreate, _>(&self.transport, &EmptyRequest::default()).await
+    pub async fn create_root(
+        &self,
+        request: HostCreateRootSessionRequest,
+    ) -> Result<HostCreateSessionOutput, T::Error> {
+        invoke::<operations::SessionRootCreate, _>(&self.transport, &request).await
     }
 
     pub async fn submit_root_turn(
@@ -220,6 +223,10 @@ impl<T: HostClientTransport> SessionControlClient<T> {
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionStateOutput, T::Error> {
         invoke::<operations::SessionRootState, _>(&self.transport, &request).await
+    }
+
+    pub async fn dispose_root(&self, request: HostSessionTargetRequest) -> Result<(), T::Error> {
+        invoke_ack::<operations::SessionRootDispose, _>(&self.transport, &request).await
     }
 
     pub async fn inject_or_start(

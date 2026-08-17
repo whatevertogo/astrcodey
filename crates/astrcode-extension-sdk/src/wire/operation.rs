@@ -465,10 +465,10 @@ host_operations! {
     SessionRootCreate {
         name: "astrcode.session.root.create",
         required: Some(ExtensionCapability::InputDelivery),
-        context: Workspace,
+        context: None,
         group: Session,
         backend: SessionOperations,
-        request: crate::wire::host::EmptyRequest,
+        request: crate::wire::session::HostCreateRootSessionRequest,
         response: crate::wire::session::HostCreateSessionOutput,
         description: "Create a top-level session attributed to the calling extension",
     }
@@ -592,6 +592,16 @@ host_operations! {
         response: crate::wire::host::HostWorkspaceWriteOutput,
         description: "Create or replace a non-sensitive file under the working directory",
     }
+    SessionRootDispose {
+        name: "astrcode.session.root.dispose",
+        required: Some(ExtensionCapability::InputDelivery),
+        context: None,
+        group: Session,
+        backend: SessionOperationsAndReader,
+        request: crate::wire::session::HostSessionTargetRequest,
+        response: crate::wire::host::Acknowledgement,
+        description: "Recycle an owned top-level session",
+    }
 }
 
 /// Session/workspace context an operation requires the host to resolve before dispatch.
@@ -678,6 +688,25 @@ mod tests {
         }
         assert_eq!(operations.len(), HostOperation::COUNT);
         assert_eq!(HostOperation::from_wire_name("astrcode.unknown"), None);
+    }
+
+    #[test]
+    fn root_session_domain_specs_match_the_extension_owned_model() {
+        let create = HostOperation::SessionRootCreate.spec();
+        assert_eq!(create.name, "astrcode.session.root.create");
+        assert_eq!(create.required, Some(ExtensionCapability::InputDelivery));
+        assert_eq!(create.context, HostContextRequirement::None);
+        assert_eq!(create.backend, HostBackendRequirement::SessionOperations);
+
+        let dispose = HostOperation::SessionRootDispose.spec();
+        assert_eq!(dispose.name, "astrcode.session.root.dispose");
+        assert_eq!(dispose.required, Some(ExtensionCapability::InputDelivery));
+        assert_eq!(dispose.context, HostContextRequirement::None);
+        assert_eq!(dispose.group, HostOperationGroup::Session);
+        assert_eq!(
+            dispose.backend,
+            HostBackendRequirement::SessionOperationsAndReader
+        );
     }
 
     #[test]

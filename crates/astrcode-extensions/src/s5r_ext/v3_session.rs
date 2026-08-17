@@ -486,10 +486,17 @@ impl S5rV3Session {
             }
         }
         let mut child = self.child.lock().take();
-        if let Some(child) = &mut child
-            && let Err(error) = child.terminate(PROCESS_TERMINATION_GRACE).await
-        {
-            tracing::warn!(%error, "failed to terminate S5R 3.0 process tree");
+        if let Some(child) = &mut child {
+            // stdin 随 driver 结束而关闭;先给 worker 一个窗口自愿退出(运行其 shutdown
+            // 钩子),超时后再 terminate 整个进程树。
+            let voluntary_exit = matches!(
+                tokio::time::timeout(PROCESS_TERMINATION_GRACE, child.wait()).await,
+                Ok(Ok(_))
+            );
+            if !voluntary_exit && let Err(error) = child.terminate(PROCESS_TERMINATION_GRACE).await
+            {
+                tracing::warn!(%error, "failed to terminate S5R 3.0 process tree");
+            }
         }
         let mut stderr_task = StderrTaskGuard::new(self.stderr_task.lock().take());
         stderr_task.wait().await;

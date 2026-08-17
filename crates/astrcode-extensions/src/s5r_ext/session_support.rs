@@ -119,7 +119,10 @@ pub(super) fn prepare_host_invoke(
     context.extension_id = state.registration.extension_id.clone();
     context.declared_capabilities = state.registration.capabilities.clone();
     context.event_declarations = decls_to_map(&state.registration.custom_events);
-    context.on_peer_io_thread = true;
+    // 有父调用 ⇒ 调用发生在 handler 上下文,可能持有 admission permit(Sequential handler
+    // 占满全部 permit),此时 wait_for_result 等待的 turn 若需回调本扩展会形成互等;
+    // 无父调用 ⇒ 来自扩展后台任务,不持有 permit,允许同步等待。
+    context.on_peer_io_thread = parent_invoke_id.is_some();
     context.cancel_token = Some(cancellation.cancellation_token());
     Ok((reentrancy, context))
 }
@@ -177,5 +180,63 @@ fn append_stderr_tail(tail: &mut Vec<u8>, dropped_bytes: &mut usize, chunk: &[u8
         let overflow = tail.len() - STDERR_TAIL_BYTES;
         tail.drain(..overflow);
         *dropped_bytes = dropped_bytes.saturating_add(overflow);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> HostInvokeState {
+        HostInvokeState {
+            router: Arc::new(HostRouter::from_backends(
+                crate::host_router::HostBackends::default(),
+            )),
+            registration: ExtensionRegistration {
+                extension_id: "ext".into(),
+                version: "0.0.0".into(),
+                required_transport_features: vec![],
+                capabilities: vec![],
+                tools: vec![],
+                commands: vec![],
+                subscriptions: vec![],
+                http_routes: vec![],
+                custom_events: vec![],
+                custom_event_subscriptions: vec![],
+            },
+            reentrancy: Arc::new(AtomicU32::new(0)),
+            invoke_contexts: RwLock::new(HashMap::new()),
+            detached_invoke_context: RwLock::new(Some(InvokeContext::default())),
+        }
+    }
+
+    #[test]
+    fn handler_context_marker_tracks_parent_invoke_presence() {
+        let state = test_state();
+        let cancellation = InvocationCancellation::default();
+
+        let (_guard, context) =
+            prepare_host_invoke(&state, "astrcode.session.root.state", None, &cancellation)
+                .expect("detached invoke");
+        assert!(
+            !context.on_peer_io_thread,
+            "background invoke holds no admission permit"
+        );
+
+        state
+            .invoke_contexts
+            .write()
+            .insert("parent-1".into(), InvokeContext::default());
+        let (_guard, context) = prepare_host_invoke(
+            &state,
+            "astrcode.session.root.state",
+            Some("parent-1"),
+            &cancellation,
+        )
+        .expect("nested invoke");
+        assert!(
+            context.on_peer_io_thread,
+            "handler invoke may hold an admission permit"
+        );
     }
 }

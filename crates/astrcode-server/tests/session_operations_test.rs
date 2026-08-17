@@ -17,8 +17,9 @@ use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
-        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionDeliveryOutcome,
-        SessionLifecycleState, SessionOperations, SubmitTurnRequest, SubmitTurnResult,
+        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionAccessPair,
+        SessionDeliveryOutcome, SessionLifecycleState, SessionOperations, SubmitTurnRequest,
+        SubmitTurnResult,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
@@ -662,6 +663,32 @@ async fn create_root_session_persists_source_extension_attribution() {
     assert_eq!(
         model.identity.source_extension.as_deref(),
         Some("channel-a")
+    );
+}
+
+/// 开放点固化:`dispose_root` 依赖自指访问对(caller == target)能通过
+/// `verify_access` 的 recycle 校验,server 侧无需额外放宽。
+#[tokio::test]
+async fn recycle_session_accepts_self_referential_access_on_a_root_session() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+    let created = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+        })
+        .await
+        .expect("create root session");
+
+    let access = SessionAccessPair::same(created.session_id.clone());
+    ops.recycle_session(access.as_access())
+        .await
+        .expect("self-referential recycle must pass access verification");
+
+    let session_id = SessionId::new(created.session_id);
+    assert!(
+        store.session_read_model(&session_id).await.is_err(),
+        "recycled session leaves the active projection"
     );
 }
 

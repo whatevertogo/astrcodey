@@ -2,6 +2,8 @@
 
 mod tool_plan;
 
+pub mod hooks;
+
 pub use tool_plan::{
     FileOperationDto, HostResourceDto, ResourceAccessDto, ToolInvocationPhase,
     ToolInvocationRequest, ToolInvocationScope, ToolPlanDto,

@@ -74,12 +74,6 @@ struct AskLlmArgs {
 }
 
 #[derive(Deserialize)]
-struct PreToolInput {
-    tool_name: String,
-    tool_input: Value,
-}
-
-#[derive(Deserialize)]
 struct PipelineStepInput {
     step: u64,
 }
@@ -459,29 +453,30 @@ async fn run() -> Result<(), ErrorPayload> {
         }),
     )?;
 
-    worker.on_pre_tool_use(hook_handler_args(|input: PreToolInput, _ctx| async move {
-        if input.tool_name == "emit_hook_probe" {
-            // This probe must inherit the active hook's request-scoped event context.
-            HostClient::events()
-                .emit(HostEventEmitRequest {
-                    event_type: "s5r_guest.probe".into(),
-                    schema_version: 1,
-                    payload: json!({ "from": "pre_tool_use" }),
-                })
-                .await?;
-            return Ok(HandlerResult::ok());
-        }
-        if input.tool_name == "bash" {
-            let cmd = input.tool_input["command"].as_str().unwrap_or("");
-            if cmd.contains("rm -rf") {
-                return Ok(HandlerResult::effect(
-                    HandlerEffect::Block,
-                    json!({ "reason": "dangerous rm -rf blocked by s5r-guest-demo" }),
-                ));
+    worker.on_pre_tool_use(pre_tool_use_handler(
+        |input: ToolUseHookInput, _ctx| async move {
+            if input.tool_name == "emit_hook_probe" {
+                // This probe must inherit the active hook's request-scoped event context.
+                HostClient::events()
+                    .emit(HostEventEmitRequest {
+                        event_type: "s5r_guest.probe".into(),
+                        schema_version: 1,
+                        payload: json!({ "from": "pre_tool_use" }),
+                    })
+                    .await?;
+                return Ok(PreToolUseResult::Allow);
             }
-        }
-        Ok(HandlerResult::ok())
-    }))?;
+            if input.tool_name == "bash" {
+                let cmd = input.tool_input["command"].as_str().unwrap_or("");
+                if cmd.contains("rm -rf") {
+                    return Ok(PreToolUseResult::Block {
+                        reason: "dangerous rm -rf blocked by s5r-guest-demo".into(),
+                    });
+                }
+            }
+            Ok(PreToolUseResult::Allow)
+        },
+    ))?;
 
     worker.hook(
         LifecycleEvent::TurnEnd,
@@ -563,6 +558,18 @@ async fn run() -> Result<(), ErrorPayload> {
             }
         }),
     )?;
+
+    worker.on_shutdown(|| async {
+        let Ok(path) = std::env::var("S5R_GUEST_SHUTDOWN_MARKER") else {
+            return Ok(());
+        };
+        std::fs::write(path, "shutdown").map_err(|error| {
+            ErrorPayload::new(
+                WireErrorCode::InternalError,
+                format!("write shutdown marker: {error}"),
+            )
+        })
+    });
 
     worker.run_stdio().await
 }

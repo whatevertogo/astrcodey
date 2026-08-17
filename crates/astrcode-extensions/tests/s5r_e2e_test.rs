@@ -811,6 +811,35 @@ async fn s5r_stop_shuts_down_process() {
 }
 
 #[tokio::test]
+async fn s5r_worker_shutdown_hook_runs_before_process_exit() {
+    let guest = ensure_guest_built();
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("shutdown-marker");
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "s5r-guest-demo",
+        "protocol": { "s5r": "3.0" },
+        "command": [guest.to_string_lossy()],
+        "env": { "S5R_GUEST_SHUTDOWN_MARKER": marker.to_string_lossy() }
+    }))
+    .unwrap();
+    let ext = S5rExtension::load(root.path(), &manifest, minimal_router())
+        .await
+        .expect("load s5r extension");
+    // on_shutdown 只在 activation 成功后运行;runner 注册触发 activation。
+    let runner = extension_runner_with_extensions(Duration::from_secs(5), None, vec![ext])
+        .await
+        .expect("assemble runner");
+
+    assert!(!marker.exists());
+    runner.shutdown().await;
+
+    assert_eq!(
+        fs::read_to_string(&marker).expect("worker shutdown hook should write the marker"),
+        "shutdown"
+    );
+}
+
+#[tokio::test]
 async fn s5r_tool_execution_policy_times_out_the_whole_remote_call() {
     let runner = runner_with_s5r(minimal_router()).await;
     let tool = runner_tool(&runner, "timeout_probe", "/tmp").await;

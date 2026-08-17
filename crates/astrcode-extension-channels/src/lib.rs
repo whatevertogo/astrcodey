@@ -21,8 +21,8 @@ use astrcode_extension_sdk::{
     },
     host::SessionControlClient,
     session::{
-        HostRootSubmitTurnRequest, HostSessionTargetRequest, HostSubmitTurnOutput,
-        SessionLifecycleStateDto,
+        HostCreateRootSessionRequest, HostRootSubmitTurnRequest, HostSessionTargetRequest,
+        HostSubmitTurnOutput, SessionLifecycleStateDto,
     },
 };
 use parking_lot::Mutex as ParkingMutex;
@@ -280,7 +280,7 @@ impl TelegramRuntime {
         }
         let handle = self
             .session_control
-            .create_root()
+            .create_root(HostCreateRootSessionRequest::default())
             .await
             .map_err(|e| ExtensionError::Internal(format!("create telegram session: {e}")))?;
 

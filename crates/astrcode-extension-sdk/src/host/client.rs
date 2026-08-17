@@ -24,8 +24,9 @@ use crate::{
     },
     llm::LlmMessage,
     session::{
-        HostCreateSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
-        HostSessionEventsPageRequest, HostSessionTargetRequest, HostSubmitTurnRequest,
+        HostCreateRootSessionRequest, HostCreateSessionRequest, HostRecycleSessionRequest,
+        HostRootSubmitTurnRequest, HostSessionEventsPageRequest, HostSessionTargetRequest,
+        HostSubmitTurnRequest,
     },
 };
 
@@ -163,6 +164,7 @@ mod tests {
             HostOperation::SessionRootCreate,
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
+            HostOperation::SessionRootDispose,
             HostOperation::SessionControlInjectOrStart,
             HostOperation::SessionControlQueueOrStart,
             HostOperation::SessionControlDeferContext,
@@ -280,7 +282,12 @@ mod tests {
             ExtensionHttpDispatchRequest::new(ExtensionHttpMethod::Get, "/health"),
         ))
         .await;
-        expect_backend_error(host.session_control().unwrap().create_root()).await;
+        expect_backend_error(
+            host.session_control()
+                .unwrap()
+                .create_root(HostCreateRootSessionRequest::default()),
+        )
+        .await;
         expect_backend_error(
             host.session_control()
                 .unwrap()
@@ -288,6 +295,12 @@ mod tests {
         )
         .await;
         expect_backend_error(host.session_control().unwrap().root_state(
+            HostSessionTargetRequest {
+                target_session_id: "root-1".into(),
+            },
+        ))
+        .await;
+        expect_backend_error(host.session_control().unwrap().dispose_root(
             HostSessionTargetRequest {
                 target_session_id: "root-1".into(),
             },
@@ -544,8 +557,17 @@ mod tests {
                 false,
             ),
         );
-        expect_access_error(host.session_control(), WireErrorCode::ContextUnavailable);
-        assert!(invoker.operations.lock().unwrap().is_empty());
+        // root 域不依赖 session/workspace 上下文,start 作用域即可用。
+        let session_control = host
+            .session_control()
+            .unwrap_or_else(|_| panic!("root session domain should be start-scoped"));
+        expect_backend_error(session_control.create_root(HostCreateRootSessionRequest::default()))
+            .await;
+        assert_eq!(
+            *invoker.operations.lock().unwrap(),
+            [HostOperation::SessionRootCreate]
+        );
+        invoker.operations.lock().unwrap().clear();
 
         let host = internal::extension_host(
             invoker.clone(),
@@ -559,7 +581,8 @@ mod tests {
         let session_control = host
             .session_control()
             .unwrap_or_else(|_| panic!("root session domain should be start-scoped"));
-        expect_backend_error(session_control.create_root()).await;
+        expect_backend_error(session_control.create_root(HostCreateRootSessionRequest::default()))
+            .await;
         assert_eq!(
             *invoker.operations.lock().unwrap(),
             [HostOperation::SessionRootCreate]

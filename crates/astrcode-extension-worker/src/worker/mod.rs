@@ -9,13 +9,17 @@ use std::{collections::BTreeSet, future::Future, io, pin::Pin, sync::Arc};
 pub use astrcode_extension_sdk::wire::InvocationCancellation as CancelToken;
 use astrcode_extension_sdk::wire::ProcessStdioTransport;
 pub use builder::{
-    command_handler, continuation_handler, continuation_handler_args, custom_event_handler,
-    custom_event_handler_args, hook_handler, hook_handler_args, http_handler, parse_hook_input,
-    parse_tool_arguments, tool_handler, tool_handler_args, tool_planner, tool_planner_args,
+    command_handler, continuation_handler, continuation_handler_args, continue_after_stop_handler,
+    custom_event_handler, custom_event_handler_args, hook_handler, hook_handler_args, http_handler,
+    parse_hook_input, parse_tool_arguments, post_compact_handler, post_tool_use_handler,
+    pre_compact_handler, pre_tool_use_handler, prompt_build_handler, provider_contribution_handler,
+    provider_handler, tool_handler, tool_handler_args, tool_input_transform_handler, tool_planner,
+    tool_planner_args,
 };
 pub use host::{
-    EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
-    HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+    BackgroundHost, BackgroundRootSessionClient, EventClient, ExtensionHttpClient, HostClient,
+    HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+    HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
     HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmChatRequest,
     HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
     HostNetworkResponse, HostOperation, HostProcessHandleOutput, HostProcessInputAction,
@@ -72,12 +76,17 @@ pub struct Worker {
     version: String,
     registry: HandlerRegistry,
     activation: Option<ActivationHandler>,
+    shutdown: Option<ShutdownHandler>,
+    background_host_tx: Option<tokio::sync::oneshot::Sender<host::BackgroundHost>>,
 }
 
 type ActivationHandler = Box<
     dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), ErrorPayload>> + Send>>
         + Send,
 >;
+
+type ShutdownHandler =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), ErrorPayload>> + Send>> + Send>;
 
 impl Worker {
     pub fn new(extension_id: impl Into<String>, version: impl Into<String>) -> Self {
@@ -86,6 +95,8 @@ impl Worker {
             version: version.into(),
             registry: HandlerRegistry::new(extension_id),
             activation: None,
+            shutdown: None,
+            background_host_tx: None,
         }
     }
 
@@ -97,6 +108,33 @@ impl Worker {
     {
         self.activation = Some(Box::new(move |config| Box::pin(handler(config))));
         self
+    }
+
+    /// Registers a best-effort cleanup hook that runs once after the stdio driver ends.
+    ///
+    /// The hook runs only after a successful activation and for any driver outcome (clean
+    /// EOF or error). The host does not wait for it and terminates the process tree after
+    /// a bounded grace period, so keep it fast. `HostClient` is unavailable inside the
+    /// hook: use it for worker-local cleanup (flushing files, closing worker-owned
+    /// connections), not for reporting results back to the host.
+    pub fn on_shutdown<F, Fut>(&mut self, handler: F) -> &mut Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), ErrorPayload>> + Send + 'static,
+    {
+        self.shutdown = Some(Box::new(move || Box::pin(handler())));
+        self
+    }
+
+    /// 注册后台宿主句柄接收端;`run_stdio` 在 transport handshake 完成、driver 启动前交付。
+    ///
+    /// 交付的 [`BackgroundHost`] 不带 turn 作用域,可在 `tokio::spawn` 的后台任务中
+    /// 长期使用(如轮询循环、驱动 root session 的外置 agent)。必须在 `run_stdio`
+    /// 之前调用;重复调用只保留最后一个接收端。
+    pub fn background_host(&mut self) -> tokio::sync::oneshot::Receiver<host::BackgroundHost> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.background_host_tx = Some(tx);
+        rx
     }
 
     /// 声明 manifest 能力。
@@ -277,6 +315,7 @@ impl Worker {
         let mut initialization = WorkerInitialization::new(self.registry.take_manifest());
         initialization.supported_features = supported;
         let activation = self.activation.take();
+        let shutdown = self.shutdown.take();
         let peer = V3Peer::new(
             ProcessStdioTransport::new(),
             V3PeerInfo {
@@ -295,17 +334,39 @@ impl Worker {
         })
         .await
         .map_err(v3_peer_error_to_payload)?;
-        let (_handle, driver) = peer.into_runtime();
+        let (handle, driver) = peer.into_runtime();
+        if let Some(tx) = self.background_host_tx.take() {
+            // 根部克隆:parent_invoke_id 为 None,宿主侧按 detached context 处理。
+            let _ = tx.send(host::BackgroundHost::new(Arc::new(V3PeerHostApi::new(
+                handle,
+            ))));
+        }
         let handler = Arc::new(V3WorkerInvokeHandler {
             registry: Arc::new(self.registry),
         });
-        match driver.run(handler).await {
+        let driver_result = match driver.run(handler).await {
             Ok(()) => Ok(()),
             Err(astrcode_extension_sdk::wire::PeerError::Frame(
                 astrcode_extension_sdk::wire::frame::FrameError::Io(error),
             )) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
             Err(error) => Err(v3_peer_error_to_payload(error)),
-        }
+        };
+        run_shutdown_hook(shutdown, driver_result).await
+    }
+}
+
+/// Runs the shutdown hook after the driver ends. Its error surfaces only when the driver
+/// itself finished cleanly, keeping the driver's root-cause error authoritative.
+async fn run_shutdown_hook(
+    shutdown: Option<ShutdownHandler>,
+    driver_result: Result<(), ErrorPayload>,
+) -> Result<(), ErrorPayload> {
+    let Some(shutdown) = shutdown else {
+        return driver_result;
+    };
+    match (driver_result, shutdown().await) {
+        (Ok(()), shutdown_result) => shutdown_result,
+        (driver_result @ Err(_), _) => driver_result,
     }
 }
 
@@ -431,4 +492,52 @@ pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {
             "is_error": is_error,
         }),
     )
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    fn failing_shutdown(message: &'static str) -> Option<ShutdownHandler> {
+        Some(Box::new(move || {
+            Box::pin(async move { Err(ErrorPayload::new(WireErrorCode::InternalError, message)) })
+        }))
+    }
+
+    #[tokio::test]
+    async fn shutdown_hook_error_surfaces_only_after_clean_driver_exit() {
+        let result = run_shutdown_hook(failing_shutdown("flush failed"), Ok(())).await;
+        assert_eq!(result.unwrap_err().message, "flush failed");
+
+        let result = run_shutdown_hook(
+            failing_shutdown("flush failed"),
+            Err(ErrorPayload::new(WireErrorCode::Transport, "driver failed")),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().message, "driver failed");
+
+        assert!(run_shutdown_hook(None, Ok(())).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_hook_runs_even_when_driver_failed() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ran);
+        let shutdown: Option<ShutdownHandler> = Some(Box::new(move || {
+            Box::pin(async move {
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+        let result = run_shutdown_hook(
+            shutdown,
+            Err(ErrorPayload::new(WireErrorCode::Transport, "driver failed")),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().message, "driver failed");
+        assert!(ran.load(Ordering::SeqCst));
+    }
 }

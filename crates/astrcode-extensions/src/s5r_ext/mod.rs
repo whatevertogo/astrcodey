@@ -22,7 +22,14 @@ use astrcode_extension_sdk::{
         ProviderSettlementContext, Registrar, ToolContext, ToolHandler, ToolInputTransformHandler,
         ToolInputTransformResult, ToolPlanContext, internal::extension_config_value,
     },
-    s5r::{ToolInvocationPhase, ToolInvocationRequest, ToolInvocationScope, ToolPlanDto},
+    s5r::{
+        ToolInvocationPhase, ToolInvocationRequest, ToolInvocationScope, ToolPlanDto,
+        hooks::{
+            ContinueAfterStopHookInput, LifecycleHookInput, PostCompactHookInput,
+            PostToolUseHookInput, PreCompactHookInput, PromptBuildHookInput,
+            ProviderContributionHookInput, ProviderHookInput, ToolUseHookInput,
+        },
+    },
     tool::{ExecutionMode, ToolPlan},
     wire::{HandlerEffect, HandlerId, HandlerKind, HandlerResult},
 };
@@ -354,6 +361,14 @@ fn require_transport_invoke_ctx(
     })
 }
 
+/// Serializes a typed hook input DTO (`astrcode_extension_sdk::s5r::hooks`) to the wire
+/// `input` field. Worker-side typed handlers deserialize the same DTO, so the payload
+/// shape has a single source.
+fn serialize_hook_input(input: impl serde::Serialize) -> Result<Value, ExtensionError> {
+    serde_json::to_value(input)
+        .map_err(|error| ExtensionError::Internal(format!("serialize hook input: {error}")))
+}
+
 async fn invoke_hook(
     session: &S5rSession,
     extension_id: &str,
@@ -387,7 +402,7 @@ macro_rules! s5r_hook_handler {
         impl $trait for $handler {
             async fn handle(&self, $c: $ctx) -> Result<$output, ExtensionError> {
                 let invoke_ctx = require_transport_invoke_ctx($c.call())?;
-                let input = $input;
+                let input = serialize_hook_input($input)?;
                 let resp =
                     invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
                 $parse(&resp)
@@ -557,15 +572,15 @@ s5r_hook_handler!(
     PreToolUseHandler,
     PreToolUseContext,
     PreToolUseResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "tool_call_id": ctx.call_id(),
-        "tool_name": ctx.tool_name(),
-        "tool_input": ctx.tool_input(),
-        "available_tools": ctx.available_tools(),
-    }),
+    |ctx| ToolUseHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        tool_call_id: ctx.call_id().to_string(),
+        tool_name: ctx.tool_name().to_owned(),
+        tool_input: ctx.tool_input().clone(),
+        available_tools: ctx.available_tools().to_vec(),
+    },
     parse_pre_tool_use_result
 );
 
@@ -582,15 +597,15 @@ impl ToolInputTransformHandler for S5rToolInputTransformHandler {
         ctx: PreToolUseContext,
     ) -> Result<ToolInputTransformResult, ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let input = json!({
-            "session_id": ctx.session_id().to_string(),
-            "working_dir": ctx.working_dir().display().to_string(),
-            "model": ctx.model(),
-            "tool_call_id": ctx.call_id(),
-            "tool_name": ctx.tool_name(),
-            "tool_input": ctx.tool_input(),
-            "available_tools": ctx.available_tools(),
-        });
+        let input = serialize_hook_input(ToolUseHookInput {
+            session_id: ctx.session_id().to_string(),
+            working_dir: ctx.working_dir().display().to_string(),
+            model: ctx.model().clone(),
+            tool_call_id: ctx.call_id().to_string(),
+            tool_name: ctx.tool_name().to_owned(),
+            tool_input: ctx.tool_input().clone(),
+            available_tools: ctx.available_tools().to_vec(),
+        })?;
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_tool_input_transform_result(&response)
@@ -602,16 +617,16 @@ s5r_hook_handler!(
     PostToolUseHandler,
     PostToolUseContext,
     PostToolUseResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "tool_call_id": ctx.call_id(),
-        "tool_name": ctx.tool_name(),
-        "tool_input": ctx.tool_input(),
-        "tool_result": ctx.tool_result(),
-        "is_error": ctx.tool_result().is_error,
-    }),
+    |ctx| PostToolUseHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        tool_call_id: ctx.call_id().to_string(),
+        tool_name: ctx.tool_name().to_owned(),
+        tool_input: ctx.tool_input().clone(),
+        tool_result: ctx.tool_result().clone(),
+        is_error: ctx.tool_result().is_error,
+    },
     parse_post_tool_use_result
 );
 
@@ -625,13 +640,17 @@ struct S5rProviderHandler {
 impl ProviderHandler for S5rProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let input = json!({
-            "request_id": ctx.request_id(),
-            "session_id": ctx.session_id().to_string(),
-            "working_dir": ctx.working_dir().display().to_string(),
-            "model": ctx.model(),
-            "messages": ctx.shared_messages().iter().map(|m| m.as_ref()).collect::<Vec<_>>(),
-        });
+        let input = serialize_hook_input(ProviderHookInput {
+            request_id: ctx.request_id().to_string(),
+            session_id: ctx.session_id().to_string(),
+            working_dir: ctx.working_dir().display().to_string(),
+            model: ctx.model().clone(),
+            messages: ctx
+                .shared_messages()
+                .iter()
+                .map(|m| (**m).clone())
+                .collect(),
+        })?;
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_provider_result(&response)
@@ -651,14 +670,17 @@ impl ProviderContributionHandler for S5rProviderContributionHandler {
         ctx: ProviderContext,
     ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let input = json!({
-            "phase": "prepare",
-            "request_id": ctx.request_id(),
-            "session_id": ctx.session_id().to_string(),
-            "working_dir": ctx.working_dir().display().to_string(),
-            "model": ctx.model(),
-            "messages": ctx.shared_messages().iter().map(|m| m.as_ref()).collect::<Vec<_>>(),
-        });
+        let input = serialize_hook_input(ProviderContributionHookInput::Prepare {
+            request_id: ctx.request_id().to_string(),
+            session_id: ctx.session_id().to_string(),
+            working_dir: ctx.working_dir().display().to_string(),
+            model: ctx.model().clone(),
+            messages: ctx
+                .shared_messages()
+                .iter()
+                .map(|m| (**m).clone())
+                .collect(),
+        })?;
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_provider_contribution(&response)
@@ -666,14 +688,13 @@ impl ProviderContributionHandler for S5rProviderContributionHandler {
 
     async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let input = json!({
-            "phase": "acknowledge",
-            "request_id": ctx.request_id(),
-            "contribution_id": ctx.contribution_id(),
-            "session_id": ctx.session_id().to_string(),
-            "working_dir": ctx.working_dir().display().to_string(),
-            "model": ctx.model(),
-        });
+        let input = serialize_hook_input(ProviderContributionHookInput::Acknowledge {
+            request_id: ctx.request_id().to_string(),
+            contribution_id: ctx.contribution_id().to_string(),
+            session_id: ctx.session_id().to_string(),
+            working_dir: ctx.working_dir().display().to_string(),
+            model: ctx.model().clone(),
+        })?;
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         if response.effect == HandlerEffect::Ok {
@@ -692,14 +713,14 @@ s5r_hook_handler!(
     ContinueAfterStopHandler,
     ContinueAfterStopContext,
     ContinueAfterStopResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "assistant_text": ctx.assistant_text(),
-        "finish_reason": ctx.finish_reason(),
-        "continuations_this_turn": ctx.continuations_this_turn(),
-    }),
+    |ctx| ContinueAfterStopHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        assistant_text: ctx.assistant_text().to_owned(),
+        finish_reason: ctx.finish_reason().to_owned(),
+        continuations_this_turn: ctx.continuations_this_turn(),
+    },
     parse_continue_after_stop_result
 );
 
@@ -708,11 +729,11 @@ s5r_hook_handler!(
     PromptBuildHandler,
     PromptBuildContext,
     PromptContributions,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-    }),
+    |ctx| PromptBuildHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+    },
     parse_prompt_build_result
 );
 
@@ -721,15 +742,15 @@ s5r_hook_handler!(
     PreCompactHandler,
     PreCompactContext,
     PreCompactResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "trigger": ctx.trigger(),
-        "message_count": ctx.message_count(),
-        "source_messages": ctx.source_messages(),
-        "retained_file_limit": ctx.retained_file_limit(),
-    }),
+    |ctx| PreCompactHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        trigger: ctx.trigger(),
+        message_count: ctx.message_count(),
+        source_messages: ctx.source_messages().to_vec(),
+        retained_file_limit: ctx.retained_file_limit(),
+    },
     parse_pre_compact_result
 );
 
@@ -738,16 +759,16 @@ s5r_hook_handler!(
     PostCompactHandler,
     PostCompactContext,
     (),
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "trigger": ctx.trigger(),
-        "message_count": ctx.message_count(),
-        "pre_tokens": ctx.pre_tokens(),
-        "post_tokens": ctx.post_tokens(),
-        "summary": ctx.summary(),
-    }),
+    |ctx| PostCompactHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        trigger: ctx.trigger(),
+        message_count: ctx.message_count(),
+        pre_tokens: ctx.pre_tokens(),
+        post_tokens: ctx.post_tokens(),
+        summary: ctx.summary().to_owned(),
+    },
     parse_post_compact_result
 );
 
@@ -756,12 +777,12 @@ s5r_hook_handler!(
     LifecycleHandler,
     LifecycleContext,
     HookResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced(),
-    }),
+    |ctx| LifecycleHookInput {
+        session_id: ctx.session_id().to_string(),
+        working_dir: ctx.working_dir().display().to_string(),
+        model: ctx.model().clone(),
+        mid_turn_user_messages_synced: ctx.mid_turn_user_messages_synced(),
+    },
     parse_lifecycle_result
 );
 

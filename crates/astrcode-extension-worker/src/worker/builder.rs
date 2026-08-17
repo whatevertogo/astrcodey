@@ -2,13 +2,22 @@
 
 use std::{future::Future, sync::Arc};
 
+use astrcode_extension_sdk::s5r::hooks::{
+    ContinueAfterStopHookInput, PostCompactHookInput, PostToolUseHookInput, PreCompactHookInput,
+    PromptBuildHookInput, ProviderContributionHookInput, ProviderHookInput, ToolUseHookInput,
+    prompt_contributions_to_wire, provider_contribution_to_wire,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
     WireErrorCode,
-    extension::{ExtensionHttpRequest, ExtensionHttpResponse},
-    s5r::{ErrorPayload, HandlerResult},
+    extension::{
+        ContinueAfterStopResult, ExtensionHttpRequest, ExtensionHttpResponse, PostToolUseResult,
+        PreCompactResult, PreToolUseResult, PromptContributions, ProviderResult,
+        ToolInputTransformResult,
+    },
+    s5r::{ErrorPayload, HandlerResult, ProviderContributionData},
     worker::registry::{
         CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn,
         HttpHandlerFn, ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
@@ -165,9 +174,110 @@ where
     Arc::new(move |request, ctx| Box::pin(f(request, ctx)))
 }
 
+/// 生成固定输入/输出类型的 hook handler 构造器:反序列化宿主 hook 载荷,
+/// 并把 SDK hook 结果枚举映射为宿主可解析的 wire `HandlerResult`。
+macro_rules! typed_hook_handler {
+    ($(#[$meta:meta])* $name:ident, $input:ty, $output:ty, |$result:ident| $convert:expr) => {
+        $(#[$meta])*
+        pub fn $name<F, Fut>(f: F) -> HookHandlerFn
+        where
+            F: Fn($input, WorkerInvocationContext) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = Result<$output, ErrorPayload>> + Send + 'static,
+        {
+            Arc::new(move |event, ctx| match parse_hook_input::<$input>(&event) {
+                Err(error) => Box::pin(async move { Err(error) }),
+                Ok(input) => {
+                    let future = f(input, ctx);
+                    Box::pin(async move {
+                        let $result = future.await?;
+                        $convert
+                    })
+                },
+            })
+        }
+    };
+}
+
+typed_hook_handler!(
+    /// 类型化 `pre_tool_use` 准入 hook handler。
+    pre_tool_use_handler,
+    ToolUseHookInput,
+    PreToolUseResult,
+    |result| Ok(HandlerResult::from(result))
+);
+
+typed_hook_handler!(
+    /// 类型化 `tool_input_transform` hook handler。
+    tool_input_transform_handler,
+    ToolUseHookInput,
+    ToolInputTransformResult,
+    |result| Ok(HandlerResult::from(result))
+);
+
+typed_hook_handler!(
+    /// 类型化 `post_tool_use` hook handler;与 `Worker::hook(LifecycleEvent::PostToolUse, ..)` 组合使用。
+    post_tool_use_handler,
+    PostToolUseHookInput,
+    PostToolUseResult,
+    |result| Ok(HandlerResult::from(result))
+);
+
+typed_hook_handler!(
+    /// 类型化 provider hook handler,适用于 `before_provider_request` 与 `after_provider_response`。
+    provider_handler,
+    ProviderHookInput,
+    ProviderResult,
+    |result| Ok(HandlerResult::from(result))
+);
+
+typed_hook_handler!(
+    /// 类型化 `provider_contribution` hook handler;`None` 表示本请求无贡献,
+    /// `acknowledge` 阶段的返回值被忽略并固定应答 `ok`。
+    provider_contribution_handler,
+    ProviderContributionHookInput,
+    Option<ProviderContributionData>,
+    |result| provider_contribution_to_wire(result)
+);
+
+typed_hook_handler!(
+    /// 类型化 `continue_after_stop` hook handler。
+    continue_after_stop_handler,
+    ContinueAfterStopHookInput,
+    ContinueAfterStopResult,
+    |result| Ok(HandlerResult::from(result))
+);
+
+typed_hook_handler!(
+    /// 类型化 `prompt_build` hook handler;空贡献自动折叠为 `ok`。
+    prompt_build_handler,
+    PromptBuildHookInput,
+    PromptContributions,
+    |result| prompt_contributions_to_wire(result)
+);
+
+typed_hook_handler!(
+    /// 类型化 `pre_compact` hook handler;`Block` 在 S5R 上不受支持,会被提前拒绝。
+    pre_compact_handler,
+    PreCompactHookInput,
+    PreCompactResult,
+    |result| HandlerResult::try_from(result)
+);
+
+typed_hook_handler!(
+    /// 类型化 `post_compact` 通知 hook handler;返回值被忽略并固定应答 `ok`。
+    post_compact_handler,
+    PostCompactHookInput,
+    (),
+    |result| {
+        let () = result;
+        Ok(HandlerResult::ok())
+    }
+);
+
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use serde_json::json;
 
     use super::*;
     use crate::s5r::HandlerEffect;
@@ -175,6 +285,48 @@ mod tests {
     #[derive(Deserialize)]
     struct GreetArgs {
         name: String,
+    }
+
+    #[tokio::test]
+    async fn typed_pre_tool_use_handler_parses_input_and_maps_decision() {
+        let handler = pre_tool_use_handler(|input: ToolUseHookInput, ctx| async move {
+            assert_eq!(input.tool_name, "shell");
+            assert_eq!(ctx.session_id(), "session-1");
+            Ok(PreToolUseResult::Block {
+                reason: format!("blocked {}", input.tool_name),
+            })
+        });
+        let event = || {
+            json!({ "input": {
+                "session_id": "session-1",
+                "working_dir": "/workspace",
+                "model": { "profile_name": "default", "model": "m", "provider_kind": "openai" },
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "tool_input": { "command": "rm -rf /" },
+                "available_tools": []
+            }})
+        };
+        let make_ctx = || {
+            crate::worker::registry::WorkerCallFacts::from_event(
+                "ext".into(),
+                crate::worker::CancelToken::default(),
+                &event(),
+            )
+            .unwrap()
+            .into_invocation("hook")
+            .unwrap()
+        };
+
+        let result = handler(event(), make_ctx()).await.unwrap();
+        assert_eq!(result.effect, HandlerEffect::Block);
+        assert_eq!(result.data["reason"], json!("blocked shell"));
+
+        // 缺字段的载荷在反序列化处失败,不会进入 handler。
+        let error = handler(json!({ "input": {} }), make_ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
     }
 
     #[tokio::test]
