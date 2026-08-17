@@ -9,7 +9,7 @@ use astrcode_core::{
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{send_event, stream_text_delta, token_usage_has_value},
+    common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix},
     stream_decoder::clean_json_fragment,
 };
 
@@ -70,34 +70,34 @@ impl StandardAccumulator {
         let partial = self.tool_calls.entry(index).or_default();
         if let Some(id) = id {
             partial.id = Some(id.to_string());
-        } else if partial.id.is_none() {
-            if let Some(fallback) = fallback_id {
-                partial.id = Some(fallback.to_string());
-            }
+        } else if partial.id.is_none()
+            && let Some(fallback) = fallback_id
+        {
+            partial.id = Some(fallback.to_string());
         }
         if let Some(name) = function["name"].as_str() {
             partial.name = Some(name.to_string());
         }
 
         let arguments = function.get("arguments").and_then(json_argument_fragment);
-        if !partial.started {
-            if let Some(name) = partial.name.clone() {
-                let call_id = chat_tool_call_id(index, partial);
-                partial.emitted_call_id = Some(call_id.clone());
-                partial.started = true;
-                self.saw_tool_call = true;
-                send_event(
-                    tx,
-                    LlmEvent::ToolCallStart {
-                        call_id: call_id.clone(),
-                        name,
-                        arguments: String::new(),
-                    },
-                );
-                if !partial.pending_arguments.is_empty() {
-                    let delta = std::mem::take(&mut partial.pending_arguments);
-                    send_event(tx, LlmEvent::ToolCallDelta { call_id, delta });
-                }
+        if !partial.started
+            && let Some(name) = partial.name.clone()
+        {
+            let call_id = chat_tool_call_id(index, partial);
+            partial.emitted_call_id = Some(call_id.clone());
+            partial.started = true;
+            self.saw_tool_call = true;
+            send_event(
+                tx,
+                LlmEvent::ToolCallStart {
+                    call_id: call_id.clone(),
+                    name,
+                    arguments: String::new(),
+                },
+            );
+            if !partial.pending_arguments.is_empty() {
+                let delta = std::mem::take(&mut partial.pending_arguments);
+                send_event(tx, LlmEvent::ToolCallDelta { call_id, delta });
             }
         }
 
@@ -182,36 +182,42 @@ impl StandardAccumulator {
 }
 
 impl StandardAccumulator {
+    fn report_usage_once(
+        &mut self,
+        event: &serde_json::Value,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+    ) {
+        if !self.cache_usage_reported
+            && let Some(usage) = extract_token_usage(event)
+        {
+            send_event(tx, LlmEvent::Usage { usage });
+            self.cache_usage_reported = true;
+        }
+    }
+
     pub(crate) fn ingest_chat_completion(
         &mut self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) {
-        if !self.cache_usage_reported {
-            if let Some(usage) = extract_token_usage(event) {
-                send_event(tx, LlmEvent::Usage { usage });
-                self.cache_usage_reported = true;
-            }
-        }
+        self.report_usage_once(event, tx);
         if let Some(choices) = event["choices"].as_array() {
             for choice in choices {
                 if let Some(delta) = choice.get("delta") {
-                    if let Some(content) = delta["content"].as_str() {
-                        if let Some(incremental) = stream_text_delta(&mut self.text, content) {
-                            send_event(tx, LlmEvent::ContentDelta { delta: incremental });
-                        }
+                    if let Some(content) = delta["content"].as_str()
+                        && let Some(incremental) = stream_text_delta(&mut self.text, content)
+                    {
+                        send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                     }
                     if let Some(reasoning) = delta
                         .get("reasoning_content")
                         .or_else(|| delta.get("reasoning"))
                         .or_else(|| delta.get("thinking"))
                         .and_then(|value| value.as_str())
-                    {
-                        if let Some(incremental) =
+                        && let Some(incremental) =
                             stream_text_delta(&mut self.reasoning_accumulated, reasoning)
-                        {
-                            send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
-                        }
+                    {
+                        send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                     }
                     // Some providers emit cumulative reasoning_details[].text.
                     if let Some(details) = delta.get("reasoning_details").and_then(|v| v.as_array())
@@ -249,30 +255,24 @@ impl StandardAccumulator {
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) {
-        if !self.cache_usage_reported {
-            if let Some(usage) = extract_token_usage(event) {
-                send_event(tx, LlmEvent::Usage { usage });
-                self.cache_usage_reported = true;
-            }
-        }
+        self.report_usage_once(event, tx);
         let Some(event_type) = event["type"].as_str() else {
             return;
         };
         match event_type {
             "response.output_text.delta" => {
-                if let Some(delta) = event["delta"].as_str() {
-                    if let Some(incremental) = stream_text_delta(&mut self.text, delta) {
-                        send_event(tx, LlmEvent::ContentDelta { delta: incremental });
-                    }
+                if let Some(delta) = event["delta"].as_str()
+                    && let Some(incremental) = stream_text_delta(&mut self.text, delta)
+                {
+                    send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                 }
             },
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                if let Some(delta) = event["delta"].as_str() {
-                    if let Some(incremental) =
+                if let Some(delta) = event["delta"].as_str()
+                    && let Some(incremental) =
                         stream_text_delta(&mut self.reasoning_accumulated, delta)
-                    {
-                        send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
-                    }
+                {
+                    send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                 }
             },
             "response.output_item.added" => {
@@ -315,21 +315,21 @@ impl StandardAccumulator {
                 partial.name = Some(name.to_string());
                 let item_arguments = item.get("arguments").and_then(json_argument_fragment);
                 let started_call_id = self.emit_response_tool_start(item_id, tx);
-                if let (Some(call_id), Some(arguments)) = (started_call_id, item_arguments) {
-                    if !arguments.is_empty() {
-                        let partial = self
-                            .response_tool_items
-                            .entry(item_id.to_string())
-                            .or_default();
-                        partial.arguments_delta_seen = true;
-                        send_event(
-                            tx,
-                            LlmEvent::ToolCallDelta {
-                                call_id,
-                                delta: arguments,
-                            },
-                        );
-                    }
+                if let (Some(call_id), Some(arguments)) = (started_call_id, item_arguments)
+                    && !arguments.is_empty()
+                {
+                    let partial = self
+                        .response_tool_items
+                        .entry(item_id.to_string())
+                        .or_default();
+                    partial.arguments_delta_seen = true;
+                    send_event(
+                        tx,
+                        LlmEvent::ToolCallDelta {
+                            call_id,
+                            delta: arguments,
+                        },
+                    );
                 }
             },
             "response.function_call_arguments.delta" => {
@@ -401,20 +401,19 @@ impl StandardAccumulator {
                     .response_tool_items
                     .entry(item_id.to_string())
                     .or_default();
-                if !partial.arguments_delta_seen {
-                    if let Some(arguments) = event.get("arguments").and_then(json_argument_fragment)
-                    {
-                        if arguments.is_empty() {
-                            return;
-                        }
-                        send_event(
-                            tx,
-                            LlmEvent::ToolCallDelta {
-                                call_id: call_id.clone(),
-                                delta: arguments,
-                            },
-                        );
+                if !partial.arguments_delta_seen
+                    && let Some(arguments) = event.get("arguments").and_then(json_argument_fragment)
+                {
+                    if arguments.is_empty() {
+                        return;
                     }
+                    send_event(
+                        tx,
+                        LlmEvent::ToolCallDelta {
+                            call_id: call_id.clone(),
+                            delta: arguments,
+                        },
+                    );
                 }
                 partial.completed = true;
                 send_event(tx, LlmEvent::ToolCallCompleted { call_id });
@@ -522,11 +521,11 @@ fn process_sse_data(
     }
 
     let cleaned = clean_json_fragment(data);
-    if cleaned != data {
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned) {
-            ingest_sse_event(&event, accumulator, api_mode, tx);
-            return;
-        }
+    if cleaned != data
+        && let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned)
+    {
+        ingest_sse_event(&event, accumulator, api_mode, tx);
+        return;
     }
 
     let api_mode_name = match api_mode {
@@ -537,7 +536,7 @@ fn process_sse_data(
         "Failed to parse {} SSE data: {} bytes, preview: {:?}",
         api_mode_name,
         data.len(),
-        &data[..data.floor_char_boundary(80)]
+        utf8_prefix(data, 80)
     );
 }
 
@@ -644,6 +643,7 @@ fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
         input_tokens,
         cached_input_tokens,
         cache_creation_input_tokens: None,
+        input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
         output_tokens,
         reasoning_output_tokens,
         total_tokens,
@@ -791,6 +791,8 @@ mod accumulator_tests {
             [LlmEvent::Usage { usage }]
                 if usage.input_tokens == Some(100)
                     && usage.cached_input_tokens == Some(64)
+                    && usage.input_accounting
+                        == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                     && usage.output_tokens == Some(20)
                     && usage.reasoning_output_tokens == Some(5)
                     && usage.total_tokens == Some(120)
@@ -830,6 +832,8 @@ mod accumulator_tests {
                 LlmEvent::Done { finish_reason }
             ] if usage.input_tokens == Some(100)
                 && usage.cached_input_tokens == Some(64)
+                && usage.input_accounting
+                    == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                 && usage.output_tokens == Some(20)
                 && usage.total_tokens == Some(120)
                 && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
@@ -877,6 +881,8 @@ mod accumulator_tests {
             LlmEvent::Usage { usage }
                 if usage.input_tokens == Some(50)
                     && usage.cached_input_tokens == Some(32)
+                    && usage.input_accounting
+                        == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                     && usage.output_tokens == Some(10)
                     && usage.reasoning_output_tokens == Some(3)
                     && usage.total_tokens == Some(60)

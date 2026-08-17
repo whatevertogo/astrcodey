@@ -2,7 +2,9 @@
 // limited to frontend state and the strictly decoded conversation/SSE model.
 
 import type {
+  AgentSessionLinkDto,
   AgentSessionStatusDto,
+  AgentSessionUpdateDto,
   ApprovalDecisionDto,
   ApprovalModeDto,
   ApplyProviderPresetRequest,
@@ -15,6 +17,7 @@ import type {
   ConfigViewResponseDto,
   ConversationBlockStatusDto,
   ConversationCursorDto,
+  ConversationTimelineCursorDto,
   CreateSessionRequest,
   CreateSessionResponseDto,
   CurrentModelResponseDto,
@@ -129,19 +132,12 @@ export type SessionListResponse = SessionListResponseDto
 
 export type AgentSessionStatus = AgentSessionStatusDto
 
-export interface AgentSessionLink {
-  childSessionId: string
-  toolCallId?: string
-  agentName?: string
-  task?: string
-  /** 省略时表示仅更新 phase/currentTool，不改动终态 status */
-  status?: AgentSessionStatus
-  finalSessionId?: string
-  summary?: string
-  error?: string
+export type AgentSessionLink = AgentSessionLinkDto & {
   phase?: Phase
   currentTool?: string
 }
+
+export type AgentSessionUpdate = AgentSessionUpdateDto
 
 export type ConversationCursor = ConversationCursorDto
 
@@ -149,8 +145,6 @@ export interface ConversationControlState {
   phase: Phase
   canSubmitPrompt: boolean
   canRequestCompact: boolean
-  compactPending: boolean
-  compacting: boolean
   activeTurnId?: string
   retryStatus?: LlmRetryStatusDto
 }
@@ -160,8 +154,7 @@ export type ConversationBlock =
       kind: 'user'
       id: string
       text: string
-      attachments?: PromptAttachmentWire[]
-      source?: string
+      attachments: PromptAttachmentWire[]
     }
   | {
       kind: 'assistant'
@@ -183,7 +176,7 @@ export type ConversationBlock =
       approval?: ToolApproval
     }
   | { kind: 'error'; id: string; message: string }
-  | { kind: 'recap'; id: string; text: string; source?: string }
+  | { kind: 'recap'; id: string; text: string; source: string }
   | { kind: 'systemNote'; id: string; text: string }
   | {
       kind: 'compactSummary'
@@ -199,10 +192,25 @@ export interface ConversationSnapshot {
   sessionId: string
   sessionTitle: string
   cursor: ConversationCursor
-  phase: Phase
   control: ConversationControlState
   blocks: ConversationBlock[]
   agentSessions: AgentSessionLink[]
+}
+
+export interface ConversationState {
+  sessionId: string
+  sessionTitle: string
+  cursor: ConversationCursor
+  control: ConversationControlState
+  transientBlocks: ConversationBlock[]
+  agentSessions: AgentSessionLink[]
+}
+
+export interface ConversationItemsPage {
+  items: ConversationBlock[]
+  olderCursor?: ConversationTimelineCursorDto
+  hasOlder: boolean
+  snapshotCursor: ConversationCursor
 }
 
 // ── SSE Stream ──
@@ -243,6 +251,12 @@ export interface PendingAskUserQuestionsResponse {
 
 export type ConversationDelta =
   | { kind: 'appendBlock'; block: ConversationBlock }
+  | {
+      kind: 'appendTransientBlock'
+      turnId: string
+      block: ConversationBlock
+    }
+  | { kind: 'clearTransientBlocks'; turnId: string }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
   | { kind: 'resetBlock'; blockId: string }
   | { kind: 'finalizeBlock'; block: ConversationBlock }
@@ -267,12 +281,12 @@ export type ConversationDelta =
       arguments: string
       argumentsJson?: Record<string, unknown>
     }
-  | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
+  | { kind: 'agentSessionUpdated'; agentSession: AgentSessionUpdate }
   | { kind: 'agentSessionRemoved'; childSessionId: string }
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }
   | {
-      kind: 'extensionEvent'
+      kind: 'customEvent'
       extensionId: string
       eventType: string
       schemaVersion: number

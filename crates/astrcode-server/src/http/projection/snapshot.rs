@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
-    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto, ToolApprovalDto,
+    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto,
+    ConversationStateResponseDto, ToolApprovalDto, ToolCallStatusDto,
 };
 use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
@@ -28,21 +29,26 @@ pub(in crate::http) fn conversation_to_dto(
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
-    let latest_compaction = latest_compaction(&session.compactions);
+    let latest_compaction = latest_compaction(&session.model_context.compactions);
     if let Some(compaction) = latest_compaction {
         blocks.push(compact_summary_block(compaction));
     }
     blocks.extend(transcript_blocks(
-        &session.transcript.messages,
-        &session.transcript.artifacts,
+        &session.model_context.messages,
+        &session.presentation.artifacts,
         latest_compaction.map(|compaction| compaction.source_seq),
     ));
+    if session.execution.unsettled_turn_id.is_none() {
+        finalize_orphaned_tool_blocks(&mut blocks);
+    }
     apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
     // 需要从 runtime 的 live 投影补充，让重连客户端看到已流出的文本。
-    if let Some(msg) = streaming {
+    if session.execution.unsettled_turn_id.is_some()
+        && let Some(msg) = streaming
+    {
         blocks.push(streaming_assistant_block(
             msg.message_id.clone(),
             msg.text.clone(),
@@ -56,10 +62,9 @@ pub(in crate::http) fn conversation_to_dto(
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
-        phase: session.execution.phase.into(),
         control: control_from_phase(
             session.execution.phase,
-            !session.transcript.messages.is_empty(),
+            !session.model_context.messages.is_empty(),
         ),
         blocks,
         agent_sessions: session
@@ -67,6 +72,75 @@ pub(in crate::http) fn conversation_to_dto(
             .iter()
             .map(agent_session_link_to_dto)
             .collect(),
+    }
+}
+
+pub(in crate::http) fn conversation_state_to_dto(
+    session: &SessionReadModel,
+    streaming: Option<&StreamingSnapshot>,
+) -> ConversationStateResponseDto {
+    let transient_blocks = if session.execution.unsettled_turn_id.is_some() {
+        streaming
+            .map(|message| {
+                vec![streaming_assistant_block(
+                    message.message_id.clone(),
+                    message.text.clone(),
+                    message.reasoning_content.clone(),
+                )]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    ConversationStateResponseDto {
+        session_id: session.identity.session_id.to_string(),
+        session_title: session
+            .first_user_message()
+            .map(str::to_owned)
+            .unwrap_or_else(|| session_title_from_working_dir(&session.identity.working_dir)),
+        cursor: ConversationCursorDto {
+            value: session.cursor(),
+        },
+        control: control_from_phase(
+            session.execution.phase,
+            !session.model_context.messages.is_empty(),
+        ),
+        transient_blocks,
+        agent_sessions: session
+            .agent_sessions
+            .iter()
+            .map(agent_session_link_to_dto)
+            .collect(),
+    }
+}
+
+pub(in crate::http) fn decorate_timeline_items(
+    blocks: &mut [ConversationBlockDto],
+    session: &SessionReadModel,
+    is_latest_page: bool,
+) {
+    if !is_latest_page {
+        return;
+    }
+    if session.execution.unsettled_turn_id.is_none() {
+        finalize_orphaned_tool_blocks(blocks);
+    }
+    apply_pending_tool_approvals(blocks, &session.execution.pending_tool_approvals);
+}
+
+fn finalize_orphaned_tool_blocks(blocks: &mut [ConversationBlockDto]) {
+    for block in blocks {
+        let ConversationBlockDto::ToolCall { text, status, .. } = block else {
+            continue;
+        };
+        if *status != ToolCallStatusDto::Streaming {
+            continue;
+        }
+        *status = ToolCallStatusDto::Failed;
+        if text.is_empty() {
+            *text = "tool execution interrupted before completion".into();
+        }
     }
 }
 
@@ -98,42 +172,45 @@ fn apply_pending_tool_approvals(
 mod tests {
     use astrcode_core::{
         event::{
-            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
-            SystemPromptSource,
+            DurableEvent, DurableEventPayload, Event, PersistedSystemPrompt, SessionStarted,
+            StoredEvent, SystemPromptSource,
         },
         llm::{LlmContent, LlmMessage, LlmRole},
         tool::SessionToolSelection,
+        types::{SessionId, new_message_id},
     };
-    use astrcode_protocol::http::ToolCallStatusDto;
+    use astrcode_protocol::http::{ConversationDeltaDto, ToolCallStatusDto};
     use astrcode_session_projection::replay;
 
     use super::*;
+    use crate::http::projection::live::event_to_deltas;
+
+    fn session_started_event(session_id: SessionId) -> StoredEvent {
+        StoredEvent::new(
+            0,
+            DurableEvent::session(
+                session_id,
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "D:/work/project".into(),
+                    model_id: "model".into(),
+                    parent: None,
+                    tool_selection: SessionToolSelection::default(),
+                    source_extension: None,
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ),
+        )
+    }
 
     fn session_read_model(session_id: &str) -> SessionReadModel {
-        let session_id: astrcode_core::types::SessionId = session_id.into();
-        replay(
-            session_id.clone(),
-            &[StoredEvent::new(
-                0,
-                DurableEvent::session(
-                    session_id,
-                    DurableEventPayload::SessionStarted(SessionStarted {
-                        working_dir: "D:/work/project".into(),
-                        model_id: "model".into(),
-                        parent: None,
-                        tool_selection: SessionToolSelection::default(),
-                        source_extension: None,
-                        initial_system_prompt: PersistedSystemPrompt {
-                            text: "system".into(),
-                            fingerprint: "fingerprint".into(),
-                            extra_system_prompt: None,
-                            source: SystemPromptSource::Native,
-                        },
-                    }),
-                ),
-            )],
-        )
-        .unwrap()
+        let session_id: SessionId = session_id.into();
+        let started = session_started_event(session_id.clone());
+        replay(session_id, &[started]).unwrap()
     }
 
     fn session_with_tool_call(
@@ -143,11 +220,12 @@ mod tests {
         arguments: serde_json::Value,
     ) -> SessionReadModel {
         let mut session = session_read_model(session_id);
+        session.execution.unsettled_turn_id = Some("turn-1".into());
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage {
+                message: std::sync::Arc::new(LlmMessage {
                     role: LlmRole::Assistant,
                     content: vec![LlmContent::ToolCall {
                         call_id: call_id.into(),
@@ -157,11 +235,45 @@ mod tests {
                     }],
                     name: None,
                     reasoning_content: None,
-                },
+                }),
                 updated_seq: 1,
-                source: None,
+                origin: None,
             });
         session
+    }
+
+    #[test]
+    fn closed_turn_projects_unanswered_tool_call_as_interrupted() {
+        let mut session = session_with_tool_call(
+            "session-interrupted",
+            "tool-interrupted",
+            "read",
+            serde_json::json!({ "path": "README.md" }),
+        );
+        session.execution.unsettled_turn_id = None;
+
+        let dto = conversation_to_dto(&session, None);
+
+        assert!(matches!(
+            dto.blocks.as_slice(),
+            [ConversationBlockDto::ToolCall { status, text, .. }]
+                if *status == ToolCallStatusDto::Failed
+                    && text == "tool execution interrupted before completion"
+        ));
+    }
+
+    #[test]
+    fn closed_turn_ignores_stale_runtime_streaming_snapshot() {
+        let session = session_read_model("session-closed");
+        let streaming = StreamingSnapshot {
+            message_id: "assistant-stale".into(),
+            text: "partial answer".into(),
+            reasoning_content: None,
+        };
+
+        let dto = conversation_to_dto(&session, Some(&streaming));
+
+        assert!(dto.blocks.is_empty());
     }
 
     #[test]
@@ -169,12 +281,12 @@ mod tests {
         let mut session = session_read_model("session-1");
         session.stats.last_seq = 9;
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::assistant("hello"),
+                message: std::sync::Arc::new(LlmMessage::assistant("hello")),
                 updated_seq: 4,
-                source: None,
+                origin: None,
             });
 
         let dto = conversation_to_dto(&session, None);
@@ -199,12 +311,17 @@ mod tests {
             serde_json::json!({ "path": "Cargo.toml" }),
         );
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::tool("read", "tool-1", "file contents", false),
+                message: std::sync::Arc::new(LlmMessage::tool(
+                    "read",
+                    "tool-1",
+                    "file contents",
+                    false,
+                )),
                 updated_seq: 2,
-                source: None,
+                origin: None,
             });
 
         let dto = conversation_to_dto(&session, None);
@@ -269,14 +386,14 @@ mod tests {
         let mut session = session_read_model("session-multi-compact");
         session.stats.last_seq = 20;
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::user("latest user"),
+                message: std::sync::Arc::new(LlmMessage::user("latest user")),
                 updated_seq: 1,
-                source: None,
+                origin: None,
             });
-        session.compactions.push(CompactionView {
+        session.model_context.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 800,
             post_tokens: 100,
@@ -286,7 +403,7 @@ mod tests {
             source_seq: 4,
             strategy: CompactStrategy::Auto,
         });
-        session.compactions.push(CompactionView {
+        session.model_context.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 600,
             post_tokens: 80,
@@ -308,5 +425,79 @@ mod tests {
             other => panic!("expected CompactSummary, got {other:?}"),
         }
         assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
+    }
+
+    #[test]
+    fn recap_keeps_the_same_shape_in_live_delta_and_reconnected_snapshot() {
+        let session_id = SessionId::new("session-recap");
+        let recap = StoredEvent::new(
+            2,
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::RecapGenerated {
+                    text: "Decisions and next steps".into(),
+                    source: "manual".into(),
+                },
+            ),
+        );
+        let events = vec![
+            session_started_event(session_id.clone()),
+            StoredEvent::new(
+                1,
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: "Summarize this session".into(),
+                        attachments: Vec::new(),
+                        accepted_seq: None,
+                    },
+                ),
+            ),
+            recap.clone(),
+            StoredEvent::new(
+                3,
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::ErrorOccurred {
+                        code: 500,
+                        message: "A later display artifact".into(),
+                        recoverable: true,
+                    },
+                ),
+            ),
+        ];
+
+        let live_deltas = event_to_deltas(&Event::from(&recap), true);
+        let [
+            ConversationDeltaDto::AppendBlock {
+                block:
+                    ConversationBlockDto::Recap {
+                        id: live_id,
+                        text: live_text,
+                        source: live_source,
+                    },
+            },
+        ] = live_deltas.as_slice()
+        else {
+            panic!("unexpected recap live deltas: {live_deltas:?}");
+        };
+
+        let session = replay(session_id, &events).unwrap();
+        let snapshot = conversation_to_dto(&session, None);
+
+        assert_eq!(snapshot.cursor.value, "3");
+        assert!(matches!(
+            snapshot.blocks.as_slice(),
+            [
+                ConversationBlockDto::User { text, .. },
+                ConversationBlockDto::Recap { id, text: recap_text, source },
+                ConversationBlockDto::Error { message, .. },
+            ] if text == "Summarize this session"
+                && id == live_id
+                && recap_text == live_text
+                && source == live_source
+                && message == "A later display artifact"
+        ));
     }
 }

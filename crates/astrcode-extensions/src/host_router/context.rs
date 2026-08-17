@@ -1,96 +1,183 @@
 //! Extension-scoped state and event capabilities.
 
-use astrcode_extension_sdk::{s5r::ErrorPayload, state};
-use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    io::Read as _,
+    path::{Path, PathBuf},
+    sync::{Arc, Weak},
+};
 
-use super::{InvokeContext, capability::ContextCapability, emit_for_sink};
+use astrcode_core::{
+    config::defaults::extension_data_dir,
+    event::{EventDeliveryReceipt, EventSendError},
+};
+use astrcode_extension_sdk::{
+    extension::ExtensionError,
+    host::{
+        Acknowledgement, HOST_SESSION_STATE_VALUE_MAX_BYTES, HostEventEmitOutput,
+        HostEventEmitRequest, HostOperation, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, internal::HostOperationGroup,
+    },
+    hostpaths::write_file_atomic,
+    s5r::ErrorPayload,
+    wire::WireErrorCode,
+};
+use serde_json::Value;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
+use super::{
+    InvokeContext, acknowledgement, backend_unavailable, dispatch, emit_for_sink_confirmed,
+    invalid_group_operation, io_error, run_blocking_io, run_blocking_io_to_completion,
+};
 
 #[derive(Default)]
-pub(super) struct ContextGroup;
+pub(super) struct SessionStateWriteGates {
+    gates: parking_lot::Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>,
+}
 
-impl ContextGroup {
-    pub(super) fn invoke(
-        &self,
-        capability: ContextCapability,
-        input: &Value,
-        ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        match capability {
-            ContextCapability::StateRead => read_state(input, ctx),
-            ContextCapability::StateWrite => write_state(input, ctx),
-            ContextCapability::EmitEvent => emit_event(input, ctx),
+impl SessionStateWriteGates {
+    async fn lock(&self, path: &Path) -> OwnedMutexGuard<()> {
+        self.gate(path).lock_owned().await
+    }
+
+    fn gate(&self, path: &Path) -> Arc<AsyncMutex<()>> {
+        let mut gates = self.gates.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+            return gate;
         }
+
+        let gate = Arc::new(AsyncMutex::new(()));
+        gates.insert(path.to_path_buf(), Arc::downgrade(&gate));
+        gate
     }
 }
 
-fn read_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+pub(super) async fn invoke(
+    operation: HostOperation,
+    input: &Value,
+    ctx: &InvokeContext,
+    state_writes: &SessionStateWriteGates,
+) -> Result<Value, ErrorPayload> {
+    match operation {
+        HostOperation::SessionStateRead => {
+            dispatch(operation, input, |request| read_state(request, ctx)).await
+        },
+        HostOperation::SessionStateWrite => {
+            dispatch(operation, input, |request| {
+                write_state(request, ctx, state_writes)
+            })
+            .await
+        },
+        HostOperation::EventEmit => {
+            dispatch(operation, input, |request| emit_event(request, ctx)).await
+        },
+        _ => Err(invalid_group_operation(
+            operation,
+            HostOperationGroup::Context,
+        )),
+    }
+}
+
+async fn read_state(
+    request: HostSessionStateReadRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionStateReadOutput, ErrorPayload> {
+    let key = request.key;
     let base = ctx
         .session_store_dir
         .as_ref()
-        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_store_dir missing"))?;
-    let key = input["key"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "key required"))?;
-    let path = state::session_data_dir(base, &ctx.extension_id).join(safe_filename(key));
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(ErrorPayload::new("io_error", error.to_string())),
-    };
-    Ok(json!({ "content": content }))
+        .cloned()
+        .ok_or_else(|| backend_unavailable("session_store_dir missing"))?;
+    let extension_id = ctx.extension_id.clone();
+    let content = run_blocking_io(move || {
+        let path = extension_data_dir(&base, &extension_id).join(key);
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(io_error(error));
+            },
+        };
+        let mut bytes = Vec::new();
+        file.take((HOST_SESSION_STATE_VALUE_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
+            return Err(ErrorPayload::new(
+                WireErrorCode::StateTooLarge,
+                format!("stored session state exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} bytes"),
+            ));
+        }
+        String::from_utf8(bytes).map(Some).map_err(io_error)
+    })
+    .await?;
+    Ok(HostSessionStateReadOutput { content })
 }
 
-fn write_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+async fn write_state(
+    request: HostSessionStateWriteRequest,
+    ctx: &InvokeContext,
+    state_writes: &SessionStateWriteGates,
+) -> Result<Acknowledgement, ErrorPayload> {
+    let key = request.key;
     let base = ctx
         .session_store_dir
         .as_ref()
-        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_store_dir missing"))?;
-    let key = input["key"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "key required"))?;
-    let content = input["content"].as_str().unwrap_or("");
-    let dir = state::session_data_dir(base, &ctx.extension_id);
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-    let path = dir.join(safe_filename(key));
-    std::fs::write(&path, content)
-        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-    Ok(json!({ "ok": true }))
+        .ok_or_else(|| backend_unavailable("session_store_dir missing"))?;
+    let content = request.content;
+    let path = extension_data_dir(base, &ctx.extension_id).join(key);
+    let write_guard = state_writes.lock(&path).await;
+    run_blocking_io_to_completion(ctx.tasks.as_ref(), "session-state-write", move || {
+        let _write_guard = write_guard;
+        write_file_atomic(&path, &content).map_err(io_error)
+    })
+    .await?;
+    Ok(acknowledgement())
 }
 
-fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let event_type = input["event_type"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "event_type required"))?;
-    let schema_version = input["schema_version"].as_u64().unwrap_or(1) as u32;
-    let payload = input.get("payload").cloned().unwrap_or(Value::Null);
-    let event_tx = ctx.event_tx.as_ref().ok_or_else(|| {
-        ErrorPayload::new("backend_unavailable", "event_tx not configured in context")
-    })?;
-    emit_for_sink(
+async fn emit_event(
+    request: HostEventEmitRequest,
+    ctx: &InvokeContext,
+) -> Result<HostEventEmitOutput, ErrorPayload> {
+    let event_tx = ctx
+        .event_tx
+        .as_ref()
+        .ok_or_else(|| backend_unavailable("event_tx not configured in context"))?;
+    let receipt = emit_for_sink_confirmed(
         &ctx.extension_id,
         &ctx.event_declarations,
         event_tx,
-        event_type,
-        schema_version,
-        payload,
+        &request.event_type,
+        request.schema_version,
+        ctx.event_causation.clone(),
+        request.payload,
     )
-    .map_err(|error| ErrorPayload::new("emit_failed", error.to_string()))?;
-    Ok(json!({ "ok": true }))
+    .await
+    .map_err(event_emit_error)?;
+    Ok(match receipt {
+        EventDeliveryReceipt::Accepted => HostEventEmitOutput::Accepted,
+        EventDeliveryReceipt::LivePublished { event_id } => HostEventEmitOutput::LivePublished {
+            event_id: event_id.into_string(),
+        },
+        EventDeliveryReceipt::Persisted { event_id, seq } => HostEventEmitOutput::Persisted {
+            event_id: event_id.into_string(),
+            seq,
+        },
+    })
 }
 
-fn safe_filename(key: &str) -> String {
-    key.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric()
-                || character == '-'
-                || character == '_'
-                || character == '.'
-            {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn event_emit_error(error: ExtensionError) -> ErrorPayload {
+    match error {
+        ExtensionError::EventSend(EventSendError::Full) => {
+            ErrorPayload::new(WireErrorCode::PeerBusy, error.to_string()).retryable(true)
+        },
+        ExtensionError::EventSend(EventSendError::Closed) => {
+            ErrorPayload::new(WireErrorCode::BackendUnavailable, error.to_string())
+        },
+        ExtensionError::EventSend(EventSendError::PublishFailed(_)) => {
+            ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string())
+        },
+        error => ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string()),
+    }
 }

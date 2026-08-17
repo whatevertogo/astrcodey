@@ -115,19 +115,19 @@ pub fn validate_thinking(config: &ThinkingConfig, capability: &ThinkingCapabilit
     }
 
     // Validate effort
-    if let Some(ref effort) = config.effort {
-        if let Some(ref allowed) = capability.allowed_effort {
-            if allowed.is_empty() {
-                issues.push(format!(
-                    "effort '{}' not supported by this provider (thinking is toggle-only)",
-                    effort
-                ));
-            } else if !allowed.contains(effort) {
-                issues.push(format!(
-                    "effort '{}' not in allowed values {:?}",
-                    effort, allowed
-                ));
-            }
+    if let Some(ref effort) = config.effort
+        && let Some(ref allowed) = capability.allowed_effort
+    {
+        if allowed.is_empty() {
+            issues.push(format!(
+                "effort '{}' not supported by this provider (thinking is toggle-only)",
+                effort
+            ));
+        } else if !allowed.contains(effort) {
+            issues.push(format!(
+                "effort '{}' not in allowed values {:?}",
+                effort, allowed
+            ));
         }
     }
 
@@ -136,15 +136,15 @@ pub fn validate_thinking(config: &ThinkingConfig, capability: &ThinkingCapabilit
         if capability.budget_min.is_none() && capability.budget_max.is_none() {
             issues.push("budget_tokens is not supported by this model".into());
         }
-        if let Some(min) = capability.budget_min {
-            if budget < min {
-                issues.push(format!("budget_tokens {} below minimum {}", budget, min));
-            }
+        if let Some(min) = capability.budget_min
+            && budget < min
+        {
+            issues.push(format!("budget_tokens {} below minimum {}", budget, min));
         }
-        if let Some(max) = capability.budget_max {
-            if budget > max {
-                issues.push(format!("budget_tokens {} exceeds maximum {}", budget, max));
-            }
+        if let Some(max) = capability.budget_max
+            && budget > max
+        {
+            issues.push(format!("budget_tokens {} exceeds maximum {}", budget, max));
         }
     }
 

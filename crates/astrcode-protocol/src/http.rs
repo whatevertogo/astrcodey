@@ -7,13 +7,13 @@ use astrcode_core::{message_attachment::MessageAttachment, tool::SessionToolSele
 use serde::{Deserialize, Serialize};
 
 use crate::wire::{
-    ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
-    ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
-    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto,
-    ToolOutputStreamDto, impl_wire_values,
+    ApprovalDecisionDto, ApprovalModeDto, ExtensionCapabilityDto, ExtensionHttpMethodDto,
+    ExtensionSourceDto, ExtensionStageStatusDto, PhaseDto, ProviderAuthSchemeDto,
+    ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto, ToolOutputStreamDto,
+    impl_wire_values,
 };
 pub use crate::{
-    agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
+    agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto, AgentSessionUpdateDto},
     events::KeybindingDto,
 };
 
@@ -23,7 +23,6 @@ pub use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct RunInfoDto {
     pub port: u16,
-    pub auth_token: String,
 }
 
 /// 新建会话请求。
@@ -163,7 +162,7 @@ pub enum PromptSubmitResponse {
 
 /// 手动 compact 请求。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionRequest {
     /// 保留最近 N 个完整 user turn group。
@@ -176,10 +175,7 @@ pub struct CompactSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionResponse {
-    pub accepted: bool,
-    pub deferred: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub compacted: bool,
     pub message: String,
 }
 
@@ -254,10 +250,8 @@ pub struct CommandCompletionItemDto {
 pub struct SlashCommandListResponseDto {
     pub commands: Vec<SlashCommandInfoDto>,
     /// 插件注册的快捷键绑定。
-    #[serde(default)]
     pub keybindings: Vec<KeybindingDto>,
     /// 插件注册的状态栏项（含初始值）。
-    #[serde(default)]
     pub status_items: Vec<StatusItemDto>,
 }
 
@@ -271,7 +265,6 @@ pub struct StatusItemDto {
     /// 显示文本。
     pub text: String,
     /// 排序优先级。
-    #[serde(default)]
     pub priority: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<String>,
@@ -284,24 +277,24 @@ pub struct StatusItemDto {
 pub struct SlashCommandInfoDto {
     /// 命令名称（不含前导斜杠 `/`）。
     pub name: String,
+    pub extension_id: String,
     pub description: String,
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    pub source: CommandSourceDto,
 }
 
 impl From<crate::events::ExtensionCommandInfoDto> for SlashCommandInfoDto {
     fn from(cmd: crate::events::ExtensionCommandInfoDto) -> Self {
         Self {
             name: cmd.name,
+            extension_id: cmd.extension_id,
             description: cmd.description,
             needs_argument: cmd.needs_argument,
             requires_idle: cmd.requires_idle,
             argument_completions: cmd.argument_completions,
             priority: cmd.priority,
-            source: cmd.source,
         }
     }
 }
@@ -312,22 +305,20 @@ impl From<crate::events::ExtensionCommandInfoDto> for SlashCommandInfoDto {
 #[serde(rename_all = "camelCase")]
 pub struct ShadowedSlashCommandDto {
     pub name: String,
-    pub active_source: CommandSourceDto,
+    pub active_extension_id: String,
     pub active_priority: i32,
-    pub shadowed_source: CommandSourceDto,
-    pub shadowed_priority: i32,
     pub shadowed_extension_id: String,
+    pub shadowed_priority: i32,
 }
 
-/// fork 请求的冻结线缆形状。v1 route 返回 501。
+/// Fork a session from the latest durable event or an explicit durable sequence.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkSessionRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
     /// 可选来源 durable seq。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_seq: Option<u64>,
 }
 
@@ -371,11 +362,43 @@ pub struct ConversationSnapshotResponseDto {
     pub session_id: String,
     pub session_title: String,
     pub cursor: ConversationCursorDto,
-    pub phase: PhaseDto,
     pub control: ConversationControlStateDto,
     pub blocks: Vec<ConversationBlockDto>,
-    #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkDto>,
+}
+
+/// UI timeline 的不透明分页游标。客户端只负责原样回传。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationTimelineCursorDto {
+    pub value: String,
+}
+
+/// 与历史列表解耦的当前 conversation 状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationStateResponseDto {
+    pub session_id: String,
+    pub session_title: String,
+    pub cursor: ConversationCursorDto,
+    pub control: ConversationControlStateDto,
+    pub transient_blocks: Vec<ConversationBlockDto>,
+    pub agent_sessions: Vec<AgentSessionLinkDto>,
+}
+
+/// 一页只读 conversation timeline；新事件仍通过 SSE 增量发送。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationItemsPageResponseDto {
+    pub items: Vec<ConversationBlockDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<ConversationTimelineCursorDto>,
+    pub has_older: bool,
+    /// 生成本页时已提交的最新 durable event cursor。
+    pub snapshot_cursor: ConversationCursorDto,
 }
 
 /// conversation 控制状态。
@@ -386,8 +409,6 @@ pub struct ConversationControlStateDto {
     pub phase: PhaseDto,
     pub can_submit_prompt: bool,
     pub can_request_compact: bool,
-    pub compact_pending: bool,
-    pub compacting: bool,
     /// 活跃 turn ID，v1 snapshot 暂无。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
@@ -421,10 +442,7 @@ pub enum ConversationBlockDto {
     User {
         id: String,
         text: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<PromptAttachmentDto>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        source: Option<String>,
     },
     Assistant {
         id: String,
@@ -538,6 +556,15 @@ pub enum ConversationDeltaDto {
     AppendBlock {
         block: ConversationBlockDto,
     },
+    /// 追加仅属于当前运行 turn 的临时 block；不会进入 durable snapshot。
+    AppendTransientBlock {
+        turn_id: String,
+        block: ConversationBlockDto,
+    },
+    /// 清理指定 turn 尚未被 durable block 接管的临时内容。
+    ClearTransientBlocks {
+        turn_id: String,
+    },
     PatchBlock {
         block_id: String,
         text_delta: String,
@@ -572,9 +599,9 @@ pub enum ConversationDeltaDto {
         block_id: String,
         delta: String,
     },
-    /// Agent 子会话状态变更（新增 / 完成 / 失败）。
+    /// Agent 子会话状态变更（新增 / 进行中刷新 / 完成 / 失败）。
     AgentSessionUpdated {
-        agent_session: AgentSessionLinkDto,
+        agent_session: AgentSessionUpdateDto,
     },
     /// Agent 子会话已回收，前端应移除对应卡片。
     AgentSessionRemoved {
@@ -595,7 +622,7 @@ pub enum ConversationDeltaDto {
         decision: ApprovalDecisionDto,
     },
     /// 扩展发出的实时事件。客户端按 extension/event type 解释 payload。
-    ExtensionEvent {
+    CustomEvent {
         extension_id: String,
         event_type: String,
         schema_version: u32,
@@ -630,11 +657,12 @@ pub struct ConfigViewResponseDto {
     pub config_path: String,
     pub active_profile: String,
     pub active_model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
     pub active_small_profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
     pub active_small_model: Option<String>,
-    #[serde(default)]
     pub approval_mode: ApprovalModeDto,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
@@ -642,6 +670,7 @@ pub struct ConfigViewResponseDto {
 
 /// GET /api/extensions 响应中的单个扩展状态。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionStateDto {
@@ -649,17 +678,16 @@ pub struct ExtensionStateDto {
     pub enabled: bool,
     pub loaded: bool,
     pub source: ExtensionSourceDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub declaration: Option<ExtensionDeclarationDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<ExtensionDiagnosticsDto>,
 }
 
 /// 扩展注册的斜杠命令声明。
-///
-/// 字段保留既有 snake_case 嵌套 wire 形状，避免改变现有 HTTP 契约。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtensionSlashCommandDto {
     pub name: String,
     pub description: String,
@@ -667,17 +695,95 @@ pub struct ExtensionSlashCommandDto {
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
+    pub availability: crate::wire::CommandAvailabilityDto,
+    pub execution: crate::wire::CommandExecutionDto,
 }
 
 /// 扩展可发射事件的声明。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventDeliveryDto {
+    SessionDurable,
+    SessionLive,
+    GlobalLive,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExtensionEventDeclDto {
+pub struct CustomEventDeclarationDto {
     pub event_type: String,
     pub schema_version: u32,
-    pub durable: bool,
+    pub delivery: CustomEventDeliveryDto,
     pub max_payload_bytes: usize,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum CustomEventSourceFilterDto {
+    Any,
+    Extension { extension_id: String },
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventSubscriptionDto {
+    pub id: String,
+    pub event_type: String,
+    pub source: CustomEventSourceFilterDto,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventConsumerActionDto {
+    Pause,
+    Resume,
+    ReplayFromBeginning,
+    SkipToStreamHead,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomEventConsumerControlRequest {
+    pub extension_id: String,
+    pub subscription_id: String,
+    pub action: CustomEventConsumerActionDto,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventConsumerStatusDto {
+    pub extension_id: String,
+    pub subscription: CustomEventSubscriptionDto,
+    pub paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_head: Option<String>,
+    pub pending_events: u64,
+    pub in_flight: bool,
+    pub failed_attempts: u64,
+    pub consecutive_failures: u64,
+    pub quarantined_events: u64,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventConsumerListResponseDto {
+    pub consumers: Vec<CustomEventConsumerStatusDto>,
 }
 
 /// 扩展声明的完整描述。
@@ -690,34 +796,36 @@ pub struct ExtensionEventDeclDto {
 pub struct ExtensionDeclarationDto {
     pub id: String,
     pub capabilities: Vec<ExtensionCapabilityDto>,
+    pub required_transport_features: Vec<TransportFeatureDto>,
     pub tools: Vec<ToolDefinitionDto>,
-    #[serde(default)]
     pub dynamic_tools: bool,
     pub commands: Vec<ExtensionSlashCommandDto>,
-    #[serde(default)]
     pub dynamic_commands: bool,
     pub keybindings: Vec<KeybindingDto>,
     pub status_items: Vec<StatusItemDto>,
-    pub events: Vec<ExtensionEventDeclDto>,
-    #[serde(default)]
+    pub custom_events: Vec<CustomEventDeclarationDto>,
+    pub custom_event_subscriptions: Vec<CustomEventSubscriptionDto>,
     pub http_routes: Vec<ExtensionHttpRouteDto>,
 }
 
+/// Host transport features required before an extension can be loaded.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportFeatureDto {
+    AuthenticatedHttp,
+}
+
 /// 扩展注册的工具定义。
-///
-/// 字段保留既有 snake_case 嵌套 wire 形状（冻结形状），
-/// 嵌套在 camelCase 的 [`ExtensionDeclarationDto`] 中是有意偏离。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDefinitionDto {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
-    #[serde(default)]
     pub strict: bool,
     pub origin: ToolOriginDto,
-    #[serde(default)]
-    pub execution_mode: ExecutionModeDto,
 }
 
 impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
@@ -728,7 +836,6 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
             parameters: value.parameters,
             strict: value.strict,
             origin: value.origin.into(),
-            execution_mode: value.execution_mode.into(),
         }
     }
 }
@@ -745,36 +852,32 @@ pub struct ExtensionHttpRouteDto {
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionDiagnosticsDto {
-    #[serde(default)]
     pub load: ExtensionStageDiagnosticsDto,
-    #[serde(default)]
     pub register: ExtensionStageDiagnosticsDto,
-    #[serde(default)]
     pub start: ExtensionStageDiagnosticsDto,
-    #[serde(default)]
     pub hook_calls: u64,
-    #[serde(default)]
     pub hook_timeouts: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_hook: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionStageDiagnosticsDto {
-    #[serde(default)]
     pub status: ExtensionStageStatusDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -791,7 +894,6 @@ pub struct ExtensionListResponseDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionReloadResponseDto {
-    #[serde(default)]
     pub reload_errors: Vec<String>,
 }
 
@@ -810,7 +912,6 @@ pub struct SetExtensionEnabledRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SetExtensionEnabledResponseDto {
     pub success: bool,
-    #[serde(default)]
     pub reload_errors: Vec<String>,
 }
 
@@ -1090,166 +1191,4 @@ pub struct ModelTestResponseDto {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ConversationReducerFixture {
-        initial_blocks: Vec<ConversationBlockDto>,
-        envelopes: Vec<ConversationStreamEnvelopeDto>,
-        expected: serde_json::Value,
-    }
-
-    #[test]
-    fn conversation_stream_fixture_matches_wire_contract() {
-        let fixture = include_str!("../fixtures/conversation-stream.json");
-        let envelopes: Vec<ConversationStreamEnvelopeDto> =
-            serde_json::from_str(fixture).expect("fixture should deserialize");
-
-        assert_eq!(envelopes.len(), 5);
-
-        match &envelopes[0].delta {
-            ConversationDeltaDto::PatchBlock {
-                block_id,
-                text_delta,
-            } => {
-                assert_eq!(block_id, "assistant-1");
-                assert_eq!(text_delta, "hello");
-            },
-            other => panic!("unexpected fixture delta: {other:?}"),
-        }
-
-        match &envelopes[1].delta {
-            ConversationDeltaDto::FinalizeBlock {
-                block:
-                    ConversationBlockDto::Assistant {
-                        id,
-                        text,
-                        reasoning_content: _,
-                        storage_seq,
-                        status,
-                    },
-            } => {
-                assert_eq!(id, "assistant-1");
-                assert_eq!(text, "complete answer");
-                assert_eq!(*storage_seq, Some(3));
-                assert!(matches!(status, ConversationBlockStatusDto::Complete));
-            },
-            other => panic!("unexpected fixture delta: {other:?}"),
-        }
-
-        match &envelopes[4].delta {
-            ConversationDeltaDto::PatchArguments {
-                block_id,
-                arguments,
-                arguments_json,
-            } => {
-                assert_eq!(block_id, "tool-1");
-                assert_eq!(arguments, "Cargo.toml");
-                assert!(arguments_json.is_none());
-            },
-            other => panic!("unexpected fixture delta: {other:?}"),
-        }
-
-        let encoded = serde_json::to_string(&envelopes[0]).expect("fixture should serialize");
-        assert!(encoded.contains("\"blockId\""));
-        assert!(encoded.contains("\"textDelta\""));
-        assert!(!encoded.contains("block_id"));
-        assert!(!encoded.contains("text_delta"));
-    }
-
-    #[test]
-    fn conversation_reducer_fixture_matches_wire_contract() {
-        let fixture = include_str!("../fixtures/conversation-reducer.json");
-        let fixture: ConversationReducerFixture =
-            serde_json::from_str(fixture).expect("reducer fixture should deserialize");
-
-        assert_eq!(fixture.initial_blocks.len(), 2);
-        assert_eq!(fixture.envelopes.len(), 12);
-        assert_eq!(
-            fixture
-                .envelopes
-                .last()
-                .map(|envelope| envelope.cursor.value.as_str()),
-            Some("13")
-        );
-        assert!(fixture.expected.get("blocks").is_some());
-
-        let encoded =
-            serde_json::to_value(&fixture.envelopes).expect("fixture envelopes should serialize");
-        assert_eq!(
-            encoded[0]["delta"]["kind"],
-            serde_json::Value::String("patchBlock".into())
-        );
-        assert_eq!(
-            encoded[8]["delta"]["block"]["argumentsJson"]["path"],
-            serde_json::Value::String("Cargo.toml".into())
-        );
-    }
-
-    #[test]
-    fn thinking_delta_uses_block_id_wire_name() {
-        let delta = ConversationDeltaDto::ThinkingDelta {
-            block_id: "assistant-1".into(),
-            delta: "reasoning".into(),
-        };
-
-        let encoded = serde_json::to_string(&delta).unwrap();
-        assert!(encoded.contains("\"blockId\""));
-        assert!(!encoded.contains("block_id"));
-
-        let decoded: ConversationDeltaDto = serde_json::from_str(&encoded).unwrap();
-        match decoded {
-            ConversationDeltaDto::ThinkingDelta { block_id, delta } => {
-                assert_eq!(block_id, "assistant-1");
-                assert_eq!(delta, "reasoning");
-            },
-            other => panic!("unexpected delta: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tool_definition_dto_round_trips_strict_and_defaults_legacy_input() {
-        let dto: ToolDefinitionDto = astrcode_core::tool::ToolDefinition {
-            name: "read".into(),
-            description: "Read a file".into(),
-            parameters: serde_json::json!({"type": "object"}),
-            strict: false,
-            origin: astrcode_core::tool::ToolOrigin::Bundled,
-            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
-        }
-        .into();
-
-        assert_eq!(
-            serde_json::to_value(dto).unwrap(),
-            serde_json::json!({
-                "name": "read",
-                "description": "Read a file",
-                "parameters": {"type": "object"},
-                "strict": false,
-                "origin": "bundled",
-                "execution_mode": "parallel"
-            })
-        );
-
-        let legacy: ToolDefinitionDto = serde_json::from_value(serde_json::json!({
-            "name": "legacy",
-            "description": "",
-            "parameters": {"type": "object"},
-            "origin": "extension"
-        }))
-        .unwrap();
-        assert!(!legacy.strict);
-
-        let strict: ToolDefinitionDto = serde_json::from_value(serde_json::json!({
-            "name": "strict",
-            "description": "",
-            "parameters": {"type": "object"},
-            "strict": true,
-            "origin": "extension"
-        }))
-        .unwrap();
-        assert!(strict.strict);
-    }
-}
+mod tests;

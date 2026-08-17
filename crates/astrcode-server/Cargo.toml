@@ -22,7 +22,6 @@ testing = ["astrcode-storage/testing"]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-ai = { path = "../astrcode-ai" }
-astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-context = { path = "../astrcode-context" }
@@ -66,3 +65,6 @@ astrcode-extension-mode = { path = "../astrcode-extension-mode" }
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
+# 同理：合并 astrcode-extensions 的 testing feature,使 cfg(test) 与 tests/
+# 能访问 gated 的 runner register 与 testing::extension_runner_with_extensions。
+astrcode-extensions = { path = "../astrcode-extensions", features = ["testing"] }

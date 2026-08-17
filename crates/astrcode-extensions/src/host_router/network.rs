@@ -3,19 +3,24 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    future::Future,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
     time::Duration,
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::host::HOST_NETWORK_DEFAULT_TIMEOUT_MS;
 use astrcode_extension_sdk::{
-    extension::{
-        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
-        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+    host::{
+        HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy,
+        HostNetworkRequest, HostNetworkResponse, HostOperation,
+        internal::{
+            HostOperationGroup, NetworkRedirectPolicy, OutboundNetworkError,
+            OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+        },
     },
     s5r::ErrorPayload,
-    worker::{HostNetworkRequest, HostNetworkResponse},
+    wire::WireErrorCode,
 };
 use futures_util::StreamExt;
 use reqwest::{
@@ -26,16 +31,12 @@ use reqwest::{
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit},
-    time::{Instant, timeout_at},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{HOST_INVOKE_TIMEOUT, block_on_async, capability::NetworkCapability};
+use super::{backend_unavailable, invalid_group_operation, parse_wire_request, wire_payload};
 
-#[cfg(test)]
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 const MAX_REDIRECTS: usize = 10;
 
@@ -50,74 +51,78 @@ impl NetworkGroup {
         Self { service }
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
-        capability: NetworkCapability,
+        operation: HostOperation,
         input: serde_json::Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<serde_json::Value, ErrorPayload> {
-        match capability {
-            NetworkCapability::Client => self.request(input, cancel_token),
+        match operation {
+            HostOperation::NetworkClient => self.request(operation, input, cancel_token).await,
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::Network,
+            )),
         }
     }
 
-    fn request(
+    pub(super) fn is_available(&self) -> bool {
+        self.service.is_some()
+    }
+
+    pub(super) fn service(&self) -> Option<Arc<dyn OutboundNetworkService>> {
+        self.service.clone()
+    }
+
+    async fn request(
         &self,
+        operation: HostOperation,
         input: serde_json::Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<serde_json::Value, ErrorPayload> {
-        let request = serde_json::from_value::<HostNetworkRequest>(input)
-            .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
-        let service = self.service.as_ref().map(Arc::clone).ok_or_else(|| {
-            ErrorPayload::new("backend_unavailable", "outbound network is not configured")
-        })?;
-        let cancel_token = cancel_token.cloned();
-        block_on_async(async move {
-            let response = service
-                .request(
-                    OutboundNetworkRequest {
-                        url: request.url,
-                        method: request.method.unwrap_or_else(|| "GET".into()),
-                        headers: request.headers,
-                        body: request.body.unwrap_or_default().into_bytes(),
-                        max_bytes: request.max_bytes.unwrap_or(1024 * 1024).min(1024 * 1024)
-                            as usize,
-                        timeout: Duration::from_millis(request.timeout_ms.unwrap_or(30_000))
-                            .min(HOST_INVOKE_TIMEOUT),
-                        redirect_policy: NetworkRedirectPolicy::Follow,
+        let request: HostNetworkRequest = parse_wire_request(&input, operation.wire_name())?;
+        if !(1..=HOST_NETWORK_MAX_TIMEOUT_MS).contains(&request.timeout_ms) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("timeout_ms must be between 1 and {HOST_NETWORK_MAX_TIMEOUT_MS}"),
+            ));
+        }
+        if request.max_bytes > HOST_NETWORK_MAX_BYTES {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("max_bytes must not exceed {HOST_NETWORK_MAX_BYTES}"),
+            ));
+        }
+        let service = self
+            .service
+            .as_ref()
+            .ok_or_else(|| backend_unavailable("outbound network is not configured"))?;
+        let response = service
+            .request(
+                OutboundNetworkRequest {
+                    url: request.url,
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    max_bytes: request.max_bytes,
+                    timeout: Duration::from_millis(request.timeout_ms),
+                    redirect_policy: match request.redirect_policy {
+                        HostNetworkRedirectPolicy::Follow => NetworkRedirectPolicy::Follow,
+                        HostNetworkRedirectPolicy::Manual => NetworkRedirectPolicy::Manual,
                     },
-                    cancel_token,
-                )
-                .await
-                .map_err(network_error_payload)?;
-            let body = String::from_utf8(response.body).map_err(|error| {
-                ErrorPayload::new(
-                    "invalid_response_encoding",
-                    format!("network response is not valid UTF-8: {error}"),
-                )
-            })?;
-            serde_json::to_value(HostNetworkResponse {
-                final_url: response.final_url,
-                status: response.status,
-                headers: response.headers,
-                body,
-            })
-            .map_err(|error| ErrorPayload::new("serialization_failed", error.to_string()))
-        })?
+                },
+                cancel_token.cloned(),
+            )
+            .await
+            .map_err(wire_payload)?;
+        serde_json::to_value(HostNetworkResponse {
+            final_url: response.final_url,
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+        })
+        .map_err(|error| ErrorPayload::new(WireErrorCode::SerializationFailed, error.to_string()))
     }
-}
-
-fn network_error_payload(error: OutboundNetworkError) -> ErrorPayload {
-    let code = match error.kind {
-        OutboundNetworkErrorKind::InvalidRequest => "invalid_input",
-        OutboundNetworkErrorKind::PermissionDenied => "permission_denied",
-        OutboundNetworkErrorKind::Unavailable => "backend_unavailable",
-        OutboundNetworkErrorKind::RequestFailed => "network_error",
-        OutboundNetworkErrorKind::Timeout => "timeout",
-        OutboundNetworkErrorKind::ResponseTooLarge => "response_too_large",
-        OutboundNetworkErrorKind::Cancelled => "cancelled",
-    };
-    ErrorPayload::new(code, error.message)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -142,7 +147,7 @@ impl Resolve for PublicDnsResolver {
     }
 }
 
-pub struct RestrictedNetworkService {
+pub(super) struct RestrictedNetworkService {
     follow_redirects_client: Result<reqwest::Client, String>,
     manual_redirects_client: Result<reqwest::Client, String>,
     permits: Semaphore,
@@ -174,7 +179,9 @@ impl OutboundNetworkService for RestrictedNetworkService {
         input: OutboundNetworkRequest,
         cancel_token: Option<CancellationToken>,
     ) -> Result<OutboundNetworkResponse, OutboundNetworkError> {
-        let timeout = input.timeout.min(MAX_TIMEOUT);
+        let timeout = input
+            .timeout
+            .min(Duration::from_millis(HOST_NETWORK_MAX_TIMEOUT_MS));
         let deadline = Instant::now() + timeout;
         let client = match input.redirect_policy {
             NetworkRedirectPolicy::Follow => &self.follow_redirects_client,
@@ -183,21 +190,23 @@ impl OutboundNetworkService for RestrictedNetworkService {
         .as_ref()
         .map_err(|message| {
             OutboundNetworkError::new(
-                OutboundNetworkErrorKind::Unavailable,
+                WireErrorCode::BackendUnavailable,
+                true,
                 format!("failed to initialize network client: {message}"),
             )
         })?;
         let method = input.method.parse::<Method>().map_err(|error| {
             OutboundNetworkError::new(
-                OutboundNetworkErrorKind::InvalidRequest,
+                WireErrorCode::InvalidInput,
+                false,
                 format!("invalid HTTP method: {error}"),
             )
         })?;
         let parsed_url = Url::parse(&input.url).map_err(|error| {
-            OutboundNetworkError::new(OutboundNetworkErrorKind::InvalidRequest, error.to_string())
+            OutboundNetworkError::new(WireErrorCode::InvalidInput, false, error.to_string())
         })?;
         validate_network_url(&parsed_url).map_err(|message| {
-            OutboundNetworkError::new(OutboundNetworkErrorKind::PermissionDenied, message)
+            OutboundNetworkError::new(WireErrorCode::PermissionDenied, false, message)
         })?;
 
         let mut request = client
@@ -206,18 +215,17 @@ impl OutboundNetworkService for RestrictedNetworkService {
         if !input.body.is_empty() {
             request = request.body(input.body);
         }
-        let max_bytes = input.max_bytes.min(MAX_RESPONSE_BYTES);
-        let redirect_policy = input.redirect_policy;
+        let max_bytes = input.max_bytes.min(HOST_NETWORK_MAX_BYTES);
         let _permit = self.acquire_permit(deadline, cancel_token.as_ref()).await?;
 
         let operation = async move {
             let response = request.send().await.map_err(|error| {
-                let kind = if error_chain_contains_policy_error(&error) {
-                    OutboundNetworkErrorKind::PermissionDenied
+                let (code, retryable) = if error_chain_contains_policy_error(&error) {
+                    (WireErrorCode::PermissionDenied, false)
                 } else {
-                    OutboundNetworkErrorKind::RequestFailed
+                    (WireErrorCode::NetworkRequestFailed, true)
                 };
-                OutboundNetworkError::new(kind, error.to_string())
+                OutboundNetworkError::new(code, retryable, error.to_string())
             })?;
             let final_url = response.url().to_string();
             let status = response.status().as_u16();
@@ -231,13 +239,7 @@ impl OutboundNetworkService for RestrictedNetworkService {
                         .map(|value| (name.as_str().to_owned(), value.to_owned()))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let body = if redirect_policy == NetworkRedirectPolicy::Manual
-                && (300..400).contains(&status)
-            {
-                Vec::new()
-            } else {
-                read_limited_body(response, max_bytes).await?
-            };
+            let body = read_limited_body(response, max_bytes).await?;
             Ok(OutboundNetworkResponse {
                 final_url,
                 status,
@@ -246,7 +248,14 @@ impl OutboundNetworkService for RestrictedNetworkService {
             })
         };
 
-        run_until_deadline(operation, deadline, cancel_token.as_ref()).await
+        super::run_until_deadline(
+            operation,
+            deadline,
+            cancel_token.as_ref(),
+            || OutboundNetworkError::new(WireErrorCode::Timeout, true, "network request timed out"),
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -257,42 +266,43 @@ impl RestrictedNetworkService {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<SemaphorePermit<'a>, OutboundNetworkError> {
         let acquire = async {
-            timeout_at(deadline, self.permits.acquire())
-                .await
-                .map_err(|_| {
-                    OutboundNetworkError::new(
-                        OutboundNetworkErrorKind::Timeout,
-                        "network request timed out waiting for capacity",
-                    )
-                })?
-                .map_err(|_| {
-                    OutboundNetworkError::new(
-                        OutboundNetworkErrorKind::Unavailable,
-                        "network client stopped",
-                    )
-                })
+            self.permits.acquire().await.map_err(|_| {
+                OutboundNetworkError::new(
+                    WireErrorCode::BackendUnavailable,
+                    true,
+                    "network client stopped",
+                )
+            })
         };
-        match cancel_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => Err(cancelled()),
-                    result = acquire => result,
-                }
+        super::run_until_deadline(
+            acquire,
+            deadline,
+            cancel_token,
+            || {
+                OutboundNetworkError::new(
+                    WireErrorCode::Timeout,
+                    true,
+                    "network request timed out waiting for capacity",
+                )
             },
-            None => acquire.await,
-        }
+            cancelled,
+        )
+        .await
     }
 }
 
 fn validate_redirect(attempt: Attempt<'_>) -> reqwest::redirect::Action {
-    if attempt.previous().len() >= MAX_REDIRECTS {
+    if redirect_limit_exceeded(attempt.previous().len()) {
         return attempt.error("too many redirects");
     }
     match validate_network_url(attempt.url()) {
         Ok(()) => attempt.follow(),
         Err(message) => attempt.error(NetworkPolicyError(message)),
     }
+}
+
+fn redirect_limit_exceeded(previous_url_count: usize) -> bool {
+    previous_url_count > MAX_REDIRECTS
 }
 
 fn validate_network_url(url: &Url) -> Result<(), String> {
@@ -416,34 +426,6 @@ fn error_chain_contains_policy_error(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
-async fn run_until_deadline<F, T>(
-    operation: F,
-    deadline: Instant,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<T, OutboundNetworkError>
-where
-    F: Future<Output = Result<T, OutboundNetworkError>>,
-{
-    let timed = async {
-        timeout_at(deadline, operation).await.map_err(|_| {
-            OutboundNetworkError::new(
-                OutboundNetworkErrorKind::Timeout,
-                "network request timed out",
-            )
-        })?
-    };
-    match cancel_token {
-        Some(token) => {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err(cancelled()),
-                result = timed => result,
-            }
-        },
-        None => timed.await,
-    }
-}
-
 async fn read_limited_body(
     response: reqwest::Response,
     max_bytes: usize,
@@ -460,7 +442,7 @@ async fn read_limited_body(
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
-            OutboundNetworkError::new(OutboundNetworkErrorKind::RequestFailed, error.to_string())
+            OutboundNetworkError::new(WireErrorCode::NetworkRequestFailed, true, error.to_string())
         })?;
         if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(response_too_large(max_bytes));
@@ -475,13 +457,15 @@ fn parse_headers(entries: &BTreeMap<String, String>) -> Result<HeaderMap, Outbou
     for (name, value) in entries {
         let name = name.parse::<HeaderName>().map_err(|error| {
             OutboundNetworkError::new(
-                OutboundNetworkErrorKind::InvalidRequest,
+                WireErrorCode::InvalidInput,
+                false,
                 format!("invalid header name: {error}"),
             )
         })?;
         let value = value.parse::<HeaderValue>().map_err(|error| {
             OutboundNetworkError::new(
-                OutboundNetworkErrorKind::InvalidRequest,
+                WireErrorCode::InvalidInput,
+                false,
                 format!("invalid header value: {error}"),
             )
         })?;
@@ -492,16 +476,14 @@ fn parse_headers(entries: &BTreeMap<String, String>) -> Result<HeaderMap, Outbou
 
 fn response_too_large(max_bytes: usize) -> OutboundNetworkError {
     OutboundNetworkError::new(
-        OutboundNetworkErrorKind::ResponseTooLarge,
+        WireErrorCode::ResponseTooLarge,
+        false,
         format!("response exceeds max_bytes {max_bytes}"),
     )
 }
 
 fn cancelled() -> OutboundNetworkError {
-    OutboundNetworkError::new(
-        OutboundNetworkErrorKind::Cancelled,
-        "network request cancelled",
-    )
+    OutboundNetworkError::new(WireErrorCode::Cancelled, false, "network request cancelled")
 }
 
 #[cfg(test)]
@@ -514,8 +496,8 @@ mod tests {
             method: "GET".into(),
             headers: BTreeMap::new(),
             body: Vec::new(),
-            max_bytes: MAX_RESPONSE_BYTES,
-            timeout: DEFAULT_TIMEOUT,
+            max_bytes: HOST_NETWORK_MAX_BYTES,
+            timeout: Duration::from_millis(HOST_NETWORK_DEFAULT_TIMEOUT_MS),
             redirect_policy: NetworkRedirectPolicy::Follow,
         }
     }
@@ -528,7 +510,7 @@ mod tests {
             .await
             .expect_err("file URLs must be rejected");
 
-        assert_eq!(error.kind, OutboundNetworkErrorKind::PermissionDenied);
+        assert_eq!(error.code, WireErrorCode::PermissionDenied);
     }
 
     #[test]
@@ -577,6 +559,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redirect_limit_allows_exactly_ten_hops() {
+        assert!(!redirect_limit_exceeded(9));
+        assert!(!redirect_limit_exceeded(10));
+        assert!(redirect_limit_exceeded(11));
+    }
+
     #[tokio::test]
     async fn capacity_wait_obeys_cancellation() {
         let client = RestrictedNetworkService::default();
@@ -593,6 +582,21 @@ mod tests {
             .await
             .expect_err("cancelled capacity wait must stop");
 
-        assert_eq!(error.kind, OutboundNetworkErrorKind::Cancelled);
+        assert_eq!(error.code, WireErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn network_errors_keep_stable_codes_and_retryability() {
+        let cases = [
+            (WireErrorCode::NetworkRequestFailed, true),
+            (WireErrorCode::Timeout, true),
+            (WireErrorCode::ResponseTooLarge, false),
+            (WireErrorCode::Cancelled, false),
+        ];
+        for (code, retryable) in cases {
+            let payload = wire_payload(OutboundNetworkError::new(code, retryable, "failure"));
+            assert_eq!(payload.code, code.as_str());
+            assert_eq!(payload.retryable, retryable);
+        }
     }
 }

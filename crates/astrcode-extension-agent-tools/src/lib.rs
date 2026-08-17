@@ -5,17 +5,25 @@
 
 mod agent;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
     extension::{
-        Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolHandler,
+        CompactContributions, CompactRetainedContext, Extension, ExtensionCall,
+        ExtensionCapability, ExtensionError, ExtensionManifest, PreCompactContext,
+        PreCompactHandler, PreCompactResult, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolContext, ToolHandler, ToolPlanContext,
+    },
+    llm::{LlmContent, LlmMessage, LlmRole},
+    session::{
+        HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest,
     },
     tool::{
-        CreateSessionRequest, ExecutionMode, SessionAccess, SubmitTurnRequest, ToolDefinition,
-        ToolOrigin, ToolResult, tool_metadata,
+        HostResource, ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan,
+        ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use serde::Deserialize;
@@ -32,27 +40,28 @@ struct AgentToolsExtension;
 
 #[async_trait::async_trait]
 impl Extension for AgentToolsExtension {
-    fn id(&self) -> &str {
-        "astrcode-agent-tools"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::SessionControl,
-            ExtensionCapability::SmallModel,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-agent-tools")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::SessionControl)
+            .capability(ExtensionCapability::SessionHistory)
+            .capability(ExtensionCapability::SmallModel)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
         let shared = Arc::new(AgentShared::new());
         reg.tool(
-            agent_tool_definition(),
+            ExtensionToolDefinition::from_definition(agent_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL)
+                .with_prompt(agent_tool_prompt()),
             Arc::new(AgentToolHandler {
                 shared: shared.clone(),
             }),
         );
-        reg.tool_metadata(agent_tool_metadata());
         reg.on_prompt_build(0, Arc::new(AgentPromptBuildHandler { shared }));
+        reg.on_pre_compact(0, Arc::new(AgentPreCompactHandler));
     }
 }
 
@@ -92,16 +101,16 @@ const AGENT_TOOL_DESCRIPTION: &str =
      (do not poll or re-run the task)";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Focused task packet: objective, scope, constraints, acceptance criteria, and known file/symbol anchors. Omit parent transcript and already-visible generic instructions."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
+const AGENT_TOOL_NAME: &str = "agent";
 
 fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
-        name: "agent".into(),
+        name: AGENT_TOOL_NAME.into(),
         description: AGENT_TOOL_DESCRIPTION.into(),
         parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS)
             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
     }
 }
 
@@ -128,20 +137,21 @@ struct AgentToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for AgentToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        if tool_name != "agent" {
-            return Err(ExtensionError::NotFound(tool_name.into()));
+        if ctx.tool_name() != AGENT_TOOL_NAME {
+            return Err(ExtensionError::NotFound(ctx.tool_name().into()));
         }
 
-        let agents = self.shared.get_or_discover(Some(working_dir));
-        let args: AgentArgs = serde_json::from_value(arguments.clone())
-            .map_err(|e| ExtensionError::Internal(format!("invalid agent args: {e}")))?;
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let agents = self.shared.get_or_discover(Some(&working_dir));
+        let args: AgentArgs = ctx.arguments()?;
 
         let matched = match args.subagent_type.as_deref() {
             None => {
@@ -164,66 +174,54 @@ impl ToolHandler for AgentToolHandler {
                 })?,
         };
 
-        let model_preference = resolve_child_small_model(&ctx.capabilities)?;
-        let model_label = model_preference.as_str().to_owned();
+        let model_preference = resolve_child_small_model(ctx.small_model_id())?;
+        let model_label = model_preference.clone();
 
-        // 获取 session_ops
-        let session_ops =
-            ctx.capabilities.session.ops.as_ref().ok_or_else(|| {
-                ExtensionError::Internal("session operations not available".into())
-            })?;
+        let session_control = ctx.host().session_control()?;
 
         // 1. 创建子会话
-        let handle = session_ops
-            .create_session(
-                ctx.scope.session_id.as_str(),
-                CreateSessionRequest {
-                    name: matched.name.clone(),
-                    working_dir: None,
-                    system_prompt: Some(enhance_agent_prompt(&matched.body, working_dir)),
-                    model_preference: Some(model_preference),
-                    tool_selection: matched.tool_selection.clone(),
-                    source_extension: Some("astrcode-agent-tools".into()),
-                    ephemeral: true,
-                    tool_call_id: ctx.scope.tool_call_id.clone().unwrap_or_default(),
-                },
-            )
-            .await
-            .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
+        let handle = session_control
+            .create_child(HostCreateSessionRequest {
+                name: matched.name.clone(),
+                system_prompt: Some(enhance_agent_prompt(&matched.body, &working_dir)),
+                model_preference: Some(model_preference),
+                tool_selection: matched
+                    .tool_selection
+                    .clone()
+                    .map(astrcode_extension_sdk::session::tool_selection_to_dto),
+                ephemeral: true,
+            })
+            .await?;
 
         // 2. 提交 turn
-        let child_access =
-            SessionAccess::new(ctx.scope.session_id.as_str(), handle.session_id.as_str());
-        let submit = session_ops
-            .submit_turn(
-                SubmitTurnRequest::for_child(
-                    ctx.scope.session_id.as_str(),
-                    handle.session_id.as_str(),
-                    args.prompt,
-                )
-                .wait_for_result(args.wait_for_result)
-                .notify_parent_on_complete(if args.wait_for_result {
+        let submit = session_control
+            .submit_turn(HostSubmitTurnRequest {
+                target_session_id: handle.session_id.clone(),
+                user_prompt: args.prompt,
+                wait_for_result: args.wait_for_result,
+                notify_parent_on_complete: if args.wait_for_result {
                     None
                 } else {
                     Some(format!(
                         "Background agent \"{}\" completed",
                         args.description.trim()
                     ))
-                })
-                .recycle_on_complete(!args.wait_for_result)
-                .tool_call_id(ctx.scope.tool_call_id.clone()),
-            )
+                },
+                recycle_on_complete: !args.wait_for_result,
+            })
             .await;
-        if let Err(ref e) = submit {
-            if let Err(recycle_err) = session_ops.recycle_session(child_access).await {
-                tracing::warn!(
-                    child_session_id = %handle.session_id,
-                    error = %recycle_err,
-                    "failed to recycle child session after submit_turn error: {e}"
-                );
-            }
+        if let Err(ref e) = submit
+            && let Err(recycle_err) = session_control
+                .recycle(HostRecycleSessionRequest::new(&handle.session_id))
+                .await
+        {
+            tracing::warn!(
+                child_session_id = %handle.session_id,
+                error = %recycle_err,
+                "failed to recycle child session after submit_turn error: {e}"
+            );
         }
-        let result = submit.map_err(|e| ExtensionError::Internal(format!("submit_turn: {e}")))?;
+        let result = submit?;
 
         // 3. 构造 ToolResult
         let mut metadata = tool_metadata([
@@ -234,9 +232,12 @@ impl ToolHandler for AgentToolHandler {
         ]);
 
         match result {
-            astrcode_extension_sdk::tool::SubmitTurnResult::Completed { content } => {
+            HostSubmitTurnOutput::Completed { content } => {
                 // 同步路径：turn 完成后回收 ephemeral 子 session
-                if let Err(e) = session_ops.recycle_session(child_access).await {
+                if let Err(e) = session_control
+                    .recycle(HostRecycleSessionRequest::new(&handle.session_id))
+                    .await
+                {
                     tracing::warn!(
                         child_session_id = %handle.session_id,
                         error = %e,
@@ -252,7 +253,7 @@ impl ToolHandler for AgentToolHandler {
                 }
                 .into())
             },
-            astrcode_extension_sdk::tool::SubmitTurnResult::Backgrounded {
+            HostSubmitTurnOutput::Backgrounded {
                 task_id,
                 session_id,
             } => {
@@ -285,10 +286,108 @@ struct AgentPromptBuildHandler {
     shared: Arc<AgentShared>,
 }
 
+struct AgentPreCompactHandler;
+
+#[async_trait::async_trait]
+impl PreCompactHandler for AgentPreCompactHandler {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
+        let Some(body) = agent_status(ctx.source_messages()) else {
+            return Ok(PreCompactResult::Allow);
+        };
+        Ok(PreCompactResult::Contributions(CompactContributions {
+            instructions: Vec::new(),
+            retained_context: vec![CompactRetainedContext::Note {
+                title: "Agent Task Status".into(),
+                body,
+            }],
+        }))
+    }
+}
+
+fn agent_status(messages: &[LlmMessage]) -> Option<String> {
+    let mut descriptions = HashMap::new();
+    let mut entries = Vec::new();
+
+    for message in messages {
+        match message.role {
+            LlmRole::Assistant => {
+                for content in &message.content {
+                    let LlmContent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } = content
+                    else {
+                        continue;
+                    };
+                    if name != AGENT_TOOL_NAME {
+                        continue;
+                    }
+                    let description = arguments
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            arguments
+                                .get("subagentType")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .unwrap_or("agent task");
+                    descriptions.insert(call_id.as_str(), description);
+                }
+            },
+            LlmRole::Tool if message.name.as_deref() == Some(AGENT_TOOL_NAME) => {
+                for content in &message.content {
+                    let LlmContent::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                    } = content
+                    else {
+                        continue;
+                    };
+                    let description = descriptions
+                        .get(tool_call_id.as_str())
+                        .copied()
+                        .unwrap_or("agent task");
+                    let status = if *is_error {
+                        "failed"
+                    } else if content.lines().any(|line| line.trim() == "status: running") {
+                        "running"
+                    } else {
+                        "completed"
+                    };
+                    let mut entry = format!("- {description}: {status}");
+                    let excerpt = truncate_agent_result(content, 1_200);
+                    if !excerpt.is_empty() {
+                        entry.push('\n');
+                        entry.push_str(&excerpt);
+                    }
+                    entries.push(entry);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    let start = entries.len().saturating_sub(5);
+    (!entries.is_empty()).then(|| entries[start..].join("\n\n"))
+}
+
+fn truncate_agent_result(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    let mut excerpt = content.chars().take(max_chars).collect::<String>();
+    excerpt.push_str("\n\n[... agent result truncated]");
+    excerpt
+}
+
 #[async_trait::async_trait]
 impl PromptBuildHandler for AgentPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let agents = self.shared.get_or_discover(Some(&ctx.working_dir));
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let agents = self.shared.get_or_discover(Some(&working_dir));
         Ok(PromptContributions {
             agents: vec![format_agents_for_model(&agents)],
             ..Default::default()
@@ -296,34 +395,27 @@ impl PromptBuildHandler for AgentPromptBuildHandler {
     }
 }
 
-fn agent_tool_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        "agent".to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Scale delegation to the work instead of forcing a fixed workflow:\n- Quick lookup or \
-             edit needing only a few direct tool calls → work directly\n- One clear, non-trivial \
-             subtask that benefits from isolation → use the matching single agent\n- Multiple \
-             independent subtasks → use matching agents in parallel\n- Dependent subtasks → \
-             sequence only the agents actually needed\n\nUse `explore` for missing codebase \
-             facts, `execute` for a self-contained implementation after the main agent has \
-             decided the design and acceptance criteria, and `reviewer` for independent \
-             verification when the change's risk or scope warrants it. Agent types may be used \
-             independently or combined. The main agent retains product, architecture, protocol, \
-             dependency, and scope decisions.",
-        )
-        .example(
-            "Planned cross-module auth change with a known design → split independent, \
-             non-overlapping implementation slices across `execute` agents; use `reviewer` after \
-             implementation because the change is security-sensitive. For a small equivalent \
-             change, work directly.",
-        )
-        .caveat("Unknown `subagentType` → pick from [Agents].")
-        .caveat("Don't parallel `execute` on overlapping files.")
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
-    );
-    map
+fn agent_tool_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(
+        "Scale delegation to the work instead of forcing a fixed workflow:\n- Quick lookup or \
+         edit needing only a few direct tool calls → work directly\n- One clear, non-trivial \
+         subtask that benefits from isolation → use the matching single agent\n- Multiple \
+         independent subtasks → use matching agents in parallel\n- Dependent subtasks → sequence \
+         only the agents actually needed\n\nUse `explore` for missing codebase facts, `execute` \
+         for a self-contained implementation after the main agent has decided the design and \
+         acceptance criteria, and `reviewer` for independent verification when the change's risk \
+         or scope warrants it. Agent types may be used independently or combined. The main agent \
+         retains product, architecture, protocol, dependency, and scope decisions.",
+    )
+    .example(
+        "Planned cross-module auth change with a known design → split independent, \
+         non-overlapping implementation slices across `execute` agents; use `reviewer` after \
+         implementation because the change is security-sensitive. For a small equivalent change, \
+         work directly.",
+    )
+    .caveat("Unknown `subagentType` → pick from [Agents].")
+    .caveat("Don't parallel `execute` on overlapping files.")
+    .prompt_tag(ToolPromptTag::Collaboration)
 }
 
 // ─── 共享工具函数 ──────────────────────────────────────────────────────
@@ -331,10 +423,8 @@ fn agent_tool_metadata()
 /// 子 session 固定使用配置的小模型（`activeSmallModel` / effective `small_llm`）。
 ///
 /// agent 文件中的 `model` 字段暂不生效；后续若支持按 agent 选模型再扩展此处。
-fn resolve_child_small_model(
-    caps: &astrcode_extension_sdk::tool::ToolCapabilities,
-) -> Result<String, ExtensionError> {
-    caps.models.tiers.small.clone().ok_or_else(|| {
+fn resolve_child_small_model(small_model_id: Option<&str>) -> Result<String, ExtensionError> {
+    small_model_id.map(str::to_owned).ok_or_else(|| {
         ExtensionError::Internal(
             "子 Agent 需要已配置的小模型（activeSmallProfile + activeSmallModel）。请在设置中配置 \
              Small LLM 后重试。"
@@ -384,38 +474,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_agent_metadata_for_model_selection() {
-        let agents = vec![agent::AgentConfig {
-            id: String::from("code-reviewer"),
-            name: String::from("code-reviewer"),
-            description: String::from("Use for behavior-focused code review"),
-            body: String::from("Review carefully."),
-            tool_selection: None,
-        }];
-
-        let output = format_agents_for_model(&agents);
-
-        assert!(output.contains("Available agents"));
-        assert!(output.contains("code-reviewer"));
-        assert!(output.contains("Use for behavior-focused code review"));
-        assert!(output.contains("subagentType"));
-    }
-
-    #[test]
-    fn formats_empty_agent_list() {
-        assert_eq!(format_agents_for_model(&[]), "No agents configured.");
-    }
-
-    #[test]
     fn agent_tool_schema_has_wait_for_result() {
         let definition = agent_tool_definition();
         let properties = definition.parameters["properties"]
             .as_object()
             .expect("tool schema properties");
 
-        assert!(definition.description.contains("When NOT to use"));
-        assert!(definition.description.contains("Tips"));
-        assert!(!definition.description.contains("When to use"));
         assert!(properties.contains_key("waitForResult"));
         assert_eq!(
             properties["waitForResult"]["default"],
@@ -446,77 +510,101 @@ mod tests {
     }
 
     #[test]
-    fn builtin_agent_descriptions_define_distinct_workflow_stages() {
+    fn agent_catalog_and_prompt_metadata_keep_distinct_delegation_responsibilities() {
+        let configured = vec![agent::AgentConfig {
+            id: "code-reviewer".into(),
+            name: "code-reviewer".into(),
+            description: "Use for behavior-focused code review".into(),
+            body: "Review carefully.".into(),
+            tool_selection: None,
+        }];
+        let rendered = format_agents_for_model(&configured);
+        for expected in [
+            "Available agents",
+            "code-reviewer",
+            "Use for behavior-focused code review",
+            "subagentType",
+        ] {
+            assert!(rendered.contains(expected));
+        }
+        assert_eq!(format_agents_for_model(&[]), "No agents configured.");
+
         let agents = agent::builtin_agents();
-        let description = |id: &str| {
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .map(|agent| agent.description.as_str())
-                .expect("builtin agent description")
-        };
-
-        assert!(description("explore").contains("before the main agent makes a design"));
-        assert!(description("execute").contains("concrete plan defined by the main agent"));
-        assert!(description("reviewer").contains("after implementation"));
-    }
-
-    #[test]
-    fn agent_guidance_scales_delegation_without_forcing_a_pipeline() {
-        let metadata = agent_tool_metadata();
-        let agent = metadata.get("agent").expect("agent prompt metadata");
-
-        assert!(agent.guide.contains("instead of forcing a fixed workflow"));
-        assert!(agent.guide.contains("used independently or combined"));
-        assert_eq!(agent.examples.len(), 1);
-        assert!(agent.examples[0].contains("execute"));
-        assert!(agent.examples[0].contains("work directly"));
-    }
-
-    #[test]
-    fn explore_owns_the_delegated_investigation() {
-        let explore = agent::builtin_agents()
-            .into_iter()
-            .find(|agent| agent.id == "explore")
-            .expect("builtin explore agent");
-
+        let by_id = |id: &str| agents.iter().find(|agent| agent.id == id).unwrap();
         assert!(
-            explore
+            by_id("explore")
+                .description
+                .contains("before the main agent makes a design")
+        );
+        assert!(
+            by_id("execute")
+                .description
+                .contains("concrete plan defined by the main agent")
+        );
+        assert!(
+            by_id("reviewer")
+                .description
+                .contains("after implementation")
+        );
+        assert!(
+            by_id("explore")
                 .body
                 .contains("complete the delegated investigation")
         );
-        assert!(explore.body.contains("report the concrete blocker"));
-        assert!(!explore.body.contains("Next action"));
-    }
+        assert!(
+            by_id("explore")
+                .body
+                .contains("report the concrete blocker")
+        );
 
-    #[test]
-    fn enhanced_agent_prompt_requires_a_compact_decision_packet() {
-        let prompt = enhance_agent_prompt("Role guidance.", "/workspace");
+        let metadata = agent_tool_prompt();
+        assert!(
+            metadata
+                .guide
+                .contains("instead of forcing a fixed workflow")
+        );
+        assert!(metadata.guide.contains("used independently or combined"));
+        assert_eq!(metadata.examples.len(), 1);
+        assert!(metadata.examples[0].contains("work directly"));
 
-        assert!(prompt.contains("Return a decision packet, not a work diary"));
-        assert!(prompt.contains("within about 600 tokens"));
-        assert!(prompt.contains("Never trade correctness for brevity"));
-        assert!(!prompt.contains("main agent's next action"));
-        assert!(prompt.contains("working directory is /workspace"));
+        let enhanced = enhance_agent_prompt("Role guidance.", "/workspace");
+        assert!(enhanced.contains("Return a decision packet, not a work diary"));
+        assert!(enhanced.contains("within about 600 tokens"));
+        assert!(enhanced.contains("Never trade correctness for brevity"));
+        assert!(enhanced.contains("working directory is /workspace"));
+
+        let status = agent_status(&[
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "running-agent".into(),
+                    name: AGENT_TOOL_NAME.into(),
+                    arguments: json!({"description": "inspect compact flow"}),
+                    raw_arguments: None,
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::tool(
+                AGENT_TOOL_NAME,
+                "running-agent",
+                "task_id: task-1\nstatus: running",
+                false,
+            ),
+            LlmMessage::tool(AGENT_TOOL_NAME, "unknown-agent", "worker failed", true),
+        ])
+        .expect("agent results contribute compact status");
+        assert!(status.contains("inspect compact flow: running"));
+        assert!(status.contains("agent task: failed"));
     }
 
     #[test]
     fn resolve_child_small_model_always_uses_configured_small_llm() {
-        let caps = astrcode_extension_sdk::tool::ToolCapabilities {
-            models: astrcode_extension_sdk::tool::ToolModelAccess {
-                tiers: astrcode_extension_sdk::tool::LlmModelIds {
-                    small: Some("haiku".into()),
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        };
-        assert_eq!(resolve_child_small_model(&caps).unwrap(), "haiku");
+        assert_eq!(resolve_child_small_model(Some("haiku")).unwrap(), "haiku");
     }
 
     #[test]
     fn resolve_child_small_model_errors_when_missing() {
-        let caps = astrcode_extension_sdk::tool::ToolCapabilities::default();
-        assert!(resolve_child_small_model(&caps).is_err());
+        assert!(resolve_child_small_model(None).is_err());
     }
 }

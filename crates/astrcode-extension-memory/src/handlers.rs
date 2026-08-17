@@ -4,21 +4,22 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, ExtensionTasks, HookResult, LifecycleContext, LifecycleHandler,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolHandler,
+        ExtensionCall, ExtensionError, HookResult, LifecycleContext, LifecycleHandler,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
+    tool::{HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    MemoryServices,
     config::MemoryConfig,
-    pipeline, prompts,
+    prompts,
     scope::ScopedMemoryStores,
     store::{AppendResult, MemoryStorePool},
+    workers::MemoryWorkers,
 };
 
 // ─── 常量 ────────────────────────────────────────────────────────────
@@ -28,6 +29,8 @@ const MEMORY_DELETE_TOOL: &str = "memory_delete";
 const MEMORY_LIST_TOOL: &str = "memory_list";
 const MAX_LIST_ENTRIES: usize = 50;
 const DEFAULT_LIST_LIMIT: usize = 20;
+pub(crate) const MEMORY_CREATED_EVENT_TYPE: &str = "memory.created";
+pub(crate) const MEMORY_DELETED_EVENT_TYPE: &str = "memory.deleted";
 
 // ─── Tool Definitions ────────────────────────────────────────────────
 
@@ -44,7 +47,6 @@ pub(crate) fn memory_save_definition() -> ToolDefinition {
             },
             "required": ["content"]
         }),
-        execution_mode: ExecutionMode::Sequential,
         strict: true,
         origin: ToolOrigin::Bundled,
     }
@@ -61,7 +63,6 @@ pub(crate) fn memory_delete_definition() -> ToolDefinition {
             },
             "required": ["match"]
         }),
-        execution_mode: ExecutionMode::Sequential,
         strict: true,
         origin: ToolOrigin::Bundled,
     }
@@ -78,7 +79,6 @@ pub(crate) fn memory_list_definition() -> ToolDefinition {
                 "limit": { "type": "integer", "description": "Max entries (default 20, max 50)", "minimum": 1, "maximum": 50 }
             }
         }),
-        execution_mode: ExecutionMode::Sequential,
         strict: true,
         origin: ToolOrigin::Bundled,
     }
@@ -88,12 +88,15 @@ fn ok_text(content: String) -> ToolResult {
     ToolResult::text(content, false, BTreeMap::new())
 }
 
+fn tool_working_dir(ctx: &ToolContext) -> String {
+    ctx.working_dir().to_string_lossy().into_owned()
+}
+
 async fn with_scoped_stores<T: Send + 'static>(
     store_pool: Arc<MemoryStorePool>,
-    working_dir: &str,
+    working_dir: String,
     operation: impl FnOnce(ScopedMemoryStores) -> std::io::Result<T> + Send + 'static,
 ) -> Result<T, ExtensionError> {
-    let working_dir = working_dir.to_string();
     tokio::task::spawn_blocking(move || {
         let stores = store_pool.get_scoped(&working_dir)?;
         operation(stores)
@@ -106,10 +109,7 @@ async fn with_scoped_stores<T: Send + 'static>(
 // ─── Save Handler ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySaveHandler {
-    pub store_pool: Arc<MemoryStorePool>,
-    pub services: MemoryServices,
-    pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
-    pub pipeline: Arc<MemoryPipelineCoordinator>,
+    pub workers: Arc<MemoryWorkers>,
     pub config: Arc<RwLock<MemoryConfig>>,
 }
 
@@ -127,26 +127,31 @@ fn default_category() -> String {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemorySaveHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::new([
+            ResourceAccess::host(HostResource::Session),
+            ResourceAccess::host(HostResource::Event),
+            ResourceAccess::host(HostResource::Model),
+        ]))
+    }
+
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: SaveArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: SaveArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx);
+        let session_id = ctx.session_id().to_string();
         let content = args.content;
         let category = args.category;
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
 
         // replace_match 路径：精准 upsert，不经过 delete
-        if let Some(ref replaces) = replace {
-            let replaces = replaces.clone();
-            let changed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-                stores.upsert(&category, &content, Some(replaces.as_str()))
-            })
-            .await?;
+        if let Some(replaces) = replace {
+            let changed = self
+                .workers
+                .upsert(working_dir, category, content, replaces)
+                .await?;
             return Ok(ok_text(
                 if changed {
                     "Memory updated."
@@ -159,26 +164,24 @@ impl ToolHandler for MemorySaveHandler {
         }
 
         // 正常新增路径
-        let result = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-            stores.append(&category, &content)
-        })
-        .await?;
+        let category_for_emit = category.clone();
+        let content_for_emit = content.clone();
+        let result = self
+            .workers
+            .append(working_dir.clone(), category, content)
+            .await?;
 
         match result {
             AppendResult::Saved => {
-                let cfg = self.config.read().clone();
-                if cfg.auto_extract_after_save {
-                    if let Some(tasks) = self.tasks.lock().clone() {
-                        spawn_memory_pipeline(
-                            &tasks,
-                            self.pipeline.clone(),
-                            self.store_pool.clone(),
-                            &self.services,
-                            self.config.clone(),
-                            ctx.scope.session_id.to_string(),
-                            working_dir.to_string(),
-                        );
-                    }
+                let payload = json!({
+                    "category": category_for_emit,
+                    "content": content_for_emit,
+                });
+                if let Err(error) = ctx.events().emit(MEMORY_CREATED_EVENT_TYPE, &payload).await {
+                    tracing::warn!(%error, "memory creation event was not published");
+                }
+                if self.config.read().auto_extract_after_save {
+                    self.workers.request_pipeline(session_id, working_dir);
                 }
                 Ok(ok_text("Memory saved.".to_string()).into())
             },
@@ -198,7 +201,7 @@ impl ToolHandler for MemorySaveHandler {
 // ─── Delete Handler ──────────────────────────────────────────────────
 
 pub(crate) struct MemoryDeleteHandler {
-    pub store_pool: Arc<MemoryStorePool>,
+    pub workers: Arc<MemoryWorkers>,
 }
 
 #[derive(Deserialize)]
@@ -209,32 +212,33 @@ struct DeleteArgs {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryDeleteHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::new([
+            ResourceAccess::host(HostResource::Session),
+            ResourceAccess::host(HostResource::Event),
+        ]))
+    }
+
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: DeleteArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: DeleteArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx);
         if args.match_pattern.trim().is_empty() {
             return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
-        let removed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-            stores.delete_by_content(&pattern)
-        })
-        .await?;
+        let removed = self.workers.delete(working_dir, pattern).await?;
 
         if !removed.is_empty() {
-            if let Some(ref sink) = ctx.events {
-                let payload = json!({
-                    "match": pattern_for_emit,
-                    "deleted_count": removed.len(),
-                });
-                let _ = sink.emit("memory.deleted", 1, payload);
+            let payload = json!({
+                "match": pattern_for_emit,
+                "deletedCount": removed.len(),
+            });
+            if let Err(error) = ctx.events().emit(MEMORY_DELETED_EVENT_TYPE, &payload).await {
+                tracing::warn!(%error, "memory deletion event was not published");
             }
         }
 
@@ -270,15 +274,16 @@ const fn default_list_limit() -> usize {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryListHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: ListArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: ListArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx);
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
         let query = args.query.filter(|q| !q.trim().is_empty());
 
@@ -317,8 +322,8 @@ pub(crate) struct MemoryRecallHandler {
 impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let store_pool = self.store_pool.clone();
-        let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
+        let session_id = ctx.session_id().to_string();
         let session_prefs = self.session_prefs.clone();
 
         let global_prefs = tokio::task::spawn_blocking(move || {
@@ -345,223 +350,37 @@ impl PromptBuildHandler for MemoryRecallHandler {
     }
 }
 
-// ─── SessionStart + pipeline coordinator ───────────────────────────
-
-#[derive(Default)]
-pub(crate) struct MemoryPipelineCoordinator {
-    state: Mutex<PipelineState>,
-}
-
-#[derive(Default)]
-struct PipelineState {
-    running: bool,
-    pending: bool,
-    latest_session_id: Option<String>,
-    latest_working_dir: Option<String>,
-}
-
-impl MemoryPipelineCoordinator {
-    fn request_run(&self, session_id: String, working_dir: String) -> Option<(String, String)> {
-        let mut state = self.state.lock();
-        state.latest_session_id = Some(session_id.clone());
-        state.latest_working_dir = Some(working_dir.clone());
-        if state.running {
-            state.pending = true;
-            None
-        } else {
-            state.running = true;
-            Some((session_id, working_dir))
-        }
-    }
-
-    fn complete_run(&self) -> Option<(String, String)> {
-        let mut state = self.state.lock();
-        if state.pending {
-            state.pending = false;
-            Some((
-                state.latest_session_id.clone()?,
-                state.latest_working_dir.clone()?,
-            ))
-        } else {
-            state.running = false;
-            None
-        }
-    }
-
-    pub(crate) fn reset(&self) {
-        *self.state.lock() = PipelineState::default();
-    }
-}
-
-pub(crate) fn spawn_memory_pipeline(
-    tasks: &ExtensionTasks,
-    pipeline: Arc<MemoryPipelineCoordinator>,
-    store_pool: Arc<MemoryStorePool>,
-    services: &MemoryServices,
-    config: Arc<RwLock<MemoryConfig>>,
-    session_id: String,
-    working_dir: String,
-) {
-    let Some((mut current_session_id, mut working_dir)) =
-        pipeline.request_run(session_id, working_dir)
-    else {
-        tracing::debug!("memory pipeline queued");
-        return;
-    };
-
-    let services = services.get().cloned();
-    let shutdown = tasks.shutdown();
-
-    tasks.spawn("memory-pipeline", async move {
-        let Some(services) = services else {
-            pipeline.reset();
-            return;
-        };
-        let session_query = match services.session_query.clone() {
-            Some(r) => r,
-            None => {
-                tracing::warn!("memory pipeline: session history unavailable");
-                pipeline.reset();
-                return;
-            },
-        };
-        let small_llm = match services.small_llm.clone() {
-            Some(llm) => llm,
-            None => {
-                tracing::warn!("memory pipeline: small model unavailable");
-                pipeline.reset();
-                return;
-            },
-        };
-
-        loop {
-            let scoped = match store_pool.get_scoped(&working_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "memory pipeline: scoped store failed");
-                    break;
-                },
-            };
-            let cfg = config.read().clone();
-            let run = pipeline::run(
-                &scoped,
-                session_query.clone(),
-                small_llm.as_ref(),
-                &current_session_id,
-                &cfg,
-            );
-
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    tracing::debug!("memory pipeline stopped");
-                    break;
-                },
-                result = run => {
-                    if let Err(e) = result {
-                        tracing::warn!(
-                            error = %e,
-                            session_id = %current_session_id,
-                            "memory pipeline failed"
-                        );
-                    }
-                },
-            }
-
-            if shutdown.is_cancelled() {
-                break;
-            }
-            let Some((next_id, next_dir)) = pipeline.complete_run() else {
-                break;
-            };
-            current_session_id = next_id;
-            working_dir = next_dir;
-        }
-
-        while pipeline.complete_run().is_some() {}
-    });
-}
+// ─── SessionStart ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySessionStartHandler {
-    pub store_pool: Arc<MemoryStorePool>,
-    pub services: MemoryServices,
-    pub pipeline: Arc<MemoryPipelineCoordinator>,
-    pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
+    pub workers: Arc<MemoryWorkers>,
     pub config: Arc<RwLock<MemoryConfig>>,
-    pub session_prefs: Arc<crate::turn_recall::SessionPrefsCache>,
 }
 
 #[async_trait::async_trait]
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let Some(tasks) = self.tasks.lock().clone() else {
-            tracing::debug!(session_id = %ctx.session_id, "memory extension not started");
-            return Ok(HookResult::Allow);
-        };
-        if tasks.shutdown().is_cancelled() {
-            return Ok(HookResult::Allow);
-        }
+        let session_id = ctx.session_id().to_string();
 
         // 把 user_prefs 锚定在 session 边界：session 内只读，`memory_save`
         // 写入的新偏好不影响当前 session 的 system prompt（KV cache 稳定）。
         // 预加载幂等，即使赶不上首次 PromptBuild，兜底加载仍保证一致。
         // 预加载失败不阻塞——PromptBuild 的 lines_for_session 会兜底。
-        let store_pool = self.store_pool.clone();
-        let session_prefs = self.session_prefs.clone();
-        let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            let scoped = store_pool.get_scoped(&working_dir)?;
-            session_prefs.preload_for_session(&session_id, || scoped.all_user_preference_lines())
-        })
-        .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
+        if let Err(error) = self
+            .workers
+            .preload_preferences(working_dir.clone(), session_id.clone())
+            .await
         {
-            tracing::debug!(error = %e, "memory: user_prefs preload failed, will lazy-load on prompt build");
+            tracing::debug!(%error, "memory: user_prefs preload failed, will lazy-load on prompt build");
         }
 
         if !self.config.read().auto_extract {
             return Ok(HookResult::Allow);
         }
 
-        spawn_memory_pipeline(
-            &tasks,
-            self.pipeline.clone(),
-            self.store_pool.clone(),
-            &self.services,
-            self.config.clone(),
-            ctx.session_id.to_string(),
-            ctx.working_dir.to_string(),
-        );
+        self.workers.request_pipeline(session_id, working_dir);
 
         Ok(HookResult::Allow)
-    }
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pipeline_coordinator_coalesces_pending_runs() {
-        let coord = MemoryPipelineCoordinator::default();
-
-        // First run starts immediately
-        let run1 = coord.request_run("s1".into(), "/a".into());
-        assert!(run1.is_some());
-
-        // Second run is queued (coalesced)
-        let run2 = coord.request_run("s2".into(), "/b".into());
-        assert!(run2.is_none());
-
-        // Completing the first run dequeues the pending one
-        let next = coord.complete_run();
-        assert!(next.is_some());
-        assert_eq!(next.unwrap().0, "s2");
-
-        // No more pending
-        let done = coord.complete_run();
-        assert!(done.is_none());
     }
 }

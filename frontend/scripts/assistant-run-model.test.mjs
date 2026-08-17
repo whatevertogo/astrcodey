@@ -160,10 +160,9 @@ assert.equal(
 )
 
 const longRunBlocks = [
-  assistant('a-long', '', 'streaming'),
-  ...Array.from({ length: 50 }, (_, index) =>
-    tool(`t-long-${index}`, 'read', index === 49 ? 'streaming' : 'complete')
-  ),
+  assistant('a-long', ''),
+  ...Array.from({ length: 50 }, (_, index) => tool(`t-long-${index}`, 'read')),
+  assistant('a-long-final', 'finished', 'complete', { storageSeq: 99 }),
 ]
 const longRunItems = buildMessageListItems([
   { kind: 'user', id: 'u-long', text: 'inspect everything' },
@@ -171,8 +170,76 @@ const longRunItems = buildMessageListItems([
 ])
 const longRunModel = buildAssistantRunModel(longRunBlocks)
 assert.equal(longRunItems[1].id, 'assistant-run:a-long')
+const longRunChunks = longRunItems.filter(
+  (item) => item.type === 'assistantRun'
+)
+assert.equal(longRunChunks.length, 2)
+assert.ok(
+  longRunChunks.every((item) => item.blocks.length <= 32),
+  'a long assistant run must be split into bounded virtual list items'
+)
+assert.equal(longRunChunks[0].actionBlocks, null)
+assert.equal(
+  longRunChunks[1].actionBlocks?.length,
+  longRunBlocks.length,
+  'only the final chunk owns actions for the complete logical run'
+)
+assert.ok(
+  longRunChunks[1].actionBlocks?.every(
+    (block, index) => block === longRunBlocks[index]
+  )
+)
+assert.equal(
+  longRunItems.at(-1),
+  longRunChunks[1],
+  'the final chunk must keep the turn action instead of adding a fallback row'
+)
 assert.equal(longRunModel.segments[0].id, 'process:t-long-0')
 assert.equal(longRunModel.processEntries.length, 50)
+
+const latestPageBlocks = Array.from({ length: 40 }, (_, index) =>
+  tool(`latest-page-${index}`, 'read')
+)
+const latestPageBreaks = new Set([latestPageBlocks[0].id])
+const latestPageItems = buildMessageListItems(
+  latestPageBlocks,
+  latestPageBreaks
+).filter((item) => item.type === 'assistantRun')
+const allPrependedPageItems = buildMessageListItems(
+  [
+    ...Array.from({ length: 17 }, (_, index) =>
+      tool(`older-page-${index}`, 'read')
+    ),
+    ...latestPageBlocks,
+  ],
+  latestPageBreaks
+)
+const prependedPageItems = allPrependedPageItems.filter(
+  (item) =>
+    item.type === 'assistantRun' &&
+    item.blocks[0]?.id.startsWith('latest-page-')
+)
+assert.deepEqual(
+  prependedPageItems.map((item) => item.id),
+  latestPageItems.map((item) => item.id),
+  'prepending a page must preserve the existing page virtual row identities'
+)
+assert.ok(
+  allPrependedPageItems
+    .filter(
+      (item) =>
+        item.type === 'assistantRun' &&
+        item.blocks[0]?.id.startsWith('older-page-')
+    )
+    .every((item) => item.actionBlocks === null),
+  'a page boundary must not create a false completed-turn action'
+)
+assert.equal(
+  allPrependedPageItems.filter((item) => item.type === 'assistantRun').at(-1)
+    ?.actionBlocks?.length,
+  57,
+  'only the final page segment owns actions for the complete logical run'
+)
 
 assert.equal(
   assistantVisibleText(

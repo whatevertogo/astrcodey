@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use astrcode_core::permission::ApprovalMode;
+use astrcode_extension_sdk::transport::{TransportFeature, TransportProfile};
 use astrcode_protocol::framing::PROTOCOL_VERSION;
 use astrcode_server::bootstrap::{BootstrapOptions, ServerApp};
 use clap::{Parser, Subcommand};
@@ -30,7 +31,7 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
     BootstrapOptions {
         default_approval_mode_if_unset: Some(ApprovalMode::Yolo),
         approval_mode_override,
-        disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
+        transport_profile: TransportProfile::default(),
         ..Default::default()
     }
 }
@@ -198,9 +199,6 @@ enum Commands {
         /// 服务器地址（若已有运行中的 server）
         #[arg(long)]
         server_addr: Option<String>,
-        /// Auth token
-        #[arg(long)]
-        auth_token: Option<String>,
         /// 在官方 SWE-bench x86_64 instance image 中逐例求解。
         #[arg(long)]
         swe_instance_solver_binary: Option<std::path::PathBuf>,
@@ -258,8 +256,13 @@ enum Commands {
 }
 
 /// 程序入口：解析命令行参数并分发到对应子命令处理函数。
-async fn bootstrap_server_app() -> Arc<ServerApp> {
-    match astrcode_server::bootstrap::bootstrap().await {
+async fn bootstrap_server_app(transport_profile: TransportProfile) -> Arc<ServerApp> {
+    match astrcode_server::bootstrap::bootstrap_with(BootstrapOptions {
+        transport_profile,
+        ..BootstrapOptions::default()
+    })
+    .await
+    {
         Ok(runtime) => {
             let app = ServerApp::new(Arc::new(runtime));
             app.initialize().await;
@@ -333,14 +336,16 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Server { addr } => {
-            let server_app = bootstrap_server_app().await;
+            let server_app =
+                bootstrap_server_app(TransportProfile::new([TransportFeature::AuthenticatedHttp]))
+                    .await;
             if let Err(e) = astrcode_server::http::run_http_server(server_app, addr).await {
                 tracing::error!("Server failed: {e}");
                 return ExitCode::from(1);
             }
         },
         Commands::Acp => {
-            let server_app = bootstrap_server_app().await;
+            let server_app = bootstrap_server_app(TransportProfile::default()).await;
             if let Err(e) = astrcode_server::acp::run_acp_server(server_app).await {
                 tracing::error!("ACP server failed: {e}");
                 return ExitCode::from(1);
@@ -363,7 +368,6 @@ async fn main() -> ExitCode {
             keep_workdir,
             storage,
             server_addr,
-            auth_token,
             swe_instance_solver_binary,
             swe_instance_server_config,
             swe_instance_image_namespace,
@@ -425,7 +429,6 @@ async fn main() -> ExitCode {
                 keep_workdir,
                 storage_root: storage,
                 server_addr,
-                auth_token,
                 checkpoint_path: checkpoint_output,
                 resume_checkpoint,
                 swe_bench_instance,

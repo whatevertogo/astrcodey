@@ -5,17 +5,15 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use astrcode_context::{CompactResult, is_compact_summary_message};
+use astrcode_context::is_compact_summary_message;
 use astrcode_core::{
-    compaction::CompactStrategy,
     config::ContextSettings,
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    tool::ToolDefinition,
     types::{SessionId, new_message_id, new_turn_id},
 };
 use astrcode_session::Session;
-use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
+use astrcode_session_projection::{SessionArtifactView, SessionReadModel};
 use astrcode_storage::SessionStore;
 use tokio::sync::mpsc;
 
@@ -50,7 +48,7 @@ const VALID_COMPACT_SUMMARY: &str = r#"<summary>
    - (none)
 </summary>"#;
 
-fn is_compact_summary_request(messages: &[LlmMessage]) -> bool {
+fn is_compact_summary_request(messages: &[Arc<LlmMessage>]) -> bool {
     messages.last().is_some_and(|message| {
         message.role == LlmRole::User
             && message
@@ -103,20 +101,6 @@ async fn configure_system_prompt(session: &Session) {
         .unwrap();
 }
 
-fn sample_compaction() -> CompactResult {
-    CompactResult {
-        pre_tokens: 100,
-        post_tokens: 10,
-        summary: "integration summary".into(),
-        messages_removed: 2,
-        summary_messages: vec![LlmMessage::user(
-            "<compact_summary>\nSummary:\nintegration\n</compact_summary>",
-        )],
-        retained_messages: vec![LlmMessage::user("kept tail")],
-        transcript_path: None,
-    }
-}
-
 async fn compact_event_count(store: &dyn SessionStore, session_id: &SessionId) -> usize {
     store
         .replay_events(session_id)
@@ -135,10 +119,10 @@ async fn compact_event_count(store: &dyn SessionStore, session_id: &SessionId) -
 fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
     astrcode_core::llm::provider_visible_messages(
         model
-            .transcript
+            .model_context
             .messages
             .iter()
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     )
 }
@@ -148,18 +132,18 @@ fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
 /// 事件在 mock 内部、LLM 返回前注入，避免测试侧与 mock 之间的 Notify/oneshot 竞态。
 struct RaceOnCompactLlm {
     main_calls: AtomicUsize,
-    main_requests: Arc<std::sync::Mutex<Vec<Vec<LlmMessage>>>>,
+    main_requests: Arc<std::sync::Mutex<Vec<Vec<Arc<LlmMessage>>>>>,
     session_to_race: Arc<std::sync::Mutex<Option<Arc<Session>>>>,
     race_message: String,
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for RaceOnCompactLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         let (tx, rx) = mpsc::unbounded_channel();
 
         if is_compact_summary_request(&messages) {
@@ -218,66 +202,6 @@ impl LlmProvider for RaceOnCompactLlm {
 }
 
 #[tokio::test]
-async fn transcript_rewrite_preserves_new_tail_events() {
-    let (session, store, _, _) = common::spawn_session_with_context_and_services(
-        Arc::new(StaticOkLlm),
-        ContextSettings::default(),
-    )
-    .await;
-    configure_system_prompt(&session).await;
-    seed_history(&session, 2).await;
-
-    let stale_seq = session
-        .latest_cursor()
-        .await
-        .unwrap()
-        .expect("session should have cursor after seeding")
-        .parse::<u64>()
-        .expect("cursor should be u64 event seq");
-
-    session
-        .emit_durable(
-            None,
-            DurableEventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "race event".into(),
-                attachments: vec![],
-                accepted_seq: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    session
-        .rewrite_transcript_for_compaction(
-            "auto_threshold".into(),
-            sample_compaction(),
-            stale_seq,
-            CompactStrategy::Auto,
-        )
-        .await
-        .expect("persist should preserve events after source_seq");
-    assert_eq!(
-        compact_event_count(store.as_ref(), session.id()).await,
-        1,
-        "compact should append one rewrite event"
-    );
-    let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("kept tail")),
-        "retained compact messages should remain visible"
-    );
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("race event")),
-        "events after source_seq must remain in projection"
-    );
-}
-
-#[tokio::test]
 async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
     let main_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
@@ -318,7 +242,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
         .pop()
         .expect("main provider request should be captured");
     assert!(
-        main_messages.iter().any(is_compact_summary_message),
+        main_messages.iter().any(|m| is_compact_summary_message(m)),
         "provider request should use the compact summary"
     );
     assert!(
@@ -346,10 +270,10 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
         "projection should contain the compact summary"
     );
     assert!(
-        model.transcript.artifacts.iter().any(|artifact| matches!(
+        model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            TranscriptArtifactView::SystemNote { text, .. }
-                if text == "concurrent race during compact"
+            SessionArtifactView::Recap { text, source, .. }
+                if text == "concurrent race during compact" && source == "test"
         )),
         "projection must preserve artifacts appended during compact"
     );
@@ -387,7 +311,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
 
 #[tokio::test]
 async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
-    use astrcode_session::compaction::{IdleCompactionOutcome, compact_idle_session};
+    use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let race_llm = Arc::new(RaceOnCompactLlm {
@@ -415,11 +339,11 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
 
     let session_for_race = Arc::clone(&session);
     let compact_task =
-        tokio::spawn(async move { compact_idle_session(session_for_race.as_ref(), None).await });
+        tokio::spawn(async move { compact_manual_session(session_for_race.as_ref(), None).await });
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, IdleCompactionOutcome::Compacted { .. }),
+        matches!(outcome, ManualCompactionOutcome::Compacted { .. }),
         "idle compact should preserve the concurrent tail, got {outcome:?}"
     );
     assert_eq!(
@@ -429,36 +353,11 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
     );
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.artifacts.iter().any(|artifact| matches!(
+        model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            TranscriptArtifactView::SystemNote { text, .. }
-                if text == "race during idle compact"
+            SessionArtifactView::Recap { text, source, .. }
+                if text == "race during idle compact" && source == "test"
         )),
         "projection must preserve artifacts appended during compact"
     );
-}
-
-struct StaticOkLlm;
-
-#[async_trait::async_trait]
-impl LlmProvider for StaticOkLlm {
-    async fn generate(
-        &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
-        let _ = tx.send(LlmEvent::Done {
-            finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 1024,
-        }
-    }
 }

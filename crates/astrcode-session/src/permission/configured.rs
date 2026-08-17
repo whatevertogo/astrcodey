@@ -2,7 +2,7 @@ use astrcode_core::permission::PermissionRule;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
-    PermissionContext, PermissionDecision, PermissionPolicy,
+    PermissionContext, PermissionPolicy, PolicyDecision,
     paths::{extract_tool_paths, path_matches_glob},
 };
 
@@ -12,7 +12,7 @@ pub(super) struct ConfiguredPolicy {
     effect: ConfiguredEffect,
 }
 
-/// 规则命中后的决策类型；同时决定策略优先级（见 `PermissionPolicy::priority`）。
+/// 规则命中后的决策类型。
 #[derive(Clone, Copy)]
 pub(super) enum ConfiguredEffect {
     Deny,
@@ -77,29 +77,21 @@ fn rule_matches(rule: &CompiledRule, ctx: &PermissionContext<'_>) -> bool {
 }
 
 impl PermissionPolicy for ConfiguredPolicy {
-    fn priority(&self) -> u32 {
-        match self.effect {
-            ConfiguredEffect::Deny => 10,
-            ConfiguredEffect::Allow => 60,
-            ConfiguredEffect::Ask => 65,
-        }
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         for rule in &self.rules {
             if rule_matches(rule, ctx) {
                 return match self.effect {
-                    ConfiguredEffect::Deny => PermissionDecision::Deny {
+                    ConfiguredEffect::Deny => PolicyDecision::Deny {
                         reason: format!("Denied by user rule for tool `{}`", ctx.tool_name),
                     },
-                    ConfiguredEffect::Allow => PermissionDecision::Allow,
-                    ConfiguredEffect::Ask => PermissionDecision::Ask {
+                    ConfiguredEffect::Allow => PolicyDecision::Allow,
+                    ConfiguredEffect::Ask => PolicyDecision::Ask {
                         prompt: format!("User rule requires approval for tool `{}`", ctx.tool_name),
                         rule_key: Some(format!("configured:{}", rule.tool)),
                     },
                 };
             }
         }
-        PermissionDecision::Pass
+        PolicyDecision::Pass
     }
 }

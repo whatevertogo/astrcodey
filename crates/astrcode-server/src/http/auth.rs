@@ -1,46 +1,6 @@
-//! HTTP 鉴权中间件、Bearer token 加载与 CORS 来源收集。
+//! CORS 来源收集。HTTP 鉴权已停用，token 管道已移除。
 
-use axum::{
-    extract::State,
-    http::{HeaderValue, StatusCode, header},
-    middleware::Next,
-    response::Response,
-};
-use uuid::Uuid;
-
-use super::error_response;
-
-pub(super) const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
-
-pub(super) async fn auth_middleware(
-    State(expected_bearer): State<String>,
-    request: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let auth = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    match auth {
-        Some(v) if v == expected_bearer => next.run(request).await,
-        _ => error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or missing auth token",
-        ),
-    }
-}
-
-fn generate_auth_token() -> String {
-    Uuid::new_v4().simple().to_string()
-}
-
-pub(super) fn configured_auth_token() -> String {
-    std::env::var(ASTRCODE_HTTP_TOKEN_ENV)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(generate_auth_token)
-}
+use axum::http::HeaderValue;
 
 pub(super) fn collect_allowed_origins() -> Vec<HeaderValue> {
     let mut origins = vec![

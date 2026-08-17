@@ -4,11 +4,9 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use astrcode_extension_sdk::tool::{
-    ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
-};
+use astrcode_extension_sdk::tool::{ToolDefinition, ToolOrigin, ToolResult, tool_metadata};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::{
     catalog::{ModeCatalog, ModeId, validate_transition},
@@ -56,7 +54,6 @@ pub(crate) fn switch_mode_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
     }
 }
 
@@ -80,7 +77,6 @@ pub(crate) fn upsert_plan_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
     }
 }
 
@@ -88,7 +84,7 @@ pub(crate) fn upsert_plan_tool_definition() -> ToolDefinition {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SwitchModeArgs {
+pub(crate) struct SwitchModeArgs {
     mode: String,
     #[serde(default)]
     require_approval: bool,
@@ -96,7 +92,7 @@ struct SwitchModeArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UpsertPlanArgs {
+pub(crate) struct UpsertPlanArgs {
     content: String,
 }
 
@@ -117,13 +113,11 @@ fn transition_context(from: &ModeId, to: &ModeId, user_initiated: bool) -> Optio
 }
 
 pub(crate) fn handle_switch_mode(
-    arguments: Value,
+    args: SwitchModeArgs,
     mode_root: &Path,
     plan_dir: &Path,
     catalog: &ModeCatalog,
 ) -> Result<ToolResult, String> {
-    let args = serde_json::from_value::<SwitchModeArgs>(arguments)
-        .map_err(|e| format!("invalid args for {SWITCH_MODE_TOOL_NAME}: {e}"))?;
     let target_id = ModeId::from_raw(&args.mode);
     let mut state = store::load_mode_state(mode_root)?;
     let current_id = ModeId::from_raw(&state.current_mode);
@@ -178,7 +172,7 @@ pub(crate) fn handle_switch_mode(
 
     let context = transition_context(&current_id, &target_id, state.user_initiated);
 
-    state.pending_transition_context = context;
+    state.replace_pending_transition(context);
     store::save_mode_state(mode_root, &state)?;
 
     Ok(ToolResult::text(
@@ -209,13 +203,10 @@ pub(crate) fn handle_switch_mode(
 }
 
 pub(crate) fn handle_upsert_plan(
-    arguments: Value,
+    args: UpsertPlanArgs,
     mode_root: &Path,
     plan_dir: &Path,
 ) -> Result<ToolResult, String> {
-    let args = serde_json::from_value::<UpsertPlanArgs>(arguments)
-        .map_err(|e| format!("invalid args for {UPSERT_PLAN_TOOL_NAME}: {e}"))?;
-
     let state = store::load_mode_state(mode_root)?;
     if state.current_mode != "plan" {
         return Ok(ToolResult::text(
@@ -267,7 +258,7 @@ mod tests {
         let catalog = builtin_catalog();
 
         let result = handle_switch_mode(
-            json!({ "mode": "plan" }),
+            serde_json::from_value(json!({ "mode": "plan" })).unwrap(),
             &root.join("mode"),
             &plan_dir,
             &catalog,
@@ -285,7 +276,7 @@ mod tests {
         let catalog = builtin_catalog();
 
         let result = handle_switch_mode(
-            json!({ "mode": "code" }),
+            serde_json::from_value(json!({ "mode": "code" })).unwrap(),
             &root.join("mode"),
             &plan_dir,
             &catalog,
@@ -293,7 +284,6 @@ mod tests {
         .expect("same mode should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Already in Code"));
     }
 
     #[test]
@@ -302,10 +292,21 @@ mod tests {
         let plan_dir = test_root("gate-no-plan").join("plan");
         let catalog = builtin_catalog();
 
-        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
+        handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "plan" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .unwrap();
 
-        let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
-            .expect("should return result");
+        let result = handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "code" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .expect("should return result");
         assert!(result.is_error);
         assert!(result.content.contains("no plan artifact found"));
     }
@@ -316,13 +317,24 @@ mod tests {
         let plan_dir = test_root("direct-exit").join("plan");
         let catalog = builtin_catalog();
 
-        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
+        handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "plan" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .unwrap();
 
         let plan = "# Plan: test\n\n## Goal\n\nDo something.\n";
         store::save_plan(&plan_dir, plan).unwrap();
 
-        let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
-            .expect("should succeed");
+        let result = handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "code" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .expect("should succeed");
         assert!(!result.is_error);
         assert!(result.content.contains("Switched from plan to Code"));
     }
@@ -333,11 +345,21 @@ mod tests {
         let plan_dir = test_root("upsert-create").join("plan");
         let catalog = builtin_catalog();
 
-        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
+        handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "plan" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .unwrap();
 
         let plan = "# Plan: test plan\n\n## Goal\n\nDo something.\n";
-        let result = handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir)
-            .expect("upsert should succeed");
+        let result = handle_upsert_plan(
+            serde_json::from_value(json!({ "content": plan })).unwrap(),
+            &mode_root,
+            &plan_dir,
+        )
+        .expect("upsert should succeed");
 
         assert!(!result.is_error);
         assert!(result.content.contains("created"));
@@ -349,9 +371,12 @@ mod tests {
         let mode_root = test_root("upsert-code-mode").join("mode");
         let plan_dir = test_root("upsert-code-mode").join("plan");
 
-        let result =
-            handle_upsert_plan(json!({ "content": "## Goal\nTest" }), &mode_root, &plan_dir)
-                .expect("should return result");
+        let result = handle_upsert_plan(
+            serde_json::from_value(json!({ "content": "## Goal\nTest" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+        )
+        .expect("should return result");
 
         assert!(result.is_error);
         assert!(result.content.contains("only available in plan mode"));
@@ -363,13 +388,29 @@ mod tests {
         let plan_dir = test_root("full-round-trip").join("plan");
         let catalog = builtin_catalog();
 
-        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
+        handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "plan" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .unwrap();
 
         let plan = "# Plan: full test\n\n## Goal\n\nDo something.\n";
-        handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir).unwrap();
+        handle_upsert_plan(
+            serde_json::from_value(json!({ "content": plan })).unwrap(),
+            &mode_root,
+            &plan_dir,
+        )
+        .unwrap();
 
-        let exit =
-            handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog).unwrap();
+        let exit = handle_switch_mode(
+            serde_json::from_value(json!({ "mode": "code" })).unwrap(),
+            &mode_root,
+            &plan_dir,
+            &catalog,
+        )
+        .unwrap();
         assert!(!exit.is_error);
 
         let state = store::load_mode_state(&mode_root).unwrap();

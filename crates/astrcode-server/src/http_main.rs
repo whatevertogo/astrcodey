@@ -7,12 +7,21 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
+use astrcode_extension_sdk::transport::{TransportFeature, TransportProfile};
+
 #[tokio::main]
 async fn main() {
     let _guard = astrcode_log::init();
     tracing::info!("astrcode-http-server starting");
 
-    let server_app = match astrcode_server::bootstrap::bootstrap().await {
+    let server_app = match astrcode_server::bootstrap::bootstrap_with(
+        astrcode_server::bootstrap::BootstrapOptions {
+            transport_profile: TransportProfile::new([TransportFeature::AuthenticatedHttp]),
+            ..Default::default()
+        },
+    )
+    .await
+    {
         Ok(runtime) => astrcode_server::bootstrap::ServerApp::new(Arc::new(runtime)),
         Err(error) => {
             tracing::error!("Bootstrap failed: {error}");

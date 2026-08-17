@@ -2,11 +2,11 @@
 //!
 //! 包含工具调用从 LLM 流式响应中积累、预处理、到最终执行各阶段的类型。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use astrcode_core::{
     permission::ApprovalSource,
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolResult, access::ToolPlan},
 };
 
 use super::turn_publish::TurnEvents;
@@ -26,6 +26,7 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
     pub(crate) raw_arguments: Option<String>,
+    pub(crate) plan: ToolPlan,
     pub(crate) mode: ExecutionMode,
     pub(crate) discovery_gate: Option<String>,
     pub(crate) disposition: PreparedToolDisposition,
@@ -33,11 +34,9 @@ pub(crate) struct PreparedToolInvocation {
 
 /// 一个 agent step 中已完成预处理、待执行的工具调用集合（prepare 阶段的纯数据产物）。
 ///
-/// `calls` 保持 provider 原始顺序；`pre_executed` 携带早期调度器抢先执行完成的结果
-/// （按 index 索引）。该批次被 `execute_and_commit` 消费后即失效。
+/// `calls` 保持 provider 原始顺序。该批次被 `execute_and_commit` 消费后即失效。
 pub(crate) struct ToolBatch {
     pub(crate) calls: Vec<PreparedToolInvocation>,
-    pub(crate) pre_executed: HashMap<usize, ToolExecutionOutcome>,
 }
 
 /// 执行阶段的批次包装：批数据 + 执行所需的运行期依赖。
@@ -59,12 +58,15 @@ pub(crate) enum PreparedToolDisposition {
     },
     /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
     ReuseSameStep,
-    /// 需用户审批后执行。
-    AwaitApproval {
-        prompt: String,
-        rule_key: Option<String>,
-        source: ApprovalSource,
-    },
+    /// 所有尚未被会话记忆消解的审批条件，按声明顺序逐项确认。
+    AwaitApprovals(Vec<PreparedToolApproval>),
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedToolApproval {
+    pub(crate) prompt: String,
+    pub(crate) rule_key: Option<String>,
+    pub(crate) source: ApprovalSource,
 }
 
 /// 一次工具调用在 session 编排层的终态。
@@ -159,6 +161,7 @@ pub(crate) struct ExecutableToolInvocation {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
+    pub(crate) plan: ToolPlan,
 }
 
 /// 工具完成事件所需的参数形状。
@@ -194,6 +197,7 @@ impl PreparedToolInvocation {
             call_id: self.call_id.clone(),
             name: self.name.clone(),
             tool_input: self.tool_input.clone(),
+            plan: self.plan.clone(),
         }
     }
 }

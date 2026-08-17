@@ -6,21 +6,19 @@ use std::{
 
 use astrcode_core::{
     event::DurableEventPayload,
-    permission::{ApprovalDecision, ApprovalSource},
+    permission::ApprovalDecision,
     tool::{ExecutionMode, ToolDefinition},
     types::ToolCallId,
 };
 use tokio::{sync::oneshot, task::JoinSet};
 
-use super::{
-    ToolCalls,
-    events::{finish_tool_call, tool_result_for_output},
-};
+use super::{ToolCalls, events::finish_tool_call};
 use crate::{
     permission::APPROVAL_TIMEOUT_SECS,
     tool_exec::execute_tool_call,
     tool_types::{
-        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolDisposition, ToolExecutionOutcome,
+        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolApproval, PreparedToolDisposition,
+        ToolExecutionOutcome,
     },
     turn_context::TurnError,
 };
@@ -28,7 +26,7 @@ use crate::{
 impl ToolCalls {
     /// 执行已预处理的工具调用。
     ///
-    /// 只读工具按连续批次并发执行；写入、shell、terminal 以及审批/阻止结果都会先刷新当前
+    /// 只读工具按连续批次并发执行；写入、shell 以及审批/阻止结果都会先刷新当前
     /// 只读批次，再按原始顺序串行处理。
     pub(crate) async fn execute_and_commit(
         &self,
@@ -67,14 +65,14 @@ impl ToolCalls {
             }
             let call = input.batch.calls[position].clone();
 
-            // 只有「无预执行结果的并行调用」能加入当前并行批次；其余调用必须先 flush：
+            // 并行调用加入当前并行批次；其余调用必须先 flush：
             // 并行批次在 flush 时才执行并提交，串行/审批/去重复用调用必须等它完成，
             // 否则 durable 事件乱序；去重复用还依赖 flush 中 finalize 主调用结果，
             // 顺序颠倒会死锁。
             let joins_parallel = matches!(
                 &call.disposition,
                 PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel
-            ) && !input.batch.pre_executed.contains_key(&call.index);
+            );
             if !joins_parallel {
                 discovered_tools.extend(
                     self.flush_and_commit_parallel_batch(
@@ -100,40 +98,26 @@ impl ToolCalls {
                         .await_same_step_outcome(&call.call_id)
                         .await,
                 ),
-                PreparedToolDisposition::AwaitApproval {
-                    prompt,
-                    rule_key,
-                    source,
-                } => Some(
-                    self.request_approval_and_resolve(
+                PreparedToolDisposition::AwaitApprovals(approvals) => Some(
+                    self.request_approvals_and_resolve(
                         input,
                         position,
-                        prompt.clone(),
-                        rule_key.clone(),
-                        *source,
+                        approvals,
                         Arc::clone(&tools),
                     )
                     .await?,
                 ),
                 PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel => {
-                    if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
-                        Some(outcome)
-                    } else {
-                        if parallel_batch_start.is_none() {
-                            parallel_batch_start = Some(position);
-                        }
-                        parallel_batch.push(call.to_executable());
-                        None
+                    if parallel_batch_start.is_none() {
+                        parallel_batch_start = Some(position);
                     }
+                    parallel_batch.push(call.to_executable());
+                    None
                 },
                 PreparedToolDisposition::Execute => {
-                    let outcome =
-                        if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
-                            outcome
-                        } else {
-                            self.execute_single_tool(call.to_executable(), Arc::clone(&tools))
-                                .await
-                        };
+                    let outcome = self
+                        .execute_single_tool(call.to_executable(), Arc::clone(&tools))
+                        .await;
                     Some(outcome)
                 },
             };
@@ -202,80 +186,84 @@ impl ToolCalls {
                 continue;
             }
             uncommitted_calls.remove(&call.call_id);
-            input
-                .state
-                .record_tool_result(tool_result_for_output(&outcome));
         }
     }
 
-    async fn request_approval_and_resolve(
+    async fn request_approvals_and_resolve(
         &self,
         input: &ExecuteToolBatch<'_>,
         position: usize,
-        prompt: String,
-        rule_key: Option<String>,
-        source: ApprovalSource,
+        approvals: &[PreparedToolApproval],
         tools: Arc<[ToolDefinition]>,
     ) -> Result<ToolExecutionOutcome, TurnError> {
         let call = &input.batch.calls[position];
-        let (tx, rx) = oneshot::channel();
-        let runtime = self.session.runtime();
-        let _pending_approval =
-            runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx)?;
-        input
-            .publisher
-            .durable(DurableEventPayload::ToolApprovalRequested {
-                call_id: call.call_id.clone().into(),
-                tool_name: call.name.clone(),
-                prompt: prompt.clone(),
-                rule_key: rule_key.clone(),
-                source,
-                arguments: call.tool_input.clone(),
-            })
-            .await?;
+        for PreparedToolApproval {
+            prompt,
+            rule_key,
+            source,
+        } in approvals
+        {
+            let (tx, rx) = oneshot::channel();
+            let runtime = self.session.runtime();
+            let _pending_approval =
+                runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx)?;
+            input
+                .publisher
+                .durable(DurableEventPayload::ToolApprovalRequested {
+                    call_id: call.call_id.clone().into(),
+                    tool_name: call.name.clone(),
+                    prompt: prompt.clone(),
+                    rule_key: rule_key.clone(),
+                    source: *source,
+                    arguments: call.tool_input.clone(),
+                })
+                .await?;
 
-        let (decision, resolution_detail) = tokio::select! {
-            _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
-            result = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
-                match result {
-                    Ok(Ok(decision)) => (decision, None),
-                    Ok(Err(_)) => (
-                        ApprovalDecision::DenyOnce,
-                        Some("approval receiver dropped".into()),
-                    ),
-                    Err(_) => (
-                        ApprovalDecision::DenyOnce,
-                        Some(format!("approval timed out after {APPROVAL_TIMEOUT_SECS}s")),
-                    ),
+            let (decision, resolution_detail) = tokio::select! {
+                _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
+                result = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
+                    match result {
+                        Ok(Ok(decision)) => (decision, None),
+                        Ok(Err(_)) => (
+                            ApprovalDecision::DenyOnce,
+                            Some("approval receiver dropped".into()),
+                        ),
+                        Err(_) => (
+                            ApprovalDecision::DenyOnce,
+                            Some(format!("approval timed out after {APPROVAL_TIMEOUT_SECS}s")),
+                        ),
+                    }
                 }
-            }
-        };
-        input
-            .publisher
-            .durable(DurableEventPayload::ToolApprovalResolved {
-                call_id: call.call_id.clone().into(),
+            };
+            input
+                .publisher
+                .durable(DurableEventPayload::ToolApprovalResolved {
+                    call_id: call.call_id.clone().into(),
+                    decision,
+                    detail: resolution_detail.clone(),
+                })
+                .await?;
+            if matches!(
                 decision,
-                detail: resolution_detail.clone(),
-            })
-            .await?;
-        if matches!(
-            decision,
-            ApprovalDecision::AllowAlways | ApprovalDecision::DenyAlways
-        ) {
-            self.turn
-                .shared
-                .approval_history
-                .record_decision(rule_key.as_deref(), decision)
-                .await
-                .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
+                ApprovalDecision::AllowAlways | ApprovalDecision::DenyAlways
+            ) {
+                self.turn
+                    .shared
+                    .approval_history
+                    .record_decision(rule_key.as_deref(), decision)
+                    .await
+                    .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
+            }
+            if !decision.allows() {
+                let reason = resolution_detail
+                    .map(|detail| format!("Tool execution denied ({detail}, {source:?}): {prompt}"))
+                    .unwrap_or_else(|| {
+                        format!("Tool execution denied by user ({source:?}): {prompt}")
+                    });
+                return Ok(ToolExecutionOutcome::failed(reason));
+            }
         }
-        if decision.allows() {
-            return Ok(self.execute_single_tool(call.to_executable(), tools).await);
-        }
-        let reason = resolution_detail
-            .map(|detail| format!("Tool execution denied ({detail}, {source:?}): {prompt}"))
-            .unwrap_or_else(|| format!("Tool execution denied by user ({source:?}): {prompt}"));
-        Ok(ToolExecutionOutcome::failed(reason))
+        Ok(self.execute_single_tool(call.to_executable(), tools).await)
     }
 
     async fn flush_and_commit_parallel_batch(
@@ -318,7 +306,7 @@ impl ToolCalls {
         if batch.is_empty() {
             return Ok(());
         }
-        let max_parallel = self.session.runtime_services().max_parallel_tool_calls();
+        let max_parallel = self.max_parallel_tool_calls();
         let mut pending = std::mem::take(batch).into_iter();
         let mut join_set = JoinSet::new();
 

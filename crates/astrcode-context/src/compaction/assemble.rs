@@ -6,26 +6,26 @@
 use super::{COMPACT_SUMMARY_END, COMPACT_SUMMARY_MARKER, parse::extract_summary_for_context};
 use crate::CompactSummaryRenderOptions;
 
-pub const COMPACT_CONTINUATION_PREAMBLE: &str =
-    "This session is being continued from a previous conversation that ran out of context. The \
-     summary below covers the earlier portion of the conversation.";
-pub const COMPACT_CONTINUATION_INSTRUCTIONS: &str =
+const COMPACT_CONTINUATION_PREAMBLE: &str = "This session is being continued from a previous \
+                                             conversation that ran out of context. The summary \
+                                             below covers the earlier portion of the conversation.";
+const COMPACT_CONTINUATION_INSTRUCTIONS: &str =
     "Continue the conversation from where it left off without asking the user any further \
      questions. Resume directly: do not acknowledge this summary, do not recap it, and do not \
      preface your response with \"I'll continue\" or similar. Pick up the last task as if the \
      context break never happened.";
-pub const COMPACT_TRANSCRIPT_HINT_PREFIX: &str =
-    "If you need specific details from before compaction (like exact code snippets, error \
-     messages, or content you generated), read the full transcript at ";
+const COMPACT_TRANSCRIPT_HINT_PREFIX: &str = "If you need specific details from before compaction \
+                                              (like exact code snippets, error messages, or \
+                                              content you generated), read the full transcript at ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactSummaryEnvelope {
+pub(super) struct CompactSummaryEnvelope {
     /// 已去掉 `<compact_summary>` 包装和 `Summary:` 前缀的正文。
-    pub summary: String,
+    pub(super) summary: String,
 }
 
 /// 将任意摘要文本标准化为 `Summary:\n...` 形态。
-pub fn format_compact_summary(summary: &str) -> String {
+pub(super) fn format_compact_summary(summary: &str) -> String {
     let summary = extract_summary_for_context(summary);
     if summary
         .trim_start()
@@ -39,7 +39,7 @@ pub fn format_compact_summary(summary: &str) -> String {
 }
 
 /// 构造压缩后重新注入 provider history 的 synthetic user message 文本。
-pub(crate) fn compact_summary_message_text(
+pub(super) fn compact_summary_message_text(
     summary: &str,
     options: &CompactSummaryRenderOptions,
 ) -> String {
@@ -77,7 +77,7 @@ pub(crate) fn compact_summary_message_text(
 }
 
 /// 从 synthetic compact message 中取回摘要正文。
-pub(crate) fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
+pub(super) fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
     let trimmed = content.trim();
     let body = trimmed
         .strip_prefix(COMPACT_SUMMARY_MARKER)
@@ -124,13 +124,13 @@ fn strip_compact_transcript_hint(body: &str) -> &str {
 }
 
 /// 摘要进入长期上下文前的最后清理。
-pub(crate) fn sanitize_compact_summary(summary: &str) -> String {
+pub(super) fn sanitize_compact_summary(summary: &str) -> String {
     let collapsed = collapse_compaction_whitespace(summary);
     redact_route_sensitive_tokens(&collapsed)
 }
 
 /// 合并多余空行和行尾空白，避免 compact summary 自身继续膨胀。
-pub(crate) fn collapse_compaction_whitespace(content: &str) -> String {
+pub(super) fn collapse_compaction_whitespace(content: &str) -> String {
     let mut output = String::new();
     let mut blank_seen = false;
     for line in content.lines().map(str::trim_end) {

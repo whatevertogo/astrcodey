@@ -75,6 +75,8 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::AgentSessionFailed { .. } => "agent_session_failed",
         DurableEventPayload::AgentSessionRecycled { .. } => "agent_session_recycled",
         DurableEventPayload::TurnStarted => "turn_started",
+        DurableEventPayload::StepStarted { .. } => "step_started",
+        DurableEventPayload::StepCompleted { .. } => "step_completed",
         DurableEventPayload::TurnCompleted { .. } => "turn_completed",
         DurableEventPayload::TurnAbortedContext => "turn_aborted_context",
         DurableEventPayload::UserInputAccepted { .. } => "user_input_accepted",
@@ -91,7 +93,7 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::TranscriptRewritten { .. } => "transcript_rewritten",
         DurableEventPayload::SessionForked { .. } => "session_forked",
         DurableEventPayload::ErrorOccurred { .. } => "error_occurred",
-        DurableEventPayload::ExtensionEvent(_) => "extension_event",
+        DurableEventPayload::CustomEvent(_) => "custom_event",
     }
 }
 
@@ -114,7 +116,7 @@ fn live_payload_type(payload: &LiveEventPayload) -> &'static str {
         LiveEventPayload::CompactionSkipped { .. } => "compaction_skipped",
         LiveEventPayload::CompactionFailed { .. } => "compaction_failed",
         LiveEventPayload::ErrorOccurred { .. } => "error_occurred",
-        LiveEventPayload::ExtensionEvent(_) => "extension_event",
+        LiveEventPayload::CustomEvent(_) => "custom_event",
     }
 }
 
@@ -194,7 +196,7 @@ fn durable_payload_details(payload: &DurableEventPayload) -> String {
         DurableEventPayload::ErrorOccurred {
             code, recoverable, ..
         } => format!("code={code} recoverable={recoverable}"),
-        DurableEventPayload::ExtensionEvent(event) => {
+        DurableEventPayload::CustomEvent(event) => {
             format!(
                 "extension={} event={}",
                 event.extension_id, event.event_type
@@ -252,7 +254,7 @@ fn live_payload_details(payload: &LiveEventPayload) -> String {
         LiveEventPayload::CompactionCompleted { messages_removed } => {
             format!("messages_removed={messages_removed}")
         },
-        LiveEventPayload::ExtensionEvent(event) => {
+        LiveEventPayload::CustomEvent(event) => {
             format!(
                 "extension={} event={}",
                 event.extension_id, event.event_type

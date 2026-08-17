@@ -13,8 +13,9 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

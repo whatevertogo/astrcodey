@@ -42,7 +42,7 @@ impl InProcessTransport {
     pub fn start() -> Self {
         Self::start_with(astrcode_server::bootstrap::BootstrapOptions {
             default_approval_mode_if_unset: Some(astrcode_core::permission::ApprovalMode::Yolo),
-            disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
+            transport_profile: astrcode_extension_sdk::transport::TransportProfile::default(),
             ..Default::default()
         })
     }

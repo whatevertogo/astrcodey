@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, ErrorKind, Read, Seek, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -14,13 +14,12 @@ use std::{
 };
 
 use astrcode_core::event::{DurableEvent, DurableEventPayload, StoredEvent};
-use astrcode_session_projection::{SessionSummary, SessionSummaryProjection};
+use astrcode_session_projection::{
+    PreparedProjectionBatch, SessionSummary, SessionSummaryProjection,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
-
-/// `(first_event, last_event)` from a single log scan.
-type EventLogEnds = (Option<StoredEvent>, Option<StoredEvent>);
 
 async fn run_blocking_io<F, T>(f: F) -> Result<T, StorageError>
 where
@@ -148,8 +147,7 @@ fn parse_event_line(
     let trimmed = line.trim();
     let event = serde_json::from_str::<StoredEvent>(trimmed).map_err(|error| {
         let preview = if trimmed.len() > 100 {
-            let end = trimmed.floor_char_boundary(100);
-            format!("{}...", &trimmed[..end])
+            format!("{}...", crate::traits::truncate_utf8(trimmed, 100))
         } else {
             trimmed.to_string()
         };
@@ -167,16 +165,18 @@ fn parse_event_line(
 
 fn scan_events_at_path(
     path: &Path,
+    max_bytes: Option<u64>,
     mut visit: impl FnMut(StoredEvent) -> Result<bool, StorageError>,
 ) -> Result<(), StorageError> {
     let file = File::open(path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(max_bytes.unwrap_or(u64::MAX)));
     let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
+        line.clear();
         let bytes_read = reader.read_line(&mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
@@ -207,6 +207,7 @@ fn scan_events_at_path(
 
 fn replay_events_at_path(
     path: &Path,
+    max_bytes: Option<u64>,
     after_seq: Option<u64>,
     max_events: Option<usize>,
 ) -> Result<Vec<StoredEvent>, StorageError> {
@@ -214,7 +215,7 @@ fn replay_events_at_path(
         return Ok(Vec::new());
     }
     let mut events = Vec::new();
-    scan_events_at_path(path, |event| {
+    scan_events_at_path(path, max_bytes, |event| {
         if after_seq.is_none_or(|seq| event.seq > seq) {
             events.push(event);
         }
@@ -223,31 +224,129 @@ fn replay_events_at_path(
     Ok(events)
 }
 
-fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError> {
-    if !path.exists() {
-        return Ok((None, None));
+fn replay_events_before_at_path(
+    path: &Path,
+    before_seq: Option<u64>,
+    max_events: usize,
+) -> Result<Vec<StoredEvent>, StorageError> {
+    if max_events == 0 {
+        return Ok(Vec::new());
     }
-    let mut first: Option<StoredEvent> = None;
-    let mut last: Option<StoredEvent> = None;
-    scan_events_at_path(path, |event| {
-        if first.is_none() {
-            first = Some(event.clone());
-        }
-        last = Some(event);
-        Ok(true)
+    const REVERSE_SCAN_CHUNK_BYTES: u64 = 64 * 1024;
+
+    let mut file = File::open(path).map_err(|error| {
+        StorageError::Io(std::io::Error::new(
+            error.kind(),
+            enhance_open_error(path, error),
+        ))
     })?;
-    Ok((first, last))
+    let file_len = file.metadata().map_err(StorageError::Io)?.len();
+    let Some(mut position) = last_committed_offset(&mut file, file_len)? else {
+        return Ok(Vec::new());
+    };
+    let mut leading_fragment = Vec::new();
+    let mut events = Vec::with_capacity(max_events);
+    let mut newer_seq = None;
+    let mut session_id = None;
+
+    while position > 0 && events.len() < max_events {
+        let start = position.saturating_sub(REVERSE_SCAN_CHUNK_BYTES);
+        let mut chunk = vec![0; (position - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(StorageError::Io)?;
+        chunk.extend_from_slice(&leading_fragment);
+
+        let (complete, next_fragment) = if start == 0 {
+            (chunk.as_slice(), Vec::new())
+        } else if let Some(first_newline) = chunk.iter().position(|byte| *byte == b'\n') {
+            (&chunk[first_newline + 1..], chunk[..first_newline].to_vec())
+        } else {
+            (&[][..], chunk)
+        };
+
+        for line in complete.rsplit(|byte| *byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let line = std::str::from_utf8(line).map_err(|error| {
+                StorageError::CorruptLog(format!(
+                    "event at {} is not valid UTF-8: {error}",
+                    path.display()
+                ))
+            })?;
+            let event = parse_event_line(path, 0, line)?;
+            if let Some(expected_newer) = newer_seq
+                && event.seq.checked_add(1) != Some(expected_newer)
+            {
+                return Err(corrupt_log(
+                    path,
+                    0,
+                    format!(
+                        "expected reverse seq {}, got {}",
+                        expected_newer.saturating_sub(1),
+                        event.seq
+                    ),
+                ));
+            }
+            if let Some(expected_session) = &session_id {
+                if &event.session_id != expected_session {
+                    return Err(corrupt_log(
+                        path,
+                        0,
+                        format!(
+                            "event belongs to session {}, expected {}",
+                            event.session_id, expected_session
+                        ),
+                    ));
+                }
+            } else {
+                session_id = Some(event.session_id.clone());
+            }
+            newer_seq = Some(event.seq);
+
+            if before_seq.is_none_or(|before| event.seq < before) {
+                events.push(event);
+                if events.len() == max_events {
+                    break;
+                }
+            }
+        }
+        leading_fragment = next_fragment;
+        position = start;
+    }
+
+    events.reverse();
+    Ok(events)
+}
+
+fn last_committed_offset(file: &mut File, file_len: u64) -> Result<Option<u64>, StorageError> {
+    const TAIL_SCAN_BYTES: u64 = 8 * 1024;
+    let mut position = file_len;
+    while position > 0 {
+        let start = position.saturating_sub(TAIL_SCAN_BYTES);
+        let mut chunk = vec![0; (position - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(StorageError::Io)?;
+        if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            return Ok(Some(start + newline as u64 + 1));
+        }
+        position = start;
+    }
+    Ok(None)
 }
 
 fn read_summary_at_path(
     path: &Path,
     session_id: astrcode_core::types::SessionId,
+    max_bytes: Option<u64>,
 ) -> Result<Option<SessionSummary>, StorageError> {
     if !path.exists() {
         return Ok(None);
     }
     let mut projection = SessionSummaryProjection::new(session_id);
-    scan_events_at_path(path, |event| {
+    scan_events_at_path(path, max_bytes, |event| {
         projection
             .apply(&event)
             .map_err(|error| StorageError::CorruptLog(format!("{}: {error}", path.display())))?;
@@ -263,13 +362,27 @@ fn read_summary_at_path(
 
 const CHANNEL_CAPACITY: usize = 1024;
 
+#[cfg(test)]
+static FAIL_NEXT_OPEN_SYNC_PATHS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::OnceLock::new();
+
 enum WriteCommand {
-    Append {
-        event: Box<DurableEvent>,
-        done: oneshot::Sender<Result<StoredEvent, StorageError>>,
+    #[cfg(test)]
+    AppendBatch {
+        events: Vec<DurableEvent>,
+        done: oneshot::Sender<Result<Vec<StoredEvent>, StorageError>>,
+    },
+    AppendPreparedBatch {
+        batch: PreparedProjectionBatch,
+        done: oneshot::Sender<Result<PreparedProjectionBatch, StorageError>>,
     },
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
+    },
+    #[cfg(any(test, feature = "testing"))]
+    FailNextSync {
+        done: oneshot::Sender<()>,
     },
     Shutdown,
 }
@@ -282,6 +395,8 @@ struct WriterState {
     path: PathBuf,
     dirty: bool,
     poisoned: Option<String>,
+    #[cfg(any(test, feature = "testing"))]
+    fail_next_sync: bool,
 }
 
 impl WriterState {
@@ -306,28 +421,72 @@ impl WriterState {
             path,
             dirty: false,
             poisoned: None,
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_sync: false,
         })
     }
 
-    fn append_one(&mut self, event: Box<DurableEvent>) -> Result<StoredEvent, StorageError> {
-        if event.session_id != self.session_id {
-            return Err(StorageError::InvalidEvent(format!(
-                "cannot append event for session {} to log for {}",
-                event.session_id, self.session_id
-            )));
-        }
-        if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+    #[cfg(test)]
+    fn append_batch(
+        &mut self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        if events.is_empty() {
             return Err(StorageError::InvalidEvent(
-                "SessionStarted may only be written while creating a log".into(),
+                "event log batch cannot be empty".into(),
             ));
         }
-        let stored = StoredEvent::new(self.next_seq, *event);
-        let mut encoded = serde_json::to_vec(&stored)?;
-        encoded.push(b'\n');
+
+        let mut stored_events = Vec::with_capacity(events.len());
+        let mut next_seq = self.next_seq;
+        for event in events {
+            stored_events.push(StoredEvent::new(next_seq, event));
+            next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        }
+
+        self.append_stored_batch(&stored_events)?;
+        Ok(stored_events)
+    }
+
+    fn append_stored_batch(&mut self, events: &[StoredEvent]) -> Result<(), StorageError> {
+        if events.is_empty() {
+            return Err(StorageError::InvalidEvent(
+                "event log batch cannot be empty".into(),
+            ));
+        }
+
+        let mut encoded = Vec::new();
+        let mut next_seq = self.next_seq;
+        for event in events {
+            if event.seq != next_seq {
+                return Err(StorageError::InvalidEvent(format!(
+                    "event log expected seq {next_seq}, got {}",
+                    event.seq
+                )));
+            }
+            if event.session_id != self.session_id {
+                return Err(StorageError::InvalidEvent(format!(
+                    "cannot append event for session {} to log for {}",
+                    event.session_id, self.session_id
+                )));
+            }
+            if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+                return Err(StorageError::InvalidEvent(
+                    "SessionStarted may only be written while creating a log".into(),
+                ));
+            }
+            serde_json::to_writer(&mut encoded, event)?;
+            encoded.push(b'\n');
+            next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        }
         self.write_committed_record(&encoded)?;
-        self.next_seq += 1;
+        self.next_seq = next_seq;
         self.dirty = true;
-        Ok(stored)
+        Ok(())
     }
 
     fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
@@ -377,6 +536,12 @@ impl WriterState {
         if !self.dirty {
             return Ok(());
         }
+        #[cfg(any(test, feature = "testing"))]
+        if std::mem::take(&mut self.fail_next_sync) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected fsync failure",
+            )));
+        }
         self.writer.flush().map_err(|e| {
             StorageError::Io(std::io::Error::new(
                 e.kind(),
@@ -394,33 +559,83 @@ impl WriterState {
     }
 }
 
-fn write_loop(
+fn apply_write_command(cmd: WriteCommand, state: &mut WriterState, next_seq: &AtomicU64) -> bool {
+    match cmd {
+        #[cfg(test)]
+        WriteCommand::AppendBatch { events, done } => {
+            let result = state.append_batch(events);
+            if result.is_ok() {
+                next_seq.store(state.next_seq, Ordering::Release);
+            }
+            let _ = done.send(result);
+        },
+        WriteCommand::AppendPreparedBatch { batch, done } => {
+            let result = state.append_stored_batch(batch.events()).map(|()| batch);
+            if result.is_ok() {
+                next_seq.store(state.next_seq, Ordering::Release);
+            }
+            let _ = done.send(result);
+        },
+        WriteCommand::FlushSync { done } => {
+            let _ = done.send(state.flush_and_sync());
+        },
+        #[cfg(any(test, feature = "testing"))]
+        WriteCommand::FailNextSync { done } => {
+            state.fail_next_sync = true;
+            let _ = done.send(());
+        },
+        WriteCommand::Shutdown => return true,
+    }
+    false
+}
+
+async fn write_loop(
     mut rx: mpsc::Receiver<WriteCommand>,
     mut state: WriterState,
     next_seq: Arc<AtomicU64>,
 ) {
-    while let Some(cmd) = rx.blocking_recv() {
-        match cmd {
-            WriteCommand::Append { event, done } => {
-                let result = state.append_one(event);
-                if result.is_ok() {
-                    next_seq.store(state.next_seq, Ordering::Release);
+    while let Some(cmd) = rx.recv().await {
+        let path = state.path.clone();
+        let next_seq = Arc::clone(&next_seq);
+        let operation = tokio::task::spawn_blocking(move || {
+            let shutdown = apply_write_command(cmd, &mut state, &next_seq);
+            (state, shutdown)
+        });
+        match operation.await {
+            Ok((next_state, shutdown)) => {
+                state = next_state;
+                if shutdown {
+                    break;
                 }
-                let _ = done.send(result);
             },
-            WriteCommand::FlushSync { done } => {
-                let _ = done.send(state.flush_and_sync());
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "event log writer task failed; pending writes may be lost"
+                );
+                return;
             },
-            WriteCommand::Shutdown => break,
         }
     }
 
-    if let Err(e) = state.flush_and_sync() {
-        tracing::warn!(
-            path = %state.path.display(),
-            error = %e,
-            "failed to flush event log on writer thread shutdown"
-        );
+    let path = state.path.clone();
+    match tokio::task::spawn_blocking(move || state.flush_and_sync()).await {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to flush event log on writer task shutdown"
+            );
+        },
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "event log shutdown task failed"
+            );
+        },
     }
 }
 
@@ -468,12 +683,14 @@ fn create_at_path(
             path,
             dirty: false,
             poisoned: None,
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_sync: false,
         },
         stored_event,
     ))
 }
 
-fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
+fn open_at_path(path: PathBuf) -> Result<(WriterState, Vec<StoredEvent>), StorageError> {
     if !path.exists() {
         return Err(std::io::Error::new(
             ErrorKind::NotFound,
@@ -482,14 +699,66 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         .into());
     }
     recover_incomplete_tail(&path)?;
-    let (first, last) = read_first_and_last_at_path(&path)?;
-    let first = first
-        .as_ref()
+    let confirmed_len = sync_existing_log(&path)?;
+    // 冷打开只扫一遍文件:校验事件流的同时把事件交给调用方做 projection 恢复,
+    // 避免 open 与 replay 各自全量读一次。
+    let events = replay_events_at_path(&path, Some(confirmed_len), None, None)?;
+    let first = events
+        .first()
         .ok_or_else(|| StorageError::CorruptLog(format!("{} is empty", path.display())))?;
-    let next_seq = last
+    let next_seq = events
+        .last()
         .and_then(|event| event.seq.checked_add(1))
         .ok_or_else(|| StorageError::CorruptLog("session event sequence overflow".into()))?;
-    WriterState::open_append(path, first.session_id.clone(), next_seq)
+    let state = WriterState::open_append(path, first.session_id.clone(), next_seq)?;
+    Ok((state, events))
+}
+
+/// A previous process may have observed an ambiguous fsync result. Existing records are not
+/// eligible for replay until the file has been durably confirmed in this process.
+fn sync_existing_log(path: &Path) -> Result<u64, StorageError> {
+    #[cfg(test)]
+    if take_fail_next_open_sync(path) {
+        return Err(StorageError::Io(std::io::Error::other(
+            "injected fsync failure",
+        )));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            StorageError::Io(std::io::Error::new(
+                error.kind(),
+                enhance_open_error(path, error),
+            ))
+        })?;
+    let confirmed_len = file.metadata().map_err(StorageError::Io)?.len();
+    file.sync_all().map_err(|error| {
+        StorageError::Io(std::io::Error::new(
+            error.kind(),
+            enhance_sync_error(path, error),
+        ))
+    })?;
+    Ok(confirmed_len)
+}
+
+#[cfg(test)]
+fn take_fail_next_open_sync(path: &Path) -> bool {
+    FAIL_NEXT_OPEN_SYNC_PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(path)
+}
+
+#[cfg(test)]
+fn fail_next_open_sync(path: PathBuf) {
+    FAIL_NEXT_OPEN_SYNC_PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path);
 }
 
 /// Treat the terminating newline as the commit marker for a JSONL record.
@@ -547,7 +816,7 @@ fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
     )))
 }
 
-/// An append-only JSONL event log backed by a dedicated writer thread.
+/// An append-only JSONL event log backed by an asynchronous writer actor.
 ///
 /// Each session has one event log file. Events are written as newline-delimited
 /// JSON objects and never modified. Storage assigns `seq` at append time.
@@ -557,12 +826,13 @@ fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
 /// ```text
 /// EventLog
 ///   ├── tx (bounded channel, 1024 capacity)
-///   │     └── write_loop (spawn_blocking)
-///   │           ├── File (pre-encoded atomic batches)
-///   │           └── dirty tracking (deferred fsync)
+///   │     └── write_loop (idle without occupying a thread)
+///   │           └── shared blocking pool (one operation at a time)
+///   │                 ├── File (pre-encoded atomic batches)
+///   │                 └── dirty tracking (deferred fsync)
 ///   └── next_seq (AtomicU64, lock-free count)
 /// ```
-pub struct EventLog {
+pub(crate) struct EventLog {
     path: PathBuf,
     tx: mpsc::Sender<WriteCommand>,
     next_seq: Arc<AtomicU64>,
@@ -576,7 +846,7 @@ impl Drop for EventLog {
 
 impl EventLog {
     /// Create a new event log file with an initial event.
-    pub async fn create(
+    pub(crate) async fn create(
         path: PathBuf,
         initial_event: DurableEvent,
     ) -> Result<(Self, StoredEvent), StorageError> {
@@ -585,14 +855,20 @@ impl EventLog {
         Ok((Self::from_writer_state(state), stored_event))
     }
 
-    /// Open an existing event log.
-    pub async fn open(path: PathBuf) -> Result<Self, StorageError> {
-        let state = run_blocking_io(move || open_at_path(path)).await?;
-        Ok(Self::from_writer_state(state))
+    /// Open an existing event log, returning the events validated during the scan.
+    ///
+    /// 调用方(冷打开的 projection 恢复)直接使用这批事件,不再二次读盘。
+    pub(crate) async fn open(path: PathBuf) -> Result<(Self, Vec<StoredEvent>), StorageError> {
+        let (state, events) = run_blocking_io(move || open_at_path(path)).await?;
+        Ok((Self::from_writer_state(state), events))
     }
 
     pub(crate) async fn replay_read_only(path: PathBuf) -> Result<Vec<StoredEvent>, StorageError> {
-        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
+        run_blocking_io(move || {
+            let confirmed_len = sync_existing_log(&path)?;
+            replay_events_at_path(&path, Some(confirmed_len), None, None)
+        })
+        .await
     }
 
     fn from_writer_state(state: WriterState) -> Self {
@@ -600,40 +876,47 @@ impl EventLog {
         let next_seq = Arc::new(AtomicU64::new(state.next_seq));
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let next_seq_clone = Arc::clone(&next_seq);
-        let panic_path = state.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                write_loop(rx, state, next_seq_clone);
-            }));
-            if let Err(e) = result {
-                let msg: String = e
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| e.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic payload".to_string());
-                tracing::error!(
-                    path = %panic_path.display(),
-                    panic = %msg,
-                    "event log writer thread panicked; pending writes may be lost"
-                );
-            }
-        });
+        tokio::spawn(write_loop(rx, state, next_seq_clone));
         Self { path, tx, next_seq }
     }
 
     /// Append a durable event to the log and return it with its assigned seq.
     ///
-    /// Sends the event to a dedicated writer thread via a bounded channel.
-    /// The writer thread assigns `seq`, serializes, and writes the line —
+    /// Sends the event to the per-log writer actor via a bounded channel.
+    /// The actor assigns `seq`, serializes, and writes the line on the shared blocking pool —
     /// no mutex contention on the write path.
     /// Writes to the OS page cache immediately; call [`force_sync`] for fsync.
-    pub async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+    #[cfg(test)]
+    async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.append_batch(vec![event])
+            .await?
+            .pop()
+            .ok_or_else(crate::error::short_batch_result)
+    }
+
+    /// Append a prevalidated batch as one recoverable file write.
+    #[cfg(test)]
+    async fn append_batch(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let (done, rx) = oneshot::channel();
         self.tx
-            .send(WriteCommand::Append {
-                event: Box::new(event),
-                done,
-            })
+            .send(WriteCommand::AppendBatch { events, done })
+            .await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
+        rx.await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
+    }
+
+    /// Append a projection-validated batch without rebuilding or cloning its event payloads.
+    pub(crate) async fn append_prepared_batch(
+        &self,
+        batch: PreparedProjectionBatch,
+    ) -> Result<PreparedProjectionBatch, StorageError> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::AppendPreparedBatch { batch, done })
             .await
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
         rx.await
@@ -641,18 +924,37 @@ impl EventLog {
     }
 
     /// Replay all events from the beginning.
-    pub async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
+    pub(crate) async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
+        run_blocking_io(move || replay_events_at_path(&path, None, None, None)).await
+    }
+
+    /// Replay at most `max_events` events from the beginning of the log.
+    pub(crate) async fn replay_from_start_limited(
+        &self,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || replay_events_at_path(&path, None, None, Some(max_events))).await
+    }
+
+    /// Replay the newest events before an optional exclusive sequence cursor.
+    pub(crate) async fn replay_before_limited(
+        &self,
+        before_seq: Option<u64>,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || replay_events_before_at_path(&path, before_seq, max_events)).await
     }
 
     /// Replay events whose assigned seq is greater than `seq`.
     ///
     /// This is used when recovering from a snapshot: only the events that
     /// occurred after the snapshot point need to be replayed, not the whole log.
-    pub async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
+    pub(crate) async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, Some(seq), None)).await
+        run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), None)).await
     }
 
     /// Replay at most `max_events` events after `seq`, stopping the file scan
@@ -663,12 +965,13 @@ impl EventLog {
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, Some(seq), Some(max_events))).await
+        run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), Some(max_events)))
+            .await
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
-    pub(crate) async fn count(&self) -> Result<usize, StorageError> {
-        Ok(self.next_seq.load(Ordering::Acquire) as usize)
+    pub(crate) fn count(&self) -> u64 {
+        self.next_seq.load(Ordering::Acquire)
     }
 
     /// Force-fsync the event log if there are pending writes.
@@ -685,13 +988,33 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn fail_next_sync(&self) -> Result<(), StorageError> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::FailNextSync { done })
+            .await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
+        rx.await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_open_sync_for_testing(path: PathBuf) {
+        fail_next_open_sync(path);
+    }
+
     /// Project a session-list summary directly from an event log.
     pub(crate) async fn read_summary(
         path: &Path,
         session_id: astrcode_core::types::SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
         let path = path.to_path_buf();
-        run_blocking_io(move || read_summary_at_path(&path, session_id)).await
+        run_blocking_io(move || {
+            let confirmed_len = sync_existing_log(&path)?;
+            read_summary_at_path(&path, session_id, Some(confirmed_len))
+        })
+        .await
     }
 }
 

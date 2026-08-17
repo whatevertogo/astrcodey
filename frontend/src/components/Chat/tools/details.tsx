@@ -150,7 +150,8 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const cwd = stringValue(meta, 'cwd') || stringValue(args, 'cwd')
   const shell = stringValue(meta, 'shell')
   const exitCode = numberValue(meta, 'exitCode')
-  const timeout = numberValue(args, 'timeout')
+  const timeout =
+    numberValue(meta, 'timeoutSecs') ?? numberValue(args, 'timeout')
   const timedOut = boolValue(meta, 'timedOut')
   const stdoutBytes = numberValue(meta, 'stdoutBytes')
   const stderrBytes = numberValue(meta, 'stderrBytes')
@@ -242,6 +243,32 @@ export function ReadToolDetails({ block }: { block: ToolCall }) {
           <MetaRow label="offset" value={offset} />
           <MetaRow label="chars" value={returnedChars} />
           <MetaRow label="charOffset" value={charOffset} />
+          <MetaRow label="next" value={paginationLabel(meta)} />
+        </MetaGrid>
+      </div>
+      <ReadContentPreview text={block.text || '(no content)'} />
+    </div>
+  )
+}
+
+export function ToolResultDetails({ block }: { block: ToolCall }) {
+  const args = toolArgs(block)
+  const meta = toolMeta(block)
+  const artifactId =
+    stringValue(meta, 'artifactId') || stringValue(args, 'artifactId')
+  const totalBytes = numberValue(meta, 'bytes')
+  const returnedBytes = numberValue(meta, 'returnedBytes')
+  const byteOffset =
+    numberValue(meta, 'byteOffset') ?? numberValue(args, 'byteOffset')
+
+  return (
+    <div className="min-w-0 divide-y divide-border/70">
+      <div className="pb-3">
+        <MetaGrid>
+          <MetaRow label="artifact" value={artifactId} />
+          <MetaRow label="size" value={formatBytes(totalBytes)} />
+          <MetaRow label="returned" value={formatBytes(returnedBytes)} />
+          <MetaRow label="byteOffset" value={byteOffset} />
           <MetaRow label="next" value={paginationLabel(meta)} />
         </MetaGrid>
       </div>
@@ -347,65 +374,6 @@ export function PatchToolDetails({ block }: { block: ToolCall }) {
       ) : (
         <CodePreview text={block.text || '(no patch preview)'} />
       )}
-    </div>
-  )
-}
-
-export function TerminalToolDetails({ block }: { block: ToolCall }) {
-  const args = toolArgs(block)
-  const meta = toolMeta(block)
-  const action = stringValue(args, 'action')
-  const id = stringValue(meta, 'id') || stringValue(args, 'id')
-  const command = stringValue(meta, 'command') || stringValue(args, 'command')
-  const cwd = stringValue(args, 'cwd')
-  const input = stringValue(args, 'input')
-  const waitMs = numberValue(args, 'waitMs')
-  const bytesSent = numberValue(meta, 'bytesSent')
-  const droppedBytes = numberValue(meta, 'droppedBytes')
-  const exitCode = numberValue(meta, 'exitCode')
-  const alive = boolValue(meta, 'alive')
-  const count = numberValue(meta, 'count')
-  const terminals = arrayValue(meta, 'terminals')
-
-  return (
-    <div className="min-w-0 divide-y divide-border/70">
-      <div className="pb-3">
-        <MetaGrid>
-          <MetaRow label="action" value={action} />
-          <MetaRow label="id" value={id} />
-          <MetaRow label="command" value={command} />
-          <MetaRow label="cwd" value={cwd} />
-          <MetaRow
-            label="alive"
-            value={alive != null ? (alive ? 'yes' : 'no') : undefined}
-          />
-          <MetaRow label="exit" value={exitCode} />
-          <MetaRow label="sent" value={formatBytes(bytesSent)} />
-          <MetaRow label="dropped" value={formatBytes(droppedBytes)} />
-          <MetaRow
-            label="wait"
-            value={waitMs != null ? `${waitMs}ms` : undefined}
-          />
-          <MetaRow
-            label="input"
-            value={input ? `${formatBytes(input.length)} piped` : undefined}
-          />
-          <MetaRow label="count" value={count} />
-        </MetaGrid>
-      </div>
-      {terminals.length > 0 && (
-        <div className="space-y-1 py-3 font-mono text-[12px] text-code-text">
-          {terminals.slice(0, 10).map((terminal, index) => (
-            <div key={index}>{String(terminal)}</div>
-          ))}
-          {terminals.length > 10 && (
-            <div className="text-text-muted">
-              +{terminals.length - 10} more terminals
-            </div>
-          )}
-        </div>
-      )}
-      <CodePreview text={block.text || '(no output)'} />
     </div>
   )
 }

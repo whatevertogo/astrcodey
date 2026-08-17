@@ -3,9 +3,8 @@ import type { AgentSessionLinkDto } from "./AgentSessionLinkDto";
 import type { ConversationBlockDto } from "./ConversationBlockDto";
 import type { ConversationControlStateDto } from "./ConversationControlStateDto";
 import type { ConversationCursorDto } from "./ConversationCursorDto";
-import type { PhaseDto } from "./PhaseDto";
 
 /**
  * conversation 全量快照响应。
  */
-export type ConversationSnapshotResponseDto = { sessionId: string, sessionTitle: string, cursor: ConversationCursorDto, phase: PhaseDto, control: ConversationControlStateDto, blocks: Array<ConversationBlockDto>, agentSessions: Array<AgentSessionLinkDto>, };
+export type ConversationSnapshotResponseDto = { sessionId: string, sessionTitle: string, cursor: ConversationCursorDto, control: ConversationControlStateDto, blocks: Array<ConversationBlockDto>, agentSessions: Array<AgentSessionLinkDto>, };

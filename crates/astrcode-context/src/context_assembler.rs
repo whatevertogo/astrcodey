@@ -1,4 +1,6 @@
-use astrcode_core::llm::{LlmMessage, ModelLimits, provider_visible_messages};
+use std::sync::Arc;
+
+use astrcode_core::llm::{LlmMessage, ModelLimits, provider_visible_shared_messages};
 
 use crate::{
     ContextSettings,
@@ -14,7 +16,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ContextPrepareInput<'a> {
     /// 不包含 system prompt 的可见对话消息。
-    pub messages: Vec<LlmMessage>,
+    pub messages: &'a [Arc<LlmMessage>],
     /// 已组装好的 system prompt，仅参与 token 估算。
     pub system_prompt: Option<&'a str>,
     pub model_limits: ModelLimits,
@@ -25,7 +27,7 @@ pub struct ContextPrepareInput<'a> {
 /// 经过 provider 协议归一化的可见消息及其 token 快照。
 #[derive(Debug, Clone)]
 pub struct PreparedContext {
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
     pub token_snapshot: PromptTokenSnapshot,
 }
 
@@ -55,7 +57,7 @@ impl LlmContextAssembler {
 
     fn snapshot(
         &self,
-        messages: &[LlmMessage],
+        messages: &[Arc<LlmMessage>],
         system_prompt: Option<&str>,
         model_limits: ModelLimits,
         provider_input_tokens: Option<usize>,
@@ -79,7 +81,9 @@ impl ContextAssembler for LlmContextAssembler {
     }
 
     fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
-        let messages = provider_visible_messages(input.messages);
+        // 归一化在共享条目上原地筛选/截断,仅合并 assistant 时 copy-on-write;
+        // 稳态下不复制任何消息体。
+        let messages = provider_visible_shared_messages(input.messages.to_vec());
         let token_snapshot = self.snapshot(
             &messages,
             input.system_prompt,
@@ -94,7 +98,7 @@ impl ContextAssembler for LlmContextAssembler {
 
     fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
         let snapshot = self.snapshot(
-            &input.messages,
+            input.messages,
             input.system_prompt,
             input.model_limits.clone(),
             input.provider_input_tokens,
@@ -104,7 +108,7 @@ impl ContextAssembler for LlmContextAssembler {
                 && should_compact_predictive(
                     snapshot,
                     estimate_turn_growth(
-                        &input.messages,
+                        input.messages.iter().map(|message| message.as_ref()),
                         self.settings.predictive_compact_baseline_growth_tokens,
                     ),
                     input.model_limits.clone(),
@@ -121,12 +125,14 @@ mod tests {
     #[test]
     fn prepares_provider_messages_and_uses_current_token_source() {
         let assembler = LlmContextAssembler::new(ContextSettings::default());
+        let messages = [
+            LlmMessage::system("stale"),
+            LlmMessage::user("hello"),
+            LlmMessage::assistant("world"),
+        ]
+        .map(Arc::new);
         let input = ContextPrepareInput {
-            messages: vec![
-                LlmMessage::system("stale"),
-                LlmMessage::user("hello"),
-                LlmMessage::assistant("world"),
-            ],
+            messages: &messages,
             system_prompt: Some("current system"),
             model_limits: ModelLimits {
                 max_input_tokens: 10_000,
@@ -153,9 +159,12 @@ mod tests {
             LlmMessage::user("old user ".repeat(400)),
             LlmMessage::assistant("old answer ".repeat(400)),
             LlmMessage::user("current"),
-        ];
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
         let input = |max_input_tokens| ContextPrepareInput {
-            messages: messages.clone(),
+            messages: &messages,
             system_prompt: None,
             model_limits: ModelLimits {
                 max_input_tokens,

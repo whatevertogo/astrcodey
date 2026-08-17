@@ -33,16 +33,13 @@ impl std::fmt::Display for ModeId {
 }
 
 /// Tools blocked in plan mode.
-const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell", "terminal"];
+const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell"];
 
 /// Declarative definition of an agent running mode.
 #[derive(Debug, Clone)]
 pub(crate) struct ModeSpec {
     pub id: ModeId,
     pub name: String,
-    // 模式声明的一部分,当前仅在定义处写入、尚无读取方。
-    #[allow(dead_code)]
-    pub description: String,
     /// Tool names that are blocked in this mode.
     pub restricted_tools: HashSet<String>,
     /// Mode IDs this mode can transition to.
@@ -71,11 +68,6 @@ impl ModeCatalog {
     pub(crate) fn get(&self, id: &ModeId) -> Option<&ModeSpec> {
         self.index.get(id.as_str()).map(|&i| &self.modes[i])
     }
-
-    #[cfg(test)]
-    pub(crate) fn list(&self) -> &[ModeSpec] {
-        &self.modes
-    }
 }
 
 /// Validates whether transitioning from one mode to another is allowed.
@@ -99,13 +91,12 @@ pub(crate) fn validate_transition(
     Ok(())
 }
 
-pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
+fn builtin_mode_specs() -> Vec<ModeSpec> {
     let transitions = vec![ModeId::code(), ModeId::plan()];
     vec![
         ModeSpec {
             id: ModeId::code(),
             name: "Code".into(),
-            description: "Default execution mode with full capabilities.".into(),
             restricted_tools: HashSet::new(),
             allowed_transitions: transitions.clone(),
             requires_plan_artifact: false,
@@ -113,8 +104,6 @@ pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
         ModeSpec {
             id: ModeId::plan(),
             name: "Plan".into(),
-            description: "Planning mode with full tool access for producing a structured plan."
-                .into(),
             restricted_tools: PLAN_RESTRICTED_TOOLS
                 .iter()
                 .map(|s| (*s).to_string())
@@ -132,14 +121,6 @@ pub(crate) fn builtin_catalog() -> ModeCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builtin_catalog_contains_code_and_plan() {
-        let catalog = builtin_catalog();
-        assert!(catalog.get(&ModeId::code()).is_some());
-        assert!(catalog.get(&ModeId::plan()).is_some());
-        assert_eq!(catalog.list().len(), 2);
-    }
 
     #[test]
     fn plan_mode_restricts_write_tools() {

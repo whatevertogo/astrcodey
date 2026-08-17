@@ -146,9 +146,7 @@ fn is_agent_file(path: &std::path::Path) -> bool {
 ///
 /// Markdown 文件需要包含 YAML frontmatter；YAML 文件直接解析。
 fn parse(path: &str, content: &str) -> Result<AgentConfig, String> {
-    // 统一换行符并移除 BOM
-    let text = content.replace("\r\n", "\n").replace('\r', "\n");
-    let text = text.trim_start_matches('\u{feff}');
+    let text = &frontmatter::normalize_markdown(content);
 
     if path.ends_with(".md") || path.ends_with(".markdown") {
         let (fm, body) = frontmatter::split_frontmatter(text)

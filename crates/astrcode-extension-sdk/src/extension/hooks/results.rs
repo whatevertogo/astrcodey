@@ -1,6 +1,35 @@
 //! Result enums returned by extension hook handlers.
 
-use super::types::CompactContributions;
+use super::types::{CompactContributions, ProviderContributionId};
+
+/// Request-local message effect attached to a contribution that needs durable-success
+/// acknowledgement.
+#[derive(Debug, Clone)]
+pub enum PreparedProviderEffect {
+    Unchanged,
+    ReplaceMessages(Vec<crate::llm::LlmMessage>),
+    AppendMessages(Vec<crate::llm::LlmMessage>),
+}
+
+/// Exact pending extension state and its request-local message effect.
+#[derive(Debug, Clone)]
+pub struct PreparedProviderContribution {
+    contribution_id: ProviderContributionId,
+    effect: PreparedProviderEffect,
+}
+
+impl PreparedProviderContribution {
+    pub fn new(contribution_id: ProviderContributionId, effect: PreparedProviderEffect) -> Self {
+        Self {
+            contribution_id,
+            effect,
+        }
+    }
+
+    pub fn into_parts(self) -> (ProviderContributionId, PreparedProviderEffect) {
+        (self.contribution_id, self.effect)
+    }
+}
 
 /// 通用钩子结果。
 #[derive(Debug, Clone)]
@@ -9,20 +38,43 @@ pub enum HookResult {
     Block { reason: String },
 }
 
-/// PreToolUse 钩子结果。
+/// 工具参数变换结果。
+#[derive(Debug, Clone)]
+pub enum ToolInputTransformResult {
+    Unchanged,
+    Replace { tool_input: serde_json::Value },
+}
+
+/// 单个 PreToolUse 准入处理器的决策。
 #[derive(Debug, Clone)]
 pub enum PreToolUseResult {
     Allow,
     Block {
         reason: String,
     },
-    ModifyInput {
-        tool_input: serde_json::Value,
-    },
     /// 请求用户审批后再执行（扩展 Gate Ask）。
     Ask {
         prompt: String,
         rule_key: Option<String>,
+    },
+}
+
+/// 一个 Extension 准入条件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreToolUseRequirement {
+    pub prompt: String,
+    pub rule_key: Option<String>,
+}
+
+/// 所有匹配 PreToolUse 处理器的组合决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreToolUseAdmission {
+    Allow,
+    Ask {
+        requirements: Vec<PreToolUseRequirement>,
+    },
+    Block {
+        reason: String,
     },
 }
 
@@ -59,9 +111,9 @@ pub enum ProviderResult {
     },
 }
 
-/// Compact 钩子结果。
+/// PreCompact hook result.
 #[derive(Debug, Clone)]
-pub enum CompactResult {
+pub enum PreCompactResult {
     Allow,
     Block { reason: String },
     Contributions(CompactContributions),

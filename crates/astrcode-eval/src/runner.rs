@@ -27,13 +27,8 @@ const MAX_RETAINED_PATCH_BYTES: usize = 256 * 1024 * 1024;
 /// 评测编排器。
 pub struct EvalRunner {
     config: EvalConfig,
-    server: Option<ServerConnection>,
+    server_addr: Option<String>,
     resumed_results: Vec<EvalResult>,
-}
-
-struct ServerConnection {
-    addr: String,
-    auth_token: String,
 }
 
 impl EvalRunner {
@@ -51,44 +46,29 @@ impl EvalRunner {
             None => Vec::new(),
         };
         if let Some(instance_config) = config.swe_bench_instance.as_ref() {
-            if config.server_addr.is_some() || config.auth_token.is_some() {
+            if config.server_addr.is_some() {
                 return Err(EvalError::Setup(
-                    "official instance images cannot be combined with --server-addr or \
-                     --auth-token"
-                        .into(),
+                    "official instance images cannot be combined with --server-addr".into(),
                 ));
             }
             swebench_instance::validate(instance_config).await?;
             return Ok(Self {
                 config: config.clone(),
-                server: None,
+                server_addr: None,
                 resumed_results,
             });
         }
 
-        let (server_addr, auth_token) = match (&config.server_addr, &config.auth_token) {
-            (Some(addr), Some(token)) => (addr.clone(), token.clone()),
-            (Some(_), None) => {
-                return Err(EvalError::Setup(
-                    "--server-addr requires --auth-token".into(),
-                ));
-            },
-            (None, Some(_)) => {
-                return Err(EvalError::Setup(
-                    "--auth-token requires --server-addr".into(),
-                ));
-            },
-            (None, None) => {
+        let server_addr = match &config.server_addr {
+            Some(addr) => addr.clone(),
+            None => {
                 let run_info = read_run_info(config.storage_root.as_deref())?;
-                (
-                    format!("http://127.0.0.1:{}", run_info.port),
-                    run_info.auth_token,
-                )
+                format!("http://127.0.0.1:{}", run_info.port)
             },
         };
 
         // 健康检查
-        EvalClient::new(&server_addr, &auth_token)?
+        EvalClient::new(&server_addr)?
             .health_check()
             .await
             .map_err(|error| {
@@ -97,10 +77,7 @@ impl EvalRunner {
 
         Ok(Self {
             config: config.clone(),
-            server: Some(ServerConnection {
-                addr: server_addr,
-                auth_token,
-            }),
+            server_addr: Some(server_addr),
             resumed_results,
         })
     }
@@ -151,10 +128,7 @@ impl EvalRunner {
                 continue;
             }
             let permit = Arc::clone(&semaphore);
-            let server = self
-                .server
-                .as_ref()
-                .map(|server| (server.addr.clone(), server.auth_token.clone()));
+            let server_addr = self.server_addr.clone();
             let instance_config = self.config.swe_bench_instance.clone();
             let cases_dir = self.config.cases_dir.clone();
             let keep_workdir = self.config.keep_workdir;
@@ -176,8 +150,8 @@ impl EvalRunner {
                 };
                 if let Some(instance_config) = instance_config.as_ref() {
                     run_instance_case(&case, instance_config).await
-                } else if let Some((server_addr, auth_token)) = server.as_ref() {
-                    run_single_case(&case, server_addr, auth_token, &cases_dir, keep_workdir).await
+                } else if let Some(server_addr) = server_addr.as_deref() {
+                    run_single_case(&case, server_addr, &cases_dir, keep_workdir).await
                 } else {
                     failed_eval_result(
                         case.id.clone(),
@@ -204,10 +178,10 @@ impl EvalRunner {
 
         while let Some((case_index, mut result)) = tasks.next().await {
             enforce_patch_budget(&mut result, &mut retained_patch_bytes);
-            if let Some(path) = self.config.checkpoint_path.as_deref() {
-                if let Err(error) = append_checkpoint(path.to_path_buf(), result.clone()).await {
-                    tracing::error!(path = %path.display(), %error, "failed to update eval checkpoint");
-                }
+            if let Some(path) = self.config.checkpoint_path.as_deref()
+                && let Err(error) = append_checkpoint(path.to_path_buf(), result.clone()).await
+            {
+                tracing::error!(path = %path.display(), %error, "failed to update eval checkpoint");
             }
             indexed_results.push((case_index, result));
         }
@@ -352,7 +326,6 @@ async fn append_checkpoint(
 async fn run_single_case(
     case: &EvalCase,
     server_addr: &str,
-    auth_token: &str,
     cases_dir: &std::path::Path,
     keep_workdir: bool,
 ) -> EvalResult {
@@ -373,7 +346,7 @@ async fn run_single_case(
         },
     };
 
-    let client = match EvalClient::new(server_addr, auth_token) {
+    let client = match EvalClient::new(server_addr) {
         Ok(client) => client,
         Err(error) => {
             return failed_eval_result(
@@ -504,13 +477,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("run.json"),
-            r#"{"port":4312,"authToken":"test-token","schemaVersion":2}"#,
+            r#"{"port":4312,"schemaVersion":2}"#,
         )
         .unwrap();
 
         let run_info = read_run_info(Some(directory.path())).unwrap();
         assert_eq!(run_info.port, 4312);
-        assert_eq!(run_info.auth_token, "test-token");
 
         let mut config = EvalConfig {
             storage_root: Some(directory.path().to_path_buf()),
@@ -599,7 +571,7 @@ mod tests {
         );
         let runner = EvalRunner {
             config: EvalConfig::default(),
-            server: None,
+            server_addr: None,
             resumed_results: vec![result.clone()],
         };
 
@@ -609,7 +581,7 @@ mod tests {
 
         let duplicate_runner = EvalRunner {
             config: EvalConfig::default(),
-            server: None,
+            server_addr: None,
             resumed_results: vec![result.clone(), result],
         };
         let duplicate_error = duplicate_runner
@@ -620,7 +592,7 @@ mod tests {
 
         let unknown_runner = EvalRunner {
             config: EvalConfig::default(),
-            server: None,
+            server_addr: None,
             resumed_results: vec![failed_eval_result(
                 "case-2".to_string(),
                 String::new(),

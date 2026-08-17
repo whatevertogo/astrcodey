@@ -9,15 +9,13 @@ use std::{collections::HashMap, sync::OnceLock};
 use astrcode_context::prompt_engine::{
     ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
 };
-use astrcode_core::{
-    config::ModelSelection,
-    tool::{ToolDefinition, ToolPromptMetadata},
-};
+use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata};
 use astrcode_extension_sdk::{
-    extension::{ExtensionError, PromptBuildContext},
-    runtime_ports::{
-        PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
+    extension::{
+        ExtensionError,
+        internal::{RuntimeHookCallContext, runtime_prompt_build_context},
     },
+    runtime_ports::{PromptContributor, ToolCatalogProvider, ToolCatalogScope},
     shell::resolve_shell,
 };
 
@@ -25,16 +23,13 @@ use crate::ToolRegistry;
 
 pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
-    pub completeness: ToolCatalogCompleteness,
     pub revision: u64,
 }
 
 /// 构建一个工作目录绑定的工具表快照。
 ///
-/// Session 快照缓存未命中时调用；工具执行期间只读取构建出的快照。
-///
 /// 返回未应用 session 工具边界的完整工具表。Session 在此快照之上派生筛选后的
-/// 不可变 registry，使工具边界变化不必重新执行动态工具发现。
+/// 不可变 registry；动态发现和 catalog 缓存由 Extension Runtime 负责。
 pub(crate) async fn build_base_tool_registry(
     tool_catalog: &dyn ToolCatalogProvider,
     scope: &ToolCatalogScope,
@@ -60,16 +55,13 @@ pub(crate) async fn build_base_tool_registry(
 
     Ok(BuiltBaseToolRegistry {
         registry: tool_registry,
-        completeness: catalog.completeness,
         revision: catalog.revision,
     })
 }
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub prompt_contributor: &'a dyn PromptContributor,
-    pub session_id: &'a str,
-    pub working_dir: &'a str,
-    pub model_id: &'a str,
+    pub call: RuntimeHookCallContext,
     pub tools: &'a [ToolDefinition],
     pub extra_system_prompt: Option<&'a str>,
     pub tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
@@ -79,17 +71,11 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 /// 收集扩展的 prompt 贡献。
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
-/// 参数与 [`SystemPromptSnapshotInput`] 的前 5 个字段完全重叠，直接收整个
-/// 输入结构体，避免两处字段列表各自演变导致不一致。
+/// 直接使用调用方提供的 hook call，避免在 prompt 层重新构造并丢失 turn 归属或取消信号。
 async fn collect_extension_prompt_blocks(
     input: &SystemPromptSnapshotInput<'_>,
 ) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
-    let prompt_ctx = PromptBuildContext {
-        session_id: input.session_id.to_string(),
-        working_dir: input.working_dir.to_string(),
-        model: ModelSelection::simple(input.model_id),
-        tools: input.tools.to_vec(),
-    };
+    let prompt_ctx = runtime_prompt_build_context(input.call.clone(), input.tools.to_vec());
     let contributions = input
         .prompt_contributor
         .collect_prompt_contributions(prompt_ctx)
@@ -128,7 +114,7 @@ pub(crate) async fn build_system_prompt_snapshot(
     let extension_blocks = collect_extension_prompt_blocks(&input).await?;
 
     let SystemPromptSnapshotInput {
-        working_dir,
+        call,
         tools,
         extra_system_prompt,
         tool_prompt_metadata,
@@ -136,11 +122,12 @@ pub(crate) async fn build_system_prompt_snapshot(
         ..
     } = input;
 
+    let working_dir = call.working_dir().to_string_lossy().into_owned();
     let extra_instructions = extra_system_prompt.map(str::to_owned);
-    let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
+    let prompt_files = load_prompt_files(&working_dir, include_agents_rules).await;
 
     let prompt_input = SystemPromptInput {
-        working_dir: working_dir.to_string(),
+        working_dir,
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
         gh_cli_available: is_gh_cli_available(),

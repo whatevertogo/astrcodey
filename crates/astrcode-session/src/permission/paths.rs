@@ -42,10 +42,10 @@ fn collect_paths(value: &serde_json::Value, out: &mut Vec<PathBuf>) {
 }
 
 fn push_path_value(value: &serde_json::Value, out: &mut Vec<PathBuf>) {
-    if let Some(text) = value.as_str() {
-        if !text.is_empty() {
-            out.push(PathBuf::from(text));
-        }
+    if let Some(text) = value.as_str()
+        && !text.is_empty()
+    {
+        out.push(PathBuf::from(text));
     }
 }
 
@@ -68,12 +68,15 @@ pub(super) fn path_matches_glob(path: &Path, working_dir: &Path, globset: &GlobS
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
+
+    use super::extract_tool_paths;
 
     #[test]
-    fn extracts_path_field() {
-        let input = serde_json::json!({"path": "src/main.rs"});
-        let paths = extract_tool_paths(&input);
-        assert_eq!(paths, vec![PathBuf::from("src/main.rs")]);
+    fn extracts_nonempty_path_fields() {
+        assert_eq!(
+            extract_tool_paths(&serde_json::json!({"path": "src/main.rs"})),
+            vec![PathBuf::from("src/main.rs")]
+        );
     }
 }

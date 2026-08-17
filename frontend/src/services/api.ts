@@ -1,7 +1,9 @@
 import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
 import {
+  decodeConversationItemsPage,
   decodeConversationSnapshot,
+  decodeConversationState,
   decodePendingAskUserQuestionsResponse,
 } from './protocol'
 import type {
@@ -26,6 +28,8 @@ import type {
   PromptSubmitResponse,
   SessionListResponse,
   ConversationSnapshot,
+  ConversationItemsPage,
+  ConversationState,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponse,
   ApprovalMode,
@@ -38,7 +42,6 @@ import type {
 } from './types'
 
 let baseUrl = ''
-let authToken = ''
 
 let _tauriFetch: typeof window.fetch | null = null
 
@@ -50,22 +53,12 @@ async function resolveFetch(): Promise<typeof window.fetch> {
   return _tauriFetch ?? window.fetch
 }
 
-export function setServerPort(port: number, token?: string): void {
+export function setServerPort(port: number): void {
   baseUrl = `http://127.0.0.1:${port}`
-  if (token) authToken = token
-}
-
-export function setAuthToken(token: string): void {
-  authToken = token
 }
 
 export function getBaseUrl(): string {
   return baseUrl
-}
-
-export function authHeaders(): Record<string, string> {
-  if (!authToken) return {}
-  return { Authorization: `Bearer ${authToken}` }
 }
 
 export function initBaseUrl(): void {
@@ -100,9 +93,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const fetchFn = await resolveFetch()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-  }
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`
   }
   const response = await fetchFn(`${baseUrl}${path}`, {
     ...init,
@@ -140,6 +130,32 @@ export async function getConversation(
   return decodeConversationSnapshot(
     await request<unknown>(
       `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
+    )
+  )
+}
+
+export async function getConversationState(
+  sessionId: string
+): Promise<ConversationState> {
+  return decodeConversationState(
+    await request<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/conversation/state`
+    )
+  )
+}
+
+export async function getConversationItems(
+  sessionId: string,
+  before?: string,
+  limit?: number
+): Promise<ConversationItemsPage> {
+  const params = new URLSearchParams()
+  if (before) params.set('before', before)
+  if (limit != null) params.set('limit', String(limit))
+  const query = params.size > 0 ? `?${params.toString()}` : ''
+  return decodeConversationItemsPage(
+    await request<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/conversation/items${query}`
     )
   )
 }
@@ -196,7 +212,6 @@ export function openConversationStream(
     headers: {
       Accept: 'text/event-stream',
       'Cache-Control': 'no-cache',
-      ...authHeaders(),
     },
     signal,
   })
@@ -308,7 +323,7 @@ export async function healthCheck(): Promise<boolean> {
   try {
     const fetchFn = await resolveFetch()
     const response = await fetchFn(`${baseUrl}/api/sessions`, {
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
     })
     return response.ok
   } catch {
@@ -431,7 +446,6 @@ export async function submitToolGateApproval(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(),
     },
     body: JSON.stringify(body),
   })

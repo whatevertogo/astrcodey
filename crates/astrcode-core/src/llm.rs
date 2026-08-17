@@ -10,6 +10,8 @@
 //! 本模块不含具体 provider 实现与 HTTP/重试逻辑（位于 `astrcode-ai`），也不含
 //! 具体工具的展示特判（属于 server 投影层）。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
@@ -135,6 +137,44 @@ pub struct LlmMessage {
     /// 推理内容（仅 assistant 消息）。部分 provider（如 DeepSeek）要求将此字段回传。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+}
+
+/// Provider 不可见、但会随 transcript rewrite 与 fork 持久化的消息来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptMessageOrigin {
+    TurnAborted,
+    ToolCallFailed,
+    ToolCallCancelled,
+}
+
+/// 一条 durable provider transcript 消息及其非 provider 元数据。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptMessage {
+    pub message: LlmMessage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TranscriptMessageOrigin>,
+}
+
+impl TranscriptMessage {
+    pub fn plain(message: LlmMessage) -> Self {
+        Self {
+            message,
+            origin: None,
+        }
+    }
+}
+
+/// 运行时共享的 transcript 消息：与 [`TranscriptMessage`] 同构，但消息体经 `Arc`
+/// 跨读模型与请求组装共享。
+///
+/// 共享消息构造后即不可变；任何改写必须先 `Arc::make_mut` copy-on-write，
+/// 否则改动会跨快照泄漏。持久化/wire 格式不使用本类型。
+#[derive(Debug, Clone)]
+pub struct SharedTranscriptMessage {
+    pub message: Arc<LlmMessage>,
+    pub origin: Option<TranscriptMessageOrigin>,
 }
 
 impl LlmMessage {
@@ -289,7 +329,6 @@ pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachm
         .collect()
 }
 
-pub const TURN_ABORTED_SOURCE: &str = "turn_aborted";
 const TURN_ABORTED_GUIDANCE: &str = concat!(
     "The user interrupted the previous turn on purpose. ",
     "Any running tools/commands may still be running in the background. ",
@@ -309,48 +348,156 @@ pub fn turn_aborted_context_message() -> LlmMessage {
 /// tool result。这里是所有 provider request 的最后一道边界，负责过滤空消息、
 /// 合并旧日志中的拆分 assistant/tool-call 消息，并裁掉尚未结算的半轮工具调用。
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
-    let mut messages = messages
+    provider_visible_entries(messages)
+}
+
+/// [`provider_visible_messages`] 的共享版本：未受归一化影响的消息零拷贝复用，
+/// 仅被合并的 assistant 消息经 `Arc::make_mut` copy-on-write，不写穿共享快照。
+pub fn provider_visible_shared_messages(messages: Vec<Arc<LlmMessage>>) -> Vec<Arc<LlmMessage>> {
+    provider_visible_entries(messages)
+}
+
+/// 返回指纹与 compact 共用的 provider transcript：provider 可见消息中剔除 System 角色。
+///
+/// system prompt 单独参与指纹与请求组装（见
+/// `crate::event::transcript_prefix_fingerprint`），因此 transcript 只保留对话消息。
+pub fn provider_transcript(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    provider_transcript_messages(messages.into_iter().map(TranscriptMessage::plain).collect())
         .into_iter()
-        .filter(LlmMessage::has_provider_visible_content)
-        .collect::<Vec<_>>();
-    normalize_tool_call_messages(&mut messages);
-    truncate_incomplete_tool_protocol(&mut messages);
+        .map(|entry| entry.message)
+        .collect()
+}
+
+/// 归一化 durable transcript，同时保持每条保留消息的来源元数据。
+pub fn provider_transcript_messages(messages: Vec<TranscriptMessage>) -> Vec<TranscriptMessage> {
+    let mut messages = provider_visible_entries(messages);
+    messages.retain(|entry| entry.message.role != LlmRole::System);
     messages
 }
 
-fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
-    let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        let has_tool_calls = message.role == LlmRole::Assistant
-            && message
+/// [`provider_transcript_messages`] 的共享版本，语义与 owned 路径一致。
+pub fn provider_transcript_shared_messages(
+    messages: Vec<SharedTranscriptMessage>,
+) -> Vec<SharedTranscriptMessage> {
+    let mut messages = provider_visible_entries(messages);
+    messages.retain(|entry| entry.message.role != LlmRole::System);
+    messages
+}
+
+/// `provider_visible_*` 归一化的条目抽象，让 owned 与 `Arc` 共享条目共用同一套
+/// 过滤/合并/截断逻辑，保证两条路径输出一致。
+trait ProviderVisibleEntry {
+    fn message(&self) -> &LlmMessage;
+    /// 将 `other`(assistant + tool calls)并入 self;`other` 随即被丢弃。
+    fn absorb_assistant(&mut self, other: Self);
+}
+
+impl ProviderVisibleEntry for LlmMessage {
+    fn message(&self) -> &LlmMessage {
+        self
+    }
+
+    fn absorb_assistant(&mut self, mut other: Self) {
+        self.content.append(&mut other.content);
+        if self.reasoning_content.is_none() {
+            self.reasoning_content = other.reasoning_content;
+        }
+    }
+}
+
+impl ProviderVisibleEntry for TranscriptMessage {
+    fn message(&self) -> &LlmMessage {
+        &self.message
+    }
+
+    fn absorb_assistant(&mut self, mut other: Self) {
+        self.message.content.append(&mut other.message.content);
+        if self.message.reasoning_content.is_none() {
+            self.message.reasoning_content = other.message.reasoning_content;
+        }
+        self.origin = self.origin.or(other.origin);
+    }
+}
+
+impl ProviderVisibleEntry for Arc<LlmMessage> {
+    fn message(&self) -> &LlmMessage {
+        self
+    }
+
+    fn absorb_assistant(&mut self, other: Self) {
+        Arc::make_mut(self).append(other.message());
+    }
+}
+
+impl ProviderVisibleEntry for SharedTranscriptMessage {
+    fn message(&self) -> &LlmMessage {
+        &self.message
+    }
+
+    fn absorb_assistant(&mut self, other: Self) {
+        Arc::make_mut(&mut self.message).append(&other.message);
+        self.origin = self.origin.or(other.origin);
+    }
+}
+
+impl LlmMessage {
+    /// 并入一条 assistant + tool calls 消息（`provider_visible_*` 的合并分支）。
+    fn append(&mut self, other: &Self) {
+        self.content.extend(other.content.iter().cloned());
+        if self.reasoning_content.is_none() {
+            self.reasoning_content = other.reasoning_content.clone();
+        }
+    }
+}
+
+fn provider_visible_entries<E: ProviderVisibleEntry>(messages: Vec<E>) -> Vec<E> {
+    let mut messages: Vec<E> = messages
+        .into_iter()
+        .filter(|entry| entry.message().has_provider_visible_content())
+        .collect();
+    normalize_tool_call_entries(&mut messages);
+    // 工具执行期间与崩溃修复前,assistant tool call 可以是合法的未结算尾部。
+    // Provider 请求不应暴露该尾部,但它本身不代表持久化或写入侧损坏。
+    truncate_incomplete_tool_entries(&mut messages);
+    messages
+}
+
+fn normalize_tool_call_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
+    let mut merged: Vec<E> = Vec::with_capacity(messages.len());
+    for entry in messages.drain(..) {
+        let has_tool_calls = entry.message().role == LlmRole::Assistant
+            && entry
+                .message()
                 .content
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. }));
-        if has_tool_calls {
-            if let Some(last) = merged.last_mut() {
-                if last.role == LlmRole::Assistant {
-                    last.content.extend(message.content);
-                    if last.reasoning_content.is_none() {
-                        last.reasoning_content = message.reasoning_content;
-                    }
-                    continue;
-                }
-            }
+        if has_tool_calls
+            && let Some(last) = merged.last_mut()
+            && last.message().role == LlmRole::Assistant
+        {
+            last.absorb_assistant(entry);
+            continue;
         }
-        merged.push(message);
+        merged.push(entry);
     }
     *messages = merged;
 }
 
-fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
+fn truncate_incomplete_tool_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
     use std::collections::HashSet;
 
+    let mut out: Vec<E> = Vec::with_capacity(messages.len());
+    // 未结算工具轮次:assistant 消息在 out 中的位置、全部 call_id、已收结果 id。
     let mut pending: Option<(usize, HashSet<String>, HashSet<String>)> = None;
+    // 轮次未结算时到达的非 Tool 消息(典型:用户在工具执行中插话)。缓冲到该轮
+    // 结算后移动到结果之后,保持「assistant tool_calls 后紧跟 tool results」的
+    // 协议顺序;若该轮到结尾都未结算,则随截断一起丢弃(沿用旧语义)。
+    let mut buffered: Vec<E> = Vec::new();
 
-    for index in 0..messages.len() {
-        let message = &messages[index];
-        if message.role == LlmRole::Tool {
-            let tool_result_ids: Vec<String> = message
+    for entry in std::mem::take(messages) {
+        if entry.message().role == LlmRole::Tool {
+            let tool_result_ids: Vec<String> = entry
+                .message()
                 .content
                 .iter()
                 .filter_map(|content| match content {
@@ -358,34 +505,39 @@ fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
                     _ => None,
                 })
                 .collect();
-            if tool_result_ids.is_empty() {
-                messages.truncate(index);
-                return;
-            }
-            let Some((_, call_ids, answered)) = pending.as_mut() else {
-                messages.truncate(index);
+            let matches_pending = !tool_result_ids.is_empty()
+                && pending.as_mut().is_some_and(|(_, call_ids, answered)| {
+                    tool_result_ids
+                        .iter()
+                        .all(|id| call_ids.contains(id) && !answered.contains(id))
+                });
+            let Some((_, call_ids, answered)) = pending.as_mut().filter(|_| matches_pending) else {
+                // 协议异常(空结果、孤儿结果、重复结果)或新一轮 assistant 插断:
+                // 裁掉未结算的那一轮,保持 provider 请求合法。
+                let cut = pending.map(|(start, ..)| start).unwrap_or(out.len());
+                out.truncate(cut);
+                *messages = out;
                 return;
             };
             for tool_call_id in tool_result_ids {
-                if !call_ids.contains(&tool_call_id) || answered.contains(&tool_call_id) {
-                    messages.truncate(index);
-                    return;
-                }
                 answered.insert(tool_call_id);
             }
+            out.push(entry);
             if call_ids.iter().all(|id| answered.contains(id)) {
                 pending = None;
+                out.append(&mut buffered);
             }
             continue;
         }
 
-        if let Some((start, _, _)) = pending {
-            messages.truncate(start);
-            return;
+        if pending.is_some() {
+            buffered.push(entry);
+            continue;
         }
 
-        if message.role == LlmRole::Assistant {
-            let call_ids: HashSet<String> = message
+        if entry.message().role == LlmRole::Assistant {
+            let call_ids: HashSet<String> = entry
+                .message()
                 .content
                 .iter()
                 .filter_map(|content| match content {
@@ -394,14 +546,16 @@ fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
                 })
                 .collect();
             if !call_ids.is_empty() {
-                pending = Some((index, call_ids, HashSet::new()));
+                pending = Some((out.len(), call_ids, HashSet::new()));
             }
         }
+        out.push(entry);
     }
 
-    if let Some((start, _, _)) = pending {
-        messages.truncate(start);
+    if let Some((start, ..)) = pending {
+        out.truncate(start);
     }
+    *messages = out;
 }
 
 /// 单次 LLM 调用的 token 使用统计。
@@ -413,6 +567,9 @@ pub struct LlmTokenUsage {
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
+    /// How provider input and cache counters relate to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_accounting: Option<LlmInputTokenAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,6 +578,16 @@ pub struct LlmTokenUsage {
     pub total_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<LlmTokenUsageSource>,
+}
+
+/// Provider usage counter semantics, normalized at the provider wire boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmInputTokenAccounting {
+    /// `input_tokens` contains cached input; cache counters are descriptive subsets.
+    Inclusive,
+    /// Regular, cache-read, and cache-creation inputs are independent components.
+    Components,
 }
 
 /// token usage 的来源，用于区分 provider 原生统计与 fallback 估算。
@@ -450,6 +617,39 @@ impl ProviderInputTokenCount {
 }
 
 impl LlmTokenUsage {
+    /// Returns billable non-cache-read input plus generated output.
+    pub fn non_cached_tokens(&self) -> Option<u64> {
+        let cached = self.cached_input_tokens.unwrap_or_default();
+        let component_accounting = matches!(
+            self.input_accounting,
+            Some(LlmInputTokenAccounting::Components)
+        ) || (self.input_accounting.is_none()
+            && self.cache_creation_input_tokens.is_some());
+        // Persisted usage predating `input_accounting` only populated cache-creation tokens for
+        // component-style providers.
+        if component_accounting {
+            let input = self
+                .input_tokens
+                .unwrap_or_default()
+                .saturating_add(self.cache_creation_input_tokens.unwrap_or_default());
+            return (self.input_tokens.is_some()
+                || self.cache_creation_input_tokens.is_some()
+                || self.output_tokens.is_some())
+            .then(|| input.saturating_add(self.output_tokens.unwrap_or_default()));
+        }
+
+        self.total_tokens
+            .map(|total| total.saturating_sub(cached))
+            .or_else(|| {
+                let input = self.input_tokens.map(|input| input.saturating_sub(cached));
+                (input.is_some() || self.output_tokens.is_some()).then(|| {
+                    input
+                        .unwrap_or_default()
+                        .saturating_add(self.output_tokens.unwrap_or_default())
+                })
+            })
+    }
+
     /// 返回本次响应结束后占用的完整上下文 token。
     ///
     /// Provider 原生 `total_tokens` 优先；Anthropic 等未提供 total 的协议只有在
@@ -460,12 +660,15 @@ impl LlmTokenUsage {
             return Some(total_tokens);
         }
 
-        Some(
-            self.input_tokens?
+        let input = self.input_tokens?;
+        let output = self.output_tokens?;
+        Some(match self.input_accounting {
+            Some(LlmInputTokenAccounting::Inclusive) => input.saturating_add(output),
+            Some(LlmInputTokenAccounting::Components) | None => input
                 .saturating_add(self.cached_input_tokens.unwrap_or(0))
                 .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
-                .saturating_add(self.output_tokens?),
-        )
+                .saturating_add(output),
+        })
     }
 }
 
@@ -473,15 +676,18 @@ impl LlmTokenUsage {
 ///
 /// `max_output_tokens` 是请求级上限；缺失时 provider 使用模型配置上限。该字段必须
 /// 在最终消息和工具确定后计算，避免 input 与固定 output 上限共同挤爆上下文窗口。
+///
+/// `messages` 经 `Arc` 与读模型/context snapshot 共享;provider 侧只读并序列化,
+/// 不得原地修改共享消息(需改写时 `Arc::make_mut` copy-on-write)。
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<usize>,
 }
 
 impl LlmRequest {
-    pub fn new(messages: Vec<LlmMessage>, tools: Vec<ToolDefinition>) -> Self {
+    pub fn new(messages: Vec<Arc<LlmMessage>>, tools: Vec<ToolDefinition>) -> Self {
         Self {
             messages,
             tools,
@@ -792,26 +998,15 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// 返回一个通道接收端，按到达顺序产生 [`LlmEvent`] 值。
     /// 当流式输出完成或出错时通道关闭。
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
-
-    /// 使用请求级参数生成流式响应。
-    ///
-    /// 旧 provider 默认忽略请求级输出上限；需要支持动态预算的 provider 覆盖此方法。
     async fn generate_request(
         &self,
         request: LlmRequest,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        self.generate(request.messages, request.tools).await
-    }
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
 
     /// 统计一次 provider request 的 input token。
     async fn count_input_tokens(
         &self,
-        _messages: Vec<LlmMessage>,
+        _messages: Vec<Arc<LlmMessage>>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         Err(LlmError::Unsupported {
@@ -826,6 +1021,40 @@ pub trait LlmProvider: Send + Sync {
 
     /// 返回模型的上下文窗口限制。
     fn model_limits(&self) -> ModelLimits;
+}
+
+/// 一次运行时操作固定的主/小模型 provider 组合。
+///
+/// 这是进程内能力，不是 wire 或持久化契约。运行时边界显式传递该组合，避免配置发布前
+/// 已开始的操作在执行中途静默切换 provider。
+#[derive(Clone)]
+pub struct LlmProviderBindings {
+    main: Arc<dyn LlmProvider>,
+    small: Arc<dyn LlmProvider>,
+}
+
+impl LlmProviderBindings {
+    pub fn new(main: Arc<dyn LlmProvider>, small: Arc<dyn LlmProvider>) -> Self {
+        Self { main, small }
+    }
+
+    pub fn main(&self) -> &Arc<dyn LlmProvider> {
+        &self.main
+    }
+
+    pub fn small(&self) -> &Arc<dyn LlmProvider> {
+        &self.small
+    }
+}
+
+impl std::fmt::Debug for LlmProviderBindings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LlmProviderBindings")
+            .field("main", &"<provider>")
+            .field("small", &"<provider>")
+            .finish()
+    }
 }
 
 /// 模型的上下文窗口限制。
@@ -868,6 +1097,66 @@ pub async fn collect_stream_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_usage_respects_inclusive_and_component_accounting() {
+        let cases = [
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    output_tokens: Some(20),
+                    total_tokens: Some(120),
+                    input_accounting: Some(LlmInputTokenAccounting::Inclusive),
+                    ..Default::default()
+                },
+                Some(100),
+                Some(120),
+            ),
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    cache_creation_input_tokens: Some(7),
+                    output_tokens: Some(20),
+                    input_accounting: Some(LlmInputTokenAccounting::Components),
+                    ..Default::default()
+                },
+                Some(127),
+                Some(147),
+            ),
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    cache_creation_input_tokens: Some(7),
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                Some(127),
+                Some(147),
+            ),
+            (
+                LlmTokenUsage {
+                    cached_input_tokens: Some(20),
+                    total_tokens: Some(120),
+                    ..Default::default()
+                },
+                Some(100),
+                Some(120),
+            ),
+            (LlmTokenUsage::default(), None, None),
+        ];
+
+        for (usage, non_cached, context) in cases {
+            assert_eq!(usage.non_cached_tokens(), non_cached, "usage: {usage:?}");
+            assert_eq!(
+                usage.context_tokens_after_response(),
+                context,
+                "usage: {usage:?}"
+            );
+        }
+    }
 
     #[test]
     fn joined_text_preserves_text_blocks_and_ignores_other_content() {
@@ -914,6 +1203,89 @@ mod tests {
     }
 
     #[test]
+    fn provider_visible_messages_moves_mid_tool_round_user_message_after_the_results() {
+        let assistant_call = LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call-1".into(),
+                name: "askUser".into(),
+                arguments: serde_json::json!({"question": "which one?"}),
+                raw_arguments: None,
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+        let interleaved_user = LlmMessage::user("typed while the tool was pending");
+        let result = LlmMessage::tool("askUser", "call-1", "answer", false);
+        let followup = LlmMessage::assistant("continued");
+        let messages = vec![
+            LlmMessage::user("start"),
+            assistant_call.clone(),
+            interleaved_user.clone(),
+            result.clone(),
+            followup.clone(),
+        ];
+
+        // 用户插话落在未结算的工具轮次里:截断会让之后的一切从 provider 上下文
+        // 永久消失(模型因上下文冻结而原地复读)。正确做法是保持协议顺序,把插话
+        // 移到结果之后,内容全部保留。
+        let visible = provider_visible_messages(messages);
+        assert_eq!(
+            visible,
+            vec![
+                LlmMessage::user("start"),
+                assistant_call.clone(),
+                result.clone(),
+                interleaved_user.clone(),
+                followup.clone(),
+            ]
+        );
+
+        let shared: Vec<Arc<LlmMessage>> = vec![
+            LlmMessage::user("start"),
+            assistant_call,
+            interleaved_user,
+            result,
+            followup,
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let shared_visible = provider_visible_shared_messages(shared);
+        assert_eq!(
+            shared_visible
+                .iter()
+                .map(|message| (**message).clone())
+                .collect::<Vec<_>>(),
+            visible
+        );
+    }
+
+    #[test]
+    fn provider_visible_messages_drops_unsettled_round_before_orphan_result() {
+        let messages = vec![
+            LlmMessage::user("start"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "sleep"}),
+                    raw_arguments: None,
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::tool("shell", "call-other", "orphan", false),
+            LlmMessage::user("after corruption"),
+        ];
+
+        // 孤儿结果属日志损坏:未结算的轮次本身不合法,一并裁掉。
+        let visible = provider_visible_messages(messages);
+        assert_eq!(visible, vec![LlmMessage::user("start")]);
+    }
+
+    #[test]
     fn provider_visible_filters_empty_system_messages() {
         let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
         let visible = provider_visible_messages(messages);
@@ -922,10 +1294,39 @@ mod tests {
     }
 
     #[test]
-    fn provider_visible_keeps_non_empty() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 2);
+    fn provider_visible_shared_matches_owned_and_never_writes_through() {
+        let assistant_text = LlmMessage::assistant("text");
+        let assistant_tool_call = LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "sleep"}),
+                raw_arguments: None,
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+        let tool_result = LlmMessage::tool("shell", "call-1", "ok", false);
+        let messages = vec![
+            LlmMessage::user("start"),
+            assistant_text.clone(),
+            assistant_tool_call.clone(),
+            tool_result.clone(),
+        ];
+        let shared: Vec<Arc<LlmMessage>> = messages.iter().cloned().map(Arc::new).collect();
+
+        let visible = provider_visible_shared_messages(shared.clone());
+
+        // 与 owned 路径输出一致(assistant 文本并入带 tool call 的前一条)。
+        assert_eq!(
+            visible.iter().map(|m| (**m).clone()).collect::<Vec<_>>(),
+            provider_visible_messages(messages)
+        );
+        // 合并走 copy-on-write:共享输入的消息体不被写穿。
+        assert_eq!(*shared[1], assistant_text);
+        assert_eq!(*shared[2], assistant_tool_call);
+        assert!(Arc::ptr_eq(&shared[3], &visible[2]));
     }
 
     #[test]
@@ -937,13 +1338,21 @@ mod tests {
     }
 
     #[test]
-    fn non_image_attachment_uses_xml_delimiters() {
-        let attachments = vec![MessageAttachment {
-            filename: "note.txt".into(),
-            content: "body".into(),
-            media_type: "text/plain".into(),
-        }];
-        let message = LlmMessage::user_with_attachments("", &attachments);
+    fn provider_visibility_attachment_framing_and_error_helpers_preserve_semantics() {
+        let visible = provider_visible_messages(vec![
+            LlmMessage::user("hello"),
+            LlmMessage::assistant("world"),
+        ]);
+        assert_eq!(visible.len(), 2);
+
+        let message = LlmMessage::user_with_attachments(
+            "",
+            &[MessageAttachment {
+                filename: "note.txt".into(),
+                content: "body".into(),
+                media_type: "text/plain".into(),
+            }],
+        );
         let text = message
             .content
             .iter()
@@ -951,10 +1360,7 @@ mod tests {
             .expect("text attachment");
         assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
         assert!(text.ends_with("</attachment>"));
-    }
 
-    #[test]
-    fn transport_and_stream_parse_helpers_build_matching_variants() {
         assert!(matches!(
             LlmError::transport("boom"),
             LlmError::Transport { message } if message == "boom"

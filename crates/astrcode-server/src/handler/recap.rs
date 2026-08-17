@@ -2,7 +2,7 @@
 
 use astrcode_context::ContextSnapshot;
 use astrcode_core::{event::DurableEventPayload, llm};
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
 
 use super::{CommandHandler, HandlerError};
 
@@ -34,7 +34,7 @@ impl CommandHandler {
 
         let state = session.read_model().await.map_err(HandlerError::Session)?;
 
-        if state.transcript.messages.is_empty() {
+        if state.model_context.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");
             return Ok(());
         }
@@ -43,20 +43,22 @@ impl CommandHandler {
             state.stats.last_seq,
             state.system_prompt.text.clone(),
             state
-                .transcript
+                .model_context
                 .messages
                 .iter()
-                .map(|message| message.message.clone())
+                .map(|message| (*message.message).clone())
                 .collect(),
         );
         let mut transcript = snapshot.messages.clone();
-        transcript.push(astrcode_core::llm::LlmMessage::user(RECAP_PROMPT));
+        transcript.push(std::sync::Arc::new(astrcode_core::llm::LlmMessage::user(
+            RECAP_PROMPT,
+        )));
         let messages = snapshot.request_messages(transcript);
 
         // 单次调用，无 tools
         let llm = self.runtime.runtime_services().llm();
         let rx = llm
-            .generate(messages, vec![])
+            .generate_request(astrcode_core::llm::LlmRequest::new(messages, vec![]))
             .await
             .map_err(HandlerError::Llm)?;
 
@@ -78,20 +80,14 @@ impl CommandHandler {
             .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
-        let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: state.identity.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
-            event_tx: None,
-            extension_event_sink: None,
-            last_exchange: None,
-            mid_turn_user_messages_synced: 0,
-        };
-        if let Err(e) = self
-            .runtime
-            .extension_runner
-            .emit_lifecycle(ExtensionEvent::PostRecap, lifecycle_ctx)
-            .await
+        if let Err(e) = astrcode_session::emit_lifecycle_for_read_model(
+            self.runtime.runtime_services(),
+            &sid,
+            &state,
+            session.session_store_dir().await,
+            LifecycleEvent::PostRecap,
+        )
+        .await
         {
             tracing::warn!(error = %e, "PostRecap hook failed");
         }

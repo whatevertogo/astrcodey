@@ -2,6 +2,8 @@
 //! cache breakpoints, and count-token body shape. SSE event handling lives in [`super::parser`]
 //! and byte-stream transport in [`super::transport`].
 
+use std::sync::Arc;
+
 use astrcode_core::{
     llm::{
         LlmContent, LlmMessage, LlmRole,
@@ -46,7 +48,7 @@ pub(crate) fn count_tokens_endpoint(base_url: &str) -> String {
 
 pub(crate) fn build_request_body(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
     stream: bool,
 ) -> Result<serde_json::Value, astrcode_core::llm::LlmError> {
@@ -79,13 +81,13 @@ fn apply_anthropic_thinking(
     };
     match cap.wire_mapping {
         ThinkingWireMapping::AnthropicAdaptive => {
-            if config.thinking.enabled {
-                if let Some(ref effort) = config.thinking.effort {
-                    body["thinking"] = serde_json::json!({"type": "adaptive"});
-                    body["output_config"] = serde_json::json!({
-                        "effort": effort
-                    });
-                }
+            if config.thinking.enabled
+                && let Some(ref effort) = config.thinking.effort
+            {
+                body["thinking"] = serde_json::json!({"type": "adaptive"});
+                body["output_config"] = serde_json::json!({
+                    "effort": effort
+                });
             }
             // Disabled → omit thinking field entirely
         },
@@ -118,7 +120,7 @@ fn apply_anthropic_thinking(
 
 pub(crate) fn build_count_tokens_body(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     build_request_without_thinking(config, messages, tools)
@@ -127,7 +129,7 @@ pub(crate) fn build_count_tokens_body(
 /// Build request body without any thinking fields (used for count-tokens).
 fn build_request_without_thinking(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     let (system, api_messages) = convert_messages(messages);
@@ -145,7 +147,7 @@ fn build_request_without_thinking(
 }
 
 fn convert_messages(
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
 ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
     let mut system_blocks: Vec<serde_json::Value> = Vec::new();
     let mut api_messages: Vec<serde_json::Value> = Vec::new();
@@ -170,19 +172,18 @@ fn convert_messages(
             },
             LlmRole::Tool => {
                 let block = convert_tool_result_block(msg);
-                if let Some(last) = api_messages.last_mut() {
-                    if last["role"] == "user" && has_only_tool_results(last) {
-                        if let Some(content) =
-                            last.get_mut("content").and_then(|c| c.as_array_mut())
-                        {
-                            content.push(block);
-                            continue;
-                        }
-                        tracing::warn!(
-                            "tool result merge: last user message content is not an array, \
-                             creating new block"
-                        );
+                if let Some(last) = api_messages.last_mut()
+                    && last["role"] == "user"
+                    && has_only_tool_results(last)
+                {
+                    if let Some(content) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        content.push(block);
+                        continue;
                     }
+                    tracing::warn!(
+                        "tool result merge: last user message content is not an array, creating \
+                         new block"
+                    );
                 }
                 api_messages.push(serde_json::json!({
                     "role": "user",
@@ -373,14 +374,14 @@ fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole, thinking::ThinkingConfig},
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin},
     };
 
     use super::*;
 
     #[test]
     fn user_message_converts_text() {
-        let msg = LlmMessage::user("hello");
+        let msg = Arc::new(LlmMessage::user("hello"));
         let json = AnthropicMapper::map_user(&msg);
         assert_eq!(json["role"], "user");
         assert_eq!(json["content"][0]["type"], "text");
@@ -420,9 +421,9 @@ mod tests {
     #[test]
     fn tool_results_merge_into_same_user_message() {
         let messages = vec![
-            LlmMessage::assistant("I'll check"),
-            LlmMessage::tool("read", "call_1", "file content", false),
-            LlmMessage::tool("grep", "call_2", "match found", false),
+            Arc::new(LlmMessage::assistant("I'll check")),
+            Arc::new(LlmMessage::tool("read", "call_1", "file content", false)),
+            Arc::new(LlmMessage::tool("grep", "call_2", "match found", false)),
         ];
         let (_system, api_messages) = convert_messages(&messages);
 
@@ -464,8 +465,7 @@ mod tests {
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Parallel,
+            origin: ToolOrigin::Bundled,
         }];
         let config = AnthropicRequestConfig {
             model_id: "claude-test",
@@ -476,7 +476,10 @@ mod tests {
         };
         let body = build_count_tokens_body(
             config,
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &tools,
         );
 
@@ -505,8 +508,7 @@ mod tests {
                     description: String::new(),
                     parameters: serde_json::json!({"type": "object"}),
                     strict,
-                    origin: ToolOrigin::Builtin,
-                    execution_mode: ExecutionMode::Parallel,
+                    origin: ToolOrigin::Bundled,
                 }],
                 supported,
             );
@@ -531,8 +533,8 @@ mod tests {
     #[test]
     fn convert_messages_extracts_system() {
         let messages = vec![
-            LlmMessage::system("You are helpful"),
-            LlmMessage::user("hello"),
+            Arc::new(LlmMessage::system("You are helpful")),
+            Arc::new(LlmMessage::user("hello")),
         ];
         let (system, api_messages) = convert_messages(&messages);
         let sys = system.expect("system should be present");
@@ -546,6 +548,13 @@ mod tests {
     #[test]
     fn anthropic_adaptive_thinking_emits_type_adaptive_and_effort() {
         use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,
@@ -555,13 +564,7 @@ mod tests {
                 effort: Some("high".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_request_body(config, &[], &[], false).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
@@ -571,6 +574,13 @@ mod tests {
     #[test]
     fn anthropic_budget_thinking_emits_type_enabled_and_budget_tokens() {
         use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::AnthropicBudget,
+            allowed_effort: Some(vec![]),
+            budget_min: Some(1024),
+            budget_max: Some(64000),
+            can_disable: true,
+        };
         let config = AnthropicRequestConfig {
             model_id: "claude-sonnet-4-6",
             max_output_tokens: 8192,
@@ -580,13 +590,7 @@ mod tests {
                 effort: None,
                 budget_tokens: Some(4096),
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicBudget,
-                allowed_effort: Some(vec![]),
-                budget_min: Some(1024),
-                budget_max: Some(64000),
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_request_body(config, &[], &[], false).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -596,6 +600,13 @@ mod tests {
     #[test]
     fn anthropic_budget_rejects_when_budget_equals_or_exceeds_max_output_tokens() {
         use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::AnthropicBudget,
+            allowed_effort: Some(vec![]),
+            budget_min: Some(1024),
+            budget_max: Some(64000),
+            can_disable: true,
+        };
         let config = AnthropicRequestConfig {
             model_id: "claude-sonnet-4-6",
             max_output_tokens: 4096,
@@ -605,13 +616,7 @@ mod tests {
                 effort: None,
                 budget_tokens: Some(4096),
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicBudget,
-                allowed_effort: Some(vec![]),
-                budget_min: Some(1024),
-                budget_max: Some(64000),
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let result = build_request_body(config, &[], &[], false);
         assert!(
@@ -623,6 +628,13 @@ mod tests {
     #[test]
     fn anthropic_thinking_omitted_when_disabled() {
         use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,
@@ -632,13 +644,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_request_body(config, &[], &[], false).unwrap();
         assert!(
@@ -650,6 +656,13 @@ mod tests {
     #[test]
     fn anthropic_count_tokens_omits_thinking() {
         use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,
@@ -659,13 +672,7 @@ mod tests {
                 effort: Some("high".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_count_tokens_body(config, &[], &[]);
         assert!(

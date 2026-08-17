@@ -12,7 +12,7 @@ use astrcode_core::{
     },
     types::*,
 };
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::{LifecycleEvent, internal::runtime_lifecycle_context};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
     CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
@@ -21,7 +21,7 @@ use astrcode_storage::{
 use crate::{
     SessionEventPublishError, session_error::SessionError, session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices, session_state::SessionStateSource,
-    turn_context::SharedTurnContext,
+    turn_context::hook_call_context_for_read_model,
 };
 
 /// 创建 session 所需的参数集合。
@@ -68,7 +68,7 @@ impl Session {
 
     pub async fn ensure_lifecycle_initialized(
         &self,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
     ) -> Result<(), SessionError> {
         self.runtime
             .ensure_lifecycle_initialized(|| self.emit_lifecycle(event))
@@ -87,20 +87,25 @@ impl Session {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactReader for Session {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         _session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError> {
         self.runtime
             .store()
-            .read_tool_result_artifact_by_path(self.id(), path, char_offset, max_chars)
+            .read_tool_result_artifact(self.id(), artifact_id, byte_offset, max_bytes)
             .await
             .map_err(|error| match error {
-                StorageError::InvalidId(message) => ToolResultArtifactError::InvalidPath(message),
-                StorageError::NotFound(_) => ToolResultArtifactError::NotFound(path.to_owned()),
+                StorageError::InvalidId(message) => ToolResultArtifactError::InvalidId(message),
+                StorageError::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    ToolResultArtifactError::InvalidRequest(error.to_string())
+                },
+                StorageError::NotFound(_) => {
+                    ToolResultArtifactError::NotFound(artifact_id.to_owned())
+                },
                 StorageError::Unsupported(message) => ToolResultArtifactError::Unsupported(message),
                 error => ToolResultArtifactError::Read(error.to_string()),
             })
@@ -116,10 +121,6 @@ impl Session {
 
     pub async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
         Ok(self.state_source.latest_cursor(self.id()).await?)
-    }
-
-    pub async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
-        Ok(self.runtime.store().checkpoint(self.id(), cursor).await?)
     }
 
     pub async fn write_compact_snapshot(
@@ -150,16 +151,13 @@ impl Session {
 impl Session {
     pub fn emit_live(&self, turn_id: Option<&TurnId>, payload: LiveEventPayload) {
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
-        if let Err(error) = self
-            .runtime
-            .event_sink()
-            .publish_live(self.runtime.store().clone(), event)
-        {
-            // best-effort 事件丢弃是常态；仅按 2 的幂次（1、2、4…）记录，避免刷屏。
-            if matches!(
-                &error,
-                SessionEventPublishError::Full { dropped } if !dropped.is_power_of_two()
-            ) {
+        if let Err(error) = self.runtime.event_sink().publish_live(event) {
+            // best-effort 事件在 session 释放/关闭后到达属常态,不值得告警。
+            if matches!(error, SessionEventPublishError::Closed) {
+                tracing::debug!(
+                    session_id = %self.id(),
+                    "live event dropped after session event sink closed"
+                );
                 return;
             }
             tracing::warn!(
@@ -174,13 +172,16 @@ impl Session {
         &self,
         turn_id: Option<&TurnId>,
         payload: LiveEventPayload,
-    ) -> Result<(), SessionError> {
+    ) -> Result<astrcode_core::types::EventId, SessionError> {
+        // 与 `session_runtime.rs` 的 `SessionScopedEventPublisher::send_confirmed`
+        // Live 分支平行：成功只表示事件已进入有序 lane，observer 派发是异步的。
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
+        let event_id = event.id.clone();
         self.runtime
             .event_sink()
             .publish_live_required(self.runtime.store().clone(), event)
             .await?;
-        Ok(())
+        Ok(event_id)
     }
 
     pub async fn emit_durable(
@@ -196,6 +197,19 @@ impl Session {
             .await?)
     }
 
+    pub(crate) async fn emit_durable_and_sync(
+        &self,
+        turn_id: Option<&TurnId>,
+        payload: DurableEventPayload,
+    ) -> Result<astrcode_core::event::StoredEvent, SessionError> {
+        let event = DurableEvent::new(self.id().clone(), turn_id.cloned(), payload);
+        Ok(self
+            .runtime
+            .event_sink()
+            .append_and_sync(self.runtime.store().clone(), event)
+            .await?)
+    }
+
     pub(crate) async fn sync_durable_events(&self) -> Result<(), SessionError> {
         self.runtime
             .event_sink()
@@ -204,9 +218,16 @@ impl Session {
         Ok(())
     }
 
-    pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
+    pub async fn emit_lifecycle(&self, event: LifecycleEvent) -> Result<(), SessionError> {
         let model = self.read_model().await?;
-        emit_lifecycle_for_read_model(&self.runtime_services, self.id(), &model, event).await
+        emit_lifecycle_for_read_model(
+            &self.runtime_services,
+            self.id(),
+            &model,
+            self.session_store_dir().await,
+            event,
+        )
+        .await
     }
 
     /// 配置后续 turn 使用的模型。活跃 turn 保留已固定的不可变快照。
@@ -254,10 +275,17 @@ pub async fn emit_lifecycle_for_read_model(
     runtime_services: &SessionRuntimeServices,
     session_id: &SessionId,
     model: &SessionReadModel,
-    event: ExtensionEvent,
+    session_store_dir: Option<std::path::PathBuf>,
+    event: LifecycleEvent,
 ) -> Result<(), SessionError> {
-    let ctx = SharedTurnContext::from_read_model(session_id, model).lifecycle_ctx();
+    let ctx = runtime_lifecycle_context(
+        hook_call_context_for_read_model(session_id, model, session_store_dir),
+        None,
+        0,
+    );
     runtime_services
+        .pin_extension_view()
+        .await?
         .turn_hooks()
         .emit_lifecycle(event, ctx)
         .await?;

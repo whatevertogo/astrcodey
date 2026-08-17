@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_extension_sdk::extension::{ExtensionError, ExtensionEventSink};
+use astrcode_extension_sdk::{
+    builder::custom_event,
+    extension::{CustomEventDeclaration, CustomEventDelivery, CustomEventEmitter, ExtensionError},
+};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::oneshot;
@@ -9,6 +12,17 @@ use crate::model::PendingQuestion;
 
 pub(crate) const PENDING_EVENT_TYPE: &str = "ask_user.pending";
 pub(crate) const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
+
+pub(crate) fn custom_event_declarations() -> [CustomEventDeclaration; 2] {
+    [
+        custom_event(PENDING_EVENT_TYPE)
+            .delivery(CustomEventDelivery::GlobalLive)
+            .build(),
+        custom_event(RESOLVED_EVENT_TYPE)
+            .delivery(CustomEventDelivery::GlobalLive)
+            .build(),
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -62,7 +76,7 @@ impl PendingKey {
 struct PendingEntry {
     question: PendingQuestion,
     sender: oneshot::Sender<Resolution>,
-    events: Arc<dyn ExtensionEventSink>,
+    events: CustomEventEmitter,
     registration: Arc<()>,
 }
 
@@ -81,7 +95,7 @@ impl PendingRegistry {
     pub(crate) fn register(
         self: &Arc<Self>,
         question: PendingQuestion,
-        events: Arc<dyn ExtensionEventSink>,
+        events: CustomEventEmitter,
     ) -> Result<(oneshot::Receiver<Resolution>, PendingGuard), ExtensionError> {
         let key = PendingKey::new(&question.session_id, &question.call_id);
         let (sender, receiver) = oneshot::channel();
@@ -98,22 +112,15 @@ impl PendingRegistry {
             PendingEntry {
                 question: question.clone(),
                 sender,
-                events: Arc::clone(&events),
+                events: events.clone(),
                 registration: Arc::clone(&registration),
             },
         );
         drop(state);
 
-        if let Err(error) = events.emit(
-            PENDING_EVENT_TYPE,
-            1,
-            serde_json::to_value(&question).map_err(|error| {
-                self.abandon_registered(&key, &registration);
-                ExtensionError::Internal(format!("serialize askUser pending event: {error}"))
-            })?,
-        ) {
+        if let Err(error) = events.try_emit(PENDING_EVENT_TYPE, &question) {
             self.abandon_registered(&key, &registration);
-            return Err(error);
+            return Err(ExtensionError::Internal(error.to_string()));
         }
 
         Ok((
@@ -312,10 +319,9 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
             "ask-user receiver closed before resolution"
         );
     }
-    if let Err(error) = entry.events.emit(
+    if let Err(error) = entry.events.try_emit(
         RESOLVED_EVENT_TYPE,
-        1,
-        json!({
+        &json!({
             "sessionId": key.session_id,
             "callId": key.call_id,
             "resolution": event_name,

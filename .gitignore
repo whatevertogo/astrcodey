@@ -8,9 +8,23 @@
 *.profdata
 *.dSYM/
 
+# 本地一次性分析产物(AI agent 工作稿等)
+/artifacts/
+
 # Frontend (node)
 node_modules/
 /frontend/dist/
+
+# Python (sdks/python)
+__pycache__/
+*.py[cod]
+*.egg-info/
+/sdks/python/dist/
+/sdks/python/build/
+/sdks/python/.venv/
+/sdks/python/.pytest_cache/
+/sdks/python/.mypy_cache/
+/sdks/python/.ruff_cache/
 
 # Tauri sidecar binaries (built from workspace, copied at dev time)
 /src-tauri/binaries/

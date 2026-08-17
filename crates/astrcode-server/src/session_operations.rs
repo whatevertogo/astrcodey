@@ -15,7 +15,7 @@ use astrcode_core::{
 use crate::{
     child_session::{ChildCleanup, ChildSessionCoordinator},
     session_manager::SessionManager,
-    turn_scheduler::{InputDelivery, TurnScheduler},
+    turn_scheduler::{InputDelivery, TurnScheduleError, TurnScheduler},
 };
 
 pub struct ServerSessionOperations {
@@ -135,7 +135,7 @@ impl SessionOperations for ServerSessionOperations {
     ) -> Result<SessionHandle, SessionApiError> {
         let session = self
             .session_manager
-            .create(&request.working_dir)
+            .create_for_extension(&request.working_dir, request.source_extension)
             .await
             .map_err(SessionApiError::internal)?;
 
@@ -171,6 +171,40 @@ impl SessionOperations for ServerSessionOperations {
             .await
     }
 
+    async fn queue_or_start(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        self.deliver_message(access, content, InputDelivery::QueueIfRunningElseStart)
+            .await
+    }
+
+    async fn defer_context(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        let (_, target_sid) = self.verified_session_ids(access).await?;
+        let outcome = self
+            .scheduler
+            .deliver_input(
+                target_sid.clone(),
+                astrcode_core::user_input::UserInput::text_only(content),
+                InputDelivery::InjectOnly,
+            )
+            .await
+            .map_err(|error| match error {
+                TurnScheduleError::NoActiveTurn => {
+                    SessionApiError::NoActiveTurn(target_sid.to_string())
+                },
+                error => SessionApiError::internal(error),
+            })?;
+
+        self.session_manager.sync_durable_events(&target_sid).await;
+        Ok(delivery_outcome(outcome))
+    }
+
     async fn interrupt_and_submit(
         &self,
         access: SessionAccess<'_>,
@@ -180,7 +214,7 @@ impl SessionOperations for ServerSessionOperations {
             .await
     }
 
-    async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+    async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<bool, SessionApiError> {
         let (_, target_sid) = self.verified_session_ids(access).await?;
         self.scheduler
             .abort(&target_sid)
@@ -323,9 +357,7 @@ impl SessionOperations for ServerSessionOperations {
                     message_count: view.message_count,
                 })
             },
-            Err(crate::session_manager::SessionManagerError::Storage(
-                astrcode_storage::StorageError::NotFound(_),
-            )) => {
+            Err(error) if error.is_not_found() => {
                 self.child_sessions
                     .verify_restore_access(&caller_sid, &target_sid)
                     .await?;
@@ -339,7 +371,7 @@ impl SessionOperations for ServerSessionOperations {
                     phase: model.execution.phase,
                     active_turn_id: None,
                     queued_inputs: model.execution.pending_inputs.len(),
-                    message_count: model.transcript.messages.len(),
+                    message_count: model.model_context.messages.len(),
                 })
             },
             Err(error) => Err(SessionApiError::internal(error)),
@@ -432,9 +464,9 @@ impl SessionOperations for ServerSessionOperations {
                     .read_model(&caller_sid)
                     .await
                     .map_err(|error| match error {
-                        crate::session_manager::SessionManagerError::Storage(
-                            astrcode_storage::StorageError::NotFound(_),
-                        ) => SessionApiError::NotFound(format!("parent session {caller_sid}")),
+                        error if error.is_not_found() => {
+                            SessionApiError::NotFound(format!("parent session {caller_sid}"))
+                        },
                         error => SessionApiError::internal(error),
                     })?;
                 let _target_operation = scheduler
@@ -450,9 +482,7 @@ impl SessionOperations for ServerSessionOperations {
                                 .await?;
                             (model, false)
                         },
-                        Err(crate::session_manager::SessionManagerError::Storage(
-                            astrcode_storage::StorageError::NotFound(_),
-                        )) => {
+                        Err(error) if error.is_not_found() => {
                             child_sessions
                                 .verify_restore_access(&caller_sid, &target_sid)
                                 .await?;
@@ -556,9 +586,7 @@ impl SessionOperations for ServerSessionOperations {
 
 fn map_restore_error(error: crate::session_manager::SessionManagerError) -> SessionApiError {
     match error {
-        crate::session_manager::SessionManagerError::Storage(
-            astrcode_storage::StorageError::NotFound(_),
-        ) => SessionApiError::NotFound(error.to_string()),
+        error if error.is_not_found() => SessionApiError::NotFound(error.to_string()),
         crate::session_manager::SessionManagerError::Storage(
             astrcode_storage::StorageError::Unsupported(reason),
         ) => SessionApiError::Unsupported(reason),

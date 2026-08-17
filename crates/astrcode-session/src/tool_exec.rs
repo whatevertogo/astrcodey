@@ -2,9 +2,12 @@
 
 use std::{sync::Arc, time::Instant};
 
-use astrcode_core::tool::{
-    FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
-    ToolError, ToolExecutionContext, ToolResultArtifactReader,
+use astrcode_core::{
+    tool::{
+        FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
+        ToolError, ToolExecutionContext, ToolResultArtifactReader, access::ResourceLease,
+    },
+    types::TurnId,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -14,7 +17,7 @@ use super::{
     session::Session,
     tool_types::{ExecutableToolInvocation, ToolExecutionOutcome, ToolResultCommit},
 };
-use crate::ToolRegistry;
+use crate::{ToolRegistry, session_runtime_services::RuntimeGenerationView};
 
 // ─── Runtime context types ──────────────────────────────────────────────
 
@@ -28,27 +31,33 @@ pub(crate) struct TurnToolContext {
 impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
+        runtime_generation: &RuntimeGenerationView,
         session_state: &astrcode_session_projection::SessionReadModel,
+        turn_id: TurnId,
         tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
+        cancellation_token: CancellationToken,
     ) -> Self {
-        let runtime_services = session.runtime_services();
-        let effective = runtime_services.read_effective();
+        let effective = runtime_generation.effective();
         let approval_history = session.runtime().approval_history();
-        let permission_chain =
-            crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
+        let permission_chain = crate::permission::build_default_chain(effective);
+        let llm_providers =
+            runtime_generation.llm_bindings_for_model_id(&session_state.identity.model_id);
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
+            turn_id: Some(turn_id),
             working_dir: session_state.identity.working_dir.clone(),
             model_id: session_state.identity.model_id.clone(),
+            llm_providers,
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
             tool_selection: Some(tool_selection),
             permission_chain,
             approval_history,
+            cancellation_token,
         };
-        let capabilities = ToolRuntimeCapabilities::from_session(session, &shared);
+        let capabilities = ToolRuntimeCapabilities::from_session(session, &shared, effective);
         Self {
             shared,
             capabilities,
@@ -70,10 +79,13 @@ pub(crate) struct ToolRuntimeCapabilities {
 }
 
 impl ToolRuntimeCapabilities {
-    fn from_session(session: &Session, shared: &crate::turn_context::SharedTurnContext) -> Self {
+    fn from_session(
+        session: &Session,
+        shared: &crate::turn_context::SharedTurnContext,
+        effective: &astrcode_core::config::EffectiveConfig,
+    ) -> Self {
         let runtime = Arc::clone(&session.runtime);
         let runtime_services = session.runtime_services();
-        let effective = runtime_services.read_effective();
         Self {
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: runtime_services.session_ops(),
@@ -208,6 +220,7 @@ fn tool_capabilities_from_runtime(
             observation_store: capabilities.file_observation_store.clone(),
         },
         host: ToolHostServices {
+            llm_providers: Some(turn.shared.llm_providers.clone()),
             result_reader: tool_result_reader,
             available_tools: Some(tools.as_ref().to_vec()),
         },
@@ -221,8 +234,13 @@ async fn execute_tool_call_blocking(
     call: ExecutableToolInvocation,
 ) -> (usize, ToolExecutionOutcome) {
     let started_at = Instant::now();
-    let tool_name = call.name;
-    let call_id = call.call_id;
+    let ExecutableToolInvocation {
+        index,
+        call_id,
+        name: tool_name,
+        tool_input,
+        plan,
+    } = call;
     let ToolCallRuntimeContext {
         turn,
         tools,
@@ -231,20 +249,25 @@ async fn execute_tool_call_blocking(
         ..
     } = runtime;
     let capabilities = tool_capabilities_from_runtime(&turn, tools, tool_result_reader);
-    let tool_ctx = ToolExecutionContext::new(
+    let mut tool_ctx = ToolExecutionContext::new(
         turn.shared.session_id.clone(),
         turn.shared.working_dir.clone(),
         Some(call_id.clone()),
         turn.shared.turn_event_tx(),
         capabilities,
-    );
+    )
+    .with_resource_lease(ResourceLease::from_plan(&plan))
+    .with_cancellation(cancellation_token.clone());
+    if let Some(turn_id) = &turn.shared.turn_id {
+        tool_ctx = tool_ctx.with_turn_id(turn_id.clone());
+    }
 
     let outcome = tokio::select! {
         _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(
             "tool execution cancelled",
             Some(started_at.elapsed().as_millis() as u64),
         ),
-        result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => {
+        result = tool_registry.execute(&tool_name, tool_input, &tool_ctx) => {
             match result {
                 Ok(mut result) => {
                     result.result_mut().duration_ms =
@@ -256,17 +279,17 @@ async fn execute_tool_call_blocking(
         },
     };
     drop(tool_ctx);
-    if let Some(sender) = turn.shared.turn_event_sender.as_ref() {
-        if let Err(error) = sender.flush().await {
-            // flush 只确认本调用入队的 live 事件已处理完毕，失败不代表工具结果丢失；
-            // 用 ingress 错误覆盖 outcome 会把成功的工具执行伪装成失败。
-            tracing::warn!(
-                tool_name,
-                call_id,
-                error = %error,
-                "failed to flush tool events after execution; keeping tool outcome"
-            );
-        }
+    if let Some(sender) = turn.shared.turn_event_sender.as_ref()
+        && let Err(error) = sender.flush().await
+    {
+        // flush 只确认本调用入队的 live 事件已处理完毕，失败不代表工具结果丢失；
+        // 用 ingress 错误覆盖 outcome 会把成功的工具执行伪装成失败。
+        tracing::warn!(
+            tool_name,
+            call_id,
+            error = %error,
+            "failed to flush tool events after execution; keeping tool outcome"
+        );
     }
 
     match &outcome {
@@ -312,7 +335,7 @@ async fn execute_tool_call_blocking(
         },
     }
 
-    (call.index, outcome)
+    (index, outcome)
 }
 
 // ─── File observation store ──────────────────────────────────────────────────
@@ -340,9 +363,132 @@ impl FileObservationStore for InMemoryFileObservationStore {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::ToolError;
+    use astrcode_core::{
+        llm::LlmProviderBindings,
+        permission::ApprovalMode,
+        tool::{SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
+        types::SessionId,
+    };
 
     use super::*;
+    use crate::{
+        permission::{ApprovalHistoryStore, PermissionChain},
+        test_support::UnusedLlm,
+        turn_context::SharedTurnContext,
+    };
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedContext {
+        session_id: String,
+        turn_id: String,
+        tool_call_id: String,
+        working_dir: String,
+    }
+
+    struct ContextCaptureTool(Arc<Mutex<Option<CapturedContext>>>);
+
+    #[async_trait::async_trait]
+    impl Tool for ContextCaptureTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "capture_context".into(),
+                description: String::new(),
+                parameters: serde_json::json!({ "type": "object" }),
+                strict: false,
+                origin: ToolOrigin::Extension,
+            }
+        }
+
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &astrcode_core::tool::ToolPlanningContext,
+        ) -> Result<astrcode_core::tool::access::ToolPlan, ToolError> {
+            Ok(astrcode_core::tool::access::ToolPlan::default())
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            ctx: &ToolExecutionContext,
+        ) -> Result<astrcode_core::tool::ToolExecutionResult, ToolError> {
+            *self.0.lock() = Some(CapturedContext {
+                session_id: ctx.scope.session_id.to_string(),
+                turn_id: ctx.turn_id().expect("turn attribution").to_string(),
+                tool_call_id: ctx
+                    .scope
+                    .tool_call_id
+                    .clone()
+                    .expect("tool call attribution"),
+                working_dir: ctx.scope.working_dir.clone(),
+            });
+            Ok(ToolResult::success("captured").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_tool_context_reaches_tool_execution_context() {
+        let captured = Arc::new(Mutex::new(None));
+        let tool = Arc::new(ContextCaptureTool(Arc::clone(&captured)));
+        let definition = tool.definition();
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).expect("register capture tool");
+        let runtime = ToolCallRuntimeContext {
+            turn: TurnToolContext {
+                shared: SharedTurnContext {
+                    session_id: SessionId::new("session-source"),
+                    turn_id: Some(TurnId::new("turn-source")),
+                    working_dir: "/workspace".into(),
+                    model_id: "model".into(),
+                    llm_providers: LlmProviderBindings::new(
+                        Arc::new(UnusedLlm),
+                        Arc::new(UnusedLlm),
+                    ),
+                    session_store_dir: None,
+                    turn_event_sender: None,
+                    approval_mode: ApprovalMode::default(),
+                    tool_selection: Some(SessionToolSelection::default()),
+                    permission_chain: Arc::new(PermissionChain::new(Vec::new())),
+                    approval_history: Arc::new(ApprovalHistoryStore::default()),
+                    cancellation_token: CancellationToken::new(),
+                },
+                capabilities: ToolRuntimeCapabilities {
+                    file_observation_store: None,
+                    session_ops: None,
+                    llm_models: LlmModelIds::default(),
+                    session_store_dir: None,
+                },
+            },
+            tools: Arc::from([definition]),
+            tool_result_reader: None,
+            cancellation_token: CancellationToken::new(),
+        };
+
+        let (index, outcome) = execute_tool_call(
+            Arc::new(registry),
+            runtime,
+            ExecutableToolInvocation {
+                index: 7,
+                call_id: "call-source".into(),
+                name: "capture_context".into(),
+                tool_input: serde_json::json!({}),
+                plan: astrcode_core::tool::access::ToolPlan::default(),
+            },
+        )
+        .await;
+
+        assert_eq!(index, 7);
+        assert!(matches!(outcome, ToolExecutionOutcome::Completed(_)));
+        assert_eq!(
+            captured.lock().as_ref(),
+            Some(&CapturedContext {
+                session_id: "session-source".into(),
+                turn_id: "turn-source".into(),
+                tool_call_id: "call-source".into(),
+                working_dir: "/workspace".into(),
+            })
+        );
+    }
 
     #[test]
     fn tool_failures_preserve_guidance_and_metadata() {

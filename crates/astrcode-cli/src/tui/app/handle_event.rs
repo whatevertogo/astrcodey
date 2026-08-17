@@ -1,8 +1,7 @@
 //! Apply ClientNotification to App state.
 
-use astrcode_context::is_compact_summary_text;
 use astrcode_core::event::{
-    DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload,
+    CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload,
 };
 use astrcode_protocol::events::{
     ClientNotification, ExtensionCommandInfoDto, KeybindingDto, SessionListItemDto,
@@ -79,7 +78,7 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             app.status_text = "Extension registry changed".into();
         },
         // TUI 已从 all_notifications 收到原始扩展事件，无需处理桌面端全局副本。
-        ClientNotification::GlobalExtensionEvent { .. } => {},
+        ClientNotification::GlobalCustomEvent { .. } => {},
     }
 }
 
@@ -89,20 +88,18 @@ fn apply_event(app: &mut App, event: &Event) {
     if !matches!(
         &event.payload,
         EventPayload::Durable(DurableEventPayload::SessionStarted(_))
-    ) {
-        if let Some(active) = &app.active_session_id {
-            if event.session_id.as_str() != active.as_str() {
-                // 检查是否是已跟踪的子 session 事件
-                if let Some(call_id) = app
-                    .child_session_map
-                    .get(event.session_id.as_str())
-                    .cloned()
-                {
-                    apply_child_session_event(app, &call_id, event);
-                }
-                return;
-            }
+    ) && let Some(active) = &app.active_session_id
+        && event.session_id.as_str() != active.as_str()
+    {
+        // 检查是否是已跟踪的子 session 事件
+        if let Some(call_id) = app
+            .child_session_map
+            .get(event.session_id.as_str())
+            .cloned()
+        {
+            apply_child_session_event(app, &call_id, event);
         }
+        return;
     }
     match &event.payload {
         EventPayload::Durable(DurableEventPayload::SessionStarted(started)) => {
@@ -178,24 +175,16 @@ fn apply_event(app: &mut App, event: &Event) {
             tracing::debug!(message_id = %message_id, "stream_reset");
         },
         EventPayload::Live(LiveEventPayload::AssistantTextDelta { message_id, delta }) => {
-            // 第一次收到 text delta 时写入 StreamHeader
-            let is_first_delta = app
-                .find_message_mut(message_id.as_str())
-                .is_some_and(|msg| msg.body.is_empty());
-            if is_first_delta {
-                app.scrollback_queue
-                    .push(ScrollbackEntry::AssistantStreamHeader {
-                        message_id: message_id.to_string(),
-                    });
-                app.status_text = "Working".into();
-            }
-            if let Some(msg) = app.find_message_mut(message_id.as_str()) {
-                msg.body.append_text(delta);
-            }
             if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str()) {
-                if ctrl.push_delta(delta) {
-                    // Lines are queued; commit_tick will drain them.
+                // 第一次收到 text delta 时写入 StreamHeader
+                if !ctrl.has_seen_delta() {
+                    app.scrollback_queue
+                        .push(ScrollbackEntry::AssistantStreamHeader {
+                            message_id: message_id.to_string(),
+                        });
+                    app.status_text = "Working".into();
                 }
+                ctrl.push_delta(delta);
             }
             tracing::debug!(message_id = %message_id, len = delta.len(), "stream_chunk");
         },
@@ -355,8 +344,13 @@ fn apply_event(app: &mut App, event: &Event) {
                     None,
                 );
             } else {
-                // Try custom tool renderer for rich display.
-                if let Some(renderer) = app.tool_renderers.get(tool_name) {
+                // Try custom tool renderer for rich display: exact tool name first,
+                // then the presentation intent declared in result metadata.
+                let renderer = app.tool_renderers.get(tool_name).or_else(|| {
+                    crate::tui::ext::builtin::intent_renderer_name(result)
+                        .and_then(|name| app.tool_renderers.get(name))
+                });
+                if let Some(renderer) = renderer {
                     let ctx = ToolRenderCtx { tool_name };
                     if let Some(spec) = renderer.render_result(result, &ctx) {
                         let fallback =
@@ -488,9 +482,10 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = format!("● Agent: {agent_name}");
 
-            // 精确建立 child_session_id → call_id 映射。
-            app.child_session_map
-                .insert(child_session_id.to_string(), tool_call_id.to_string());
+            if let Some(tool_call_id) = tool_call_id {
+                app.child_session_map
+                    .insert(child_session_id.to_string(), tool_call_id.to_string());
+            }
         },
         EventPayload::Durable(DurableEventPayload::AgentSessionCompleted {
             child_session_id,
@@ -528,11 +523,11 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             app.child_session_map.remove(child_session_id.as_str());
         },
-        EventPayload::Durable(DurableEventPayload::ExtensionEvent(extension))
-        | EventPayload::Live(LiveEventPayload::ExtensionEvent(extension)) => {
-            apply_extension_event(app, extension);
+        _ => {
+            if let Some(custom_event) = event.payload.custom_event() {
+                apply_custom_event(app, custom_event);
+            }
         },
-        _ => {},
     }
 }
 
@@ -557,13 +552,13 @@ fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
         .is_some_and(|call_id| app.child_agents.contains_key(call_id))
 }
 
-fn apply_extension_event(app: &mut App, extension: &ExtensionEventData) {
-    let name = &extension.event_type;
+fn apply_custom_event(app: &mut App, custom_event: &CustomEventData) {
+    let name = &custom_event.event_type;
     let fallback = format!(
         "[{name}] {}",
-        inline_preview(&extension.payload.to_string(), 80)
+        inline_preview(&custom_event.payload.to_string(), 80)
     );
-    let body = MessageBody::with_custom(name.clone(), extension.payload.clone(), fallback);
+    let body = MessageBody::with_custom(name.clone(), custom_event.payload.clone(), fallback);
     let message = Message {
         role: MessageRole::System,
         label: name.clone(),
@@ -764,10 +759,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
             astrcode_protocol::wire::MessageRoleDto::Tool => MessageRole::Tool,
         };
 
-        let is_compact_summary = message
-            .is_compact_summary
-            .unwrap_or_else(|| is_compact_summary_text(&message.content));
-        let label = if is_compact_summary {
+        let label = if message.is_compact_summary {
             "Compacted"
         } else {
             match &role {
@@ -1076,7 +1068,8 @@ mod tests {
         );
 
         assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].body.plain_text(), "fresh");
+        // 流式期间不再同步维护 transcript 正文,正文由完成事件一次性写入
+        assert!(app.messages[0].body.plain_text().is_empty());
         assert!(app.scrollback_queue.iter().any(|entry| matches!(
             entry,
             ScrollbackEntry::AssistantStreamHeader { message_id } if message_id == "msg-1"
@@ -1164,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_snapshot_prefers_explicit_compact_summary_semantics() {
+    fn resumed_snapshot_uses_explicit_compact_summary_semantics() {
         let mut app = make_app();
         let snapshot = SessionSnapshot {
             session_id: "session".into(),
@@ -1173,17 +1166,12 @@ mod tests {
                 MessageDto {
                     role: MessageRoleDto::System,
                     content: "<compact_summary>legacy-looking text</compact_summary>".into(),
-                    is_compact_summary: Some(false),
+                    is_compact_summary: false,
                 },
                 MessageDto {
                     role: MessageRoleDto::System,
                     content: "summary without a marker".into(),
-                    is_compact_summary: Some(true),
-                },
-                MessageDto {
-                    role: MessageRoleDto::System,
-                    content: "  <compact_summary>legacy summary</compact_summary>".into(),
-                    is_compact_summary: None,
+                    is_compact_summary: true,
                 },
             ],
             model_id: "model".into(),
@@ -1195,7 +1183,6 @@ mod tests {
 
         assert_eq!(app.messages[0].label, "System");
         assert_eq!(app.messages[1].label, "Compacted");
-        assert_eq!(app.messages[2].label, "Compacted");
     }
 
     #[test]
@@ -1305,6 +1292,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_delta_only_updates_status() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+            }),
+        );
+        app.scrollback_queue.clear();
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::ToolOutputDelta {
+                call_id: "call-1".into(),
+                stream: astrcode_core::event::ToolOutputStream::Stdout,
+                delta: "lots of output\n".into(),
+            }),
+        );
+        assert!(app.scrollback_queue.is_empty());
+        assert!(app.status_text.contains("Receiving"));
+    }
+
+    #[test]
     fn agent_tool_shows_compact_task_summary() {
         let mut app = make_app();
         apply_payload(
@@ -1331,28 +1341,5 @@ mod tests {
                 .plain_text()
                 .contains("● Task completed")
         );
-    }
-
-    #[test]
-    fn tool_output_delta_only_updates_status() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::Live(LiveEventPayload::ToolCallStarted {
-                call_id: "call-1".into(),
-                tool_name: "shell".into(),
-            }),
-        );
-        app.scrollback_queue.clear();
-        apply_payload(
-            &mut app,
-            EventPayload::Live(LiveEventPayload::ToolOutputDelta {
-                call_id: "call-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "lots of output\n".into(),
-            }),
-        );
-        assert!(app.scrollback_queue.is_empty());
-        assert!(app.status_text.contains("Receiving"));
     }
 }

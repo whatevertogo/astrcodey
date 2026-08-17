@@ -7,14 +7,13 @@ mod extension_manifest;
 pub mod host_router;
 pub mod loader;
 mod process_supervision;
-mod remote_manifest;
 pub mod runner;
 pub mod s5r_ext;
-pub mod session_query;
+mod s5r_handler;
+#[cfg(feature = "testing")]
+pub mod testing;
 
-pub use astrcode_extension_sdk::{extension::Extension, trusted::ExtensionHostServices};
+pub use astrcode_extension_sdk::extension::Extension;
 pub use host_router::{
-    HostRouter, PublicHttpDispatcher, build_host_router,
-    build_host_router_with_public_http_dispatcher,
+    HostBackends, HostRouter, PublicHttpDispatcher, build_host_router_with_public_http_dispatcher,
 };
-pub use session_query::StorageSessionQueryFactory;

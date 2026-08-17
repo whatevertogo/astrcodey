@@ -12,7 +12,7 @@
 
 用 Rust 从零构建的 AI 编程助手平台。
 
-AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 26 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
+AstrCode 是一个由 Rust workspace 与 React + TypeScript 前端组成的全栈 AI 编程助手。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、面向内置扩展与磁盘 IPC 子进程扩展的类型化作者接口（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
 
 ## 目录
 
@@ -187,7 +187,6 @@ Telegram 通道配置位于 `extensions.astrcode-channels.telegram`；除非显�
 enabled = true
 botTokenEnv = "TELEGRAM_BOT_TOKEN"
 allowedChatIds = ["123456789"]
-workingDir = "D:/astrcode"
 ```
 
 ### 内置扩展一览
@@ -274,7 +273,7 @@ cargo run --features dev-mode -- eval
 
 ## 配置
 
-AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧版 `config.json` 仍会作为迁移 fallback 读取，并在首次加载后自动写出 `config.toml`。配置支持多个 LLM Provider、模型选择、运行时行为调优和项目级覆盖。
+AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。配置支持多个 LLM Provider、模型选择、运行时行为调优和项目级覆盖。
 
 **主要配置特性：**
 - 多 Provider 支持（Anthropic 与 OpenAI 兼容 Provider）
@@ -313,20 +312,20 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
              │           │           │
     ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
-    │            │ │extensions │ │ tools        │
-    │ Anthropic  │ │钩子系统    │ │文件/Shell/   │
-    │ OpenAI     │ │扩展 SDK   │ │Task 工具     │
-    │ 兼容协议   │ │IPC 扩展   │ │              │
+    │            │ │context    │ │ extensions   │
+    │ Anthropic  │ │Token 预算  │ │Host 运行时    │
+    │ OpenAI     │ │与上下文    │ │钩子 + S5R    │
+    │ 兼容协议   │ │压缩       │ │能力门控      │
     │ SSE + 重试  │ │           │ │              │
-    └────────┬───┘ └─────┬─────┘ └──────────────┘
-             │           │
-   ┌─────────┴──┐  ┌────┴─────────────────────────┐
-   │astrcode-   │  │ 扩展层                        │
-   │ context    │  │ bundled-extensions           │
-   │ Token 预算  │  │ sdk · mode · goal · skill  │
-   │ 自动压缩    │  │ todo · agent-tools · mcp   │
-   └────────────┘  │ memory · channels · web-tools │
-                   │ + 磁盘 IPC 扩展              │
+    └────────────┘ └───────────┘ └──────┬───────┘
+                                      │
+                   ┌──────────────────┴─────────┐
+                   │ 扩展层                       │
+                   │ bundled-extensions          │
+                   │ astrcode-extension-coding   │
+                   │ mode · goal · skill · todo  │
+                   │ agent-tools · mcp · memory  │
+                   │ channels · web-tools + IPC  │
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              共享基础层               │
@@ -337,69 +336,70 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
 
 ## Crate 一览
 
-Cargo workspace 在 [`crates/`](crates/) 下包含 **26 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **27 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
+Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **29 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
 
 ### Layer 0：基础契约层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-core`](crates/astrcode-core) | 9.5k | 共享领域类型、trait、配置系统、扩展契约、提示词组合 |
-| [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 线协议类型、命令、事件、HTTP/UI DTO |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-core`](crates/astrcode-core) | 共享领域类型、trait、配置系统与提示词组合 |
+| [`astrcode-session-projection`](crates/astrcode-session-projection) | 纯 durable-event reducer 与 session read model |
+| [`astrcode-protocol`](crates/astrcode-protocol) | JSON-RPC 2.0 线协议类型、命令、事件与 HTTP/UI DTO |
 
 ### Layer 1：基础能力实现层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | 多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、SSE 流式、重试 |
-| [`astrcode-storage`](crates/astrcode-storage) | 5.0k | JSONL 事件日志、快照、配置持久化、文件锁 |
-| [`astrcode-context`](crates/astrcode-context) | 4.5k | Token 估算、上下文窗口预算、自动压缩、提示词引擎 |
-| [`astrcode-tools`](crates/astrcode-tools) | 7.8k | 内置工具：read、write、edit、patch、glob、grep、shell、terminal、task |
-| [`astrcode-log`](crates/astrcode-log) | 0.4k | 文件轮转、stderr 输出、env-filter 日志 |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-ai`](crates/astrcode-ai) | 多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、SSE 流式与重试 |
+| [`astrcode-storage`](crates/astrcode-storage) | JSONL 事件日志、快照、配置持久化与文件锁 |
+| [`astrcode-context`](crates/astrcode-context) | Token 估算、上下文窗口预算、自动压缩与提示词引擎 |
+| [`astrcode-log`](crates/astrcode-log) | 文件轮转、stderr 输出与 env-filter 日志 |
 
 ### Layer 2：会话运行时层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-session`](crates/astrcode-session) | 12.1k | Agent 循环：turn runner、工具管线、LLM 流、压缩编排、运行时服务 |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-session`](crates/astrcode-session) | Agent 循环：turn runner、工具管线、LLM 流、压缩编排与运行时服务 |
 
 ### Layer 3：扩展系统层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 2.8k | 扩展作者稳定 API、能力声明、线缆协议类型、manifest 辅助 |
-| [`astrcode-extensions`](crates/astrcode-extensions) | 7.6k | 扩展生命周期、钩子分发、能力门控、磁盘 IPC 扩展加载 |
-| [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 0.2k | 组合根：注册全部第一方扩展 crate |
-| [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 0.8k | 子 Agent 委派、Agent 发现（兼容 Claude Code 格式） |
-| [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | 3.4k | MCP 客户端：stdio/HTTP 传输、常驻进程池、预热、健康检查 |
-| [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 1.0k | 斜杠命令技能发现与 Skill 工具调度 |
-| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 0.8k | 进度追踪 Todo 工具 |
-| [`astrcode-extension-mode`](crates/astrcode-extension-mode) | 1.3k | Code / Plan 模式切换、Exit Gate、计划 Artifact、快捷键与状态栏 |
-| [`astrcode-extension-goal`](crates/astrcode-extension-goal) | 1.6k | Codex 风格会话目标、Token 预算、自动延续 |
-| [`astrcode-extension-memory`](crates/astrcode-extension-memory) | 3.2k | 项目作用域 Markdown 记忆（默认关闭） |
-| [`astrcode-extension-channels`](crates/astrcode-extension-channels) | 1.1k | Telegram 通道桥接（默认关闭） |
-| [`astrcode-extension-web-tools`](crates/astrcode-extension-web-tools) | 1.9k | Web 搜索与 URL 抓取工具（含 SSRF 防护与抓取缓存） |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 扩展作者 API，以及共享的 S5R wire、帧、Peer 与 Host operation 契约 |
+| [`astrcode-extension-worker`](crates/astrcode-extension-worker) | S5R 子进程 worker 运行时、handler 分发与远程类型化 `HostClient` |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 宿主侧扩展生命周期、钩子分发、能力门控与磁盘 IPC 加载 |
+| [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 组合根：注册全部第一方扩展 crate |
+| [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 子 Agent 委派与 Agent 发现（兼容 Claude Code 格式） |
+| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | 只通过 SDK Host 能力实现的 8 个第一方工具：read、read_tool_result、write、edit、patch、glob、grep、shell |
+| [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | MCP 客户端：stdio/HTTP 传输、常驻进程池、预热与健康检查 |
+| [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 斜杠命令技能发现与 Skill 工具调度 |
+| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 进度追踪 Todo 工具 |
+| [`astrcode-extension-mode`](crates/astrcode-extension-mode) | Code / Plan 模式切换、Exit Gate、计划 Artifact、快捷键与状态栏 |
+| [`astrcode-extension-ask-user`](crates/astrcode-extension-ask-user) | 结构化用户提问、挂起交互状态与受保护回复 |
+| [`astrcode-extension-goal`](crates/astrcode-extension-goal) | Codex 风格会话目标、Token 预算与自动延续 |
+| [`astrcode-extension-memory`](crates/astrcode-extension-memory) | 项目作用域 Markdown 记忆（默认关闭） |
+| [`astrcode-extension-channels`](crates/astrcode-extension-channels) | Telegram 通道桥接（默认关闭） |
+| [`astrcode-extension-web-tools`](crates/astrcode-extension-web-tools) | Web 搜索与 URL 抓取工具（含 SSRF 防护与抓取缓存） |
 
 ### Layer 4：服务与客户端层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-server`](crates/astrcode-server) | 18.0k | 会话管理、JSON-RPC/HTTP/ACP、transport、HTTP 投影与 SSE |
-| [`astrcode-client`](crates/astrcode-client) | 0.7k | 类型化 JSON-RPC 客户端、传输抽象、流订阅 |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-server`](crates/astrcode-server) | 会话管理、JSON-RPC/HTTP/ACP、transport、HTTP 投影与 SSE |
+| [`astrcode-client`](crates/astrcode-client) | 类型化 JSON-RPC 客户端、传输抽象与流订阅 |
 
 ### Layer 5：用户入口层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-cli`](crates/astrcode-cli) | 8.4k | CLI 入口：TUI（ratatui）、无头 exec、server 启动器 |
-| [`src-tauri/`](src-tauri) | 0.8k | Tauri v2 桌面壳：sidecar 管理、单实例协调、原生对话框 |
+| Crate | 说明 |
+|---|---|
+| [`astrcode-cli`](crates/astrcode-cli) | CLI 入口：TUI（ratatui）、无头 exec 与 server 启动器 |
+| [`src-tauri/`](src-tauri) | Tauri v2 桌面壳：sidecar 管理、单实例协调与原生对话框 |
 
 ### Layer 6：辅助评测层
 
-| Crate | 行数 | 说明 |
-|---|---|---|
-| [`astrcode-eval`](crates/astrcode-eval) | 2.0k | 评测运行器：HTTP 服务器控制、事件日志指标、结构化报告 |
-
-**合计：** Rust 约 10.44 万行（26 个 crate + Tauri，共 27 个 workspace 成员），**326** 个 `.rs` 文件；`frontend/` 约 1.24 万行 TypeScript（整体约 **11.68 万行**）。
+| Crate | 说明 |
+|---|---|
+| [`astrcode-eval`](crates/astrcode-eval) | 评测运行器：HTTP 服务器控制、事件日志指标与结构化报告 |
 
 ## 核心设计
 
@@ -453,8 +453,8 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 扩展系统（`astrcode-extensions`）是架构核心支柱，而非附属功能：
 
 - **Extension trait** — 每个扩展声明钩子订阅、贡献工具和斜杠命令、处理生命周期事件
-- **扩展 SDK** — 内置扩展和扩展作者统一依赖 `astrcode-extension-sdk`，不直接耦合宿主 `astrcode-core`
-- **能力声明** — 内置扩展通过 `Extension::capabilities()`；磁盘 IPC 扩展在 `extension/initialize` 的 `capabilities` 中声明 `session_state`、`session_control`、`small_model` 等；运行时经 `HostRouter` 鉴权后仅允许已声明的 `astrcode.*` invoke
+- **扩展作者入口** — 内置扩展使用 `astrcode-extension-sdk`，磁盘 S5R 扩展使用 `astrcode-extension-worker`，两者都不直接耦合宿主内部 crate
+- **能力声明** — 内置扩展通过 `Extension::manifest()` 声明；磁盘 IPC 扩展在 `extension/initialize` 的 `capabilities` 中声明 `session_state`、`session_control`、`small_model` 等；运行时经 `HostRouter` 鉴权后仅允许已声明的 `astrcode.*` invoke
 - **隔离状态目录** — session 级扩展状态存入 `<session>/extension_data/<extension-id>/`，避免扩展写入 session 根目录
 - **Hook 模式** — `Blocking`（可修改输入/输出）、`NonBlocking`（fire-and-forget）、`Advisory`（仅观察）
 - **快捷键注册** — 扩展通过 `Registrar::keybinding()` 注册键盘快捷键（如 `Shift+Tab` 切换模式）
@@ -462,7 +462,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 - **磁盘 s5r 扩展** — stdio 长度前缀帧 + JSON `WireMessage`（`extension.json` 中 `protocol.s5r` + `command`）；Worker 发 `Initialize`、`handler.invoke` 与按能力裁剪的 `astrcode.*` invoke。规范见 [docs/extension-system.md](docs/extension-system.md)
 - **扩展运行时** — 带深度限制的会话派生、工具注册队列、优先级分派
 - **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
-- **扩展运行时 API** — `Extension::start()`（携带 `ExtensionCtx`，含 `startup_working_dir`、`event_sink` 和按能力裁剪的宿主服务）、`Extension::stop()`（携带 `StopReason`）、`Extension::health()`（健康探测）、`Extension::on_config_changed()`（热更新配置）
+- **扩展运行时 API** — `Extension::start()` 接收 extension 级 `ExtensionStartContext`，提供配置、归属化路径、类型化 host client、事件、受管任务和取消信号；仅 session 可用的操作要等到带 session 归属的 handler 调用。`Extension::stop()` 接收 `StopReason`，`health()` 与 `on_config_changed()` 分别用于健康探测和配置热更新
 - **主动健康检查** — `ExtensionRunner::check_health()` 提供采样 API，宿主决定轮询策略
 - **启动阶段事件** — `bind_startup_event_channel()` 绑定进程级事件通道，扩展在 `start()` 阶段即可 emit 自定义事件
 

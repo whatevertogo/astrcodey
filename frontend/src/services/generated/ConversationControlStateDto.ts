@@ -5,7 +5,7 @@ import type { PhaseDto } from "./PhaseDto";
 /**
  * conversation 控制状态。
  */
-export type ConversationControlStateDto = { phase: PhaseDto, canSubmitPrompt: boolean, canRequestCompact: boolean, compactPending: boolean, compacting: boolean,
+export type ConversationControlStateDto = { phase: PhaseDto, canSubmitPrompt: boolean, canRequestCompact: boolean,
 /**
  * 活跃 turn ID，v1 snapshot 暂无。
  */

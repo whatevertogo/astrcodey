@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{PersistedSystemPrompt, SystemPromptSource, envelope::ToolOutputStream};
 use crate::{
     compaction::CompactStrategy,
-    llm::{LlmMessage, LlmTokenUsage},
+    llm::{LlmTokenUsage, TranscriptMessage},
     message_attachment::MessageAttachment,
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
@@ -38,12 +38,29 @@ pub struct SessionStarted {
     pub initial_system_prompt: PersistedSystemPrompt,
 }
 
-/// 扩展事件的公共事实；是否持久化由外层事件类型表达。
+/// Host-attributed audience for a custom event.
+///
+/// Persistence remains encoded by the outer durable/live payload type. The audience is carried
+/// with the event so transport fan-out never has to infer product semantics from an extension id
+/// or event name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventAudience {
+    Session,
+    Global,
+}
+
+/// 自定义事件的公共事实；是否持久化由外层事件类型表达。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtensionEventData {
+#[serde(deny_unknown_fields)]
+pub struct CustomEventData {
     pub extension_id: String,
     pub event_type: String,
     pub schema_version: u32,
+    pub audience: CustomEventAudience,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
+    pub cascade_depth: u8,
     pub payload: serde_json::Value,
 }
 
@@ -80,7 +97,6 @@ pub enum DurableEventPayload {
         fingerprint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         extra_system_prompt: Option<String>,
-        #[serde(skip_serializing_if = "SystemPromptSource::is_native")]
         source: SystemPromptSource,
     },
     AgentSessionSpawned {
@@ -89,7 +105,8 @@ pub enum DurableEventPayload {
         task: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_selection: Option<SessionToolSelection>,
-        tool_call_id: ToolCallId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<ToolCallId>,
     },
     AgentSessionCompleted {
         child_session_id: SessionId,
@@ -105,6 +122,16 @@ pub enum DurableEventPayload {
         child_session_id: SessionId,
     },
     TurnStarted,
+    StepStarted {
+        step_index: u32,
+        attempt: u32,
+    },
+    StepCompleted {
+        step_index: u32,
+        attempt: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<String>,
+    },
     TurnCompleted {
         finish_reason: String,
     },
@@ -116,8 +143,8 @@ pub enum DurableEventPayload {
         message_id: MessageId,
         text: String,
         attachments: Vec<MessageAttachment>,
-        /// 对应 `UserInputAccepted` 的 durable seq；直接启动或 turn 中注入时为空。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// 对应 `UserInputAccepted` 的 durable seq；仅 turn 启动直接提交时为空。
+        #[serde(skip_serializing_if = "Option::is_none")]
         accepted_seq: Option<u64>,
     },
     RecapGenerated {
@@ -168,7 +195,6 @@ pub enum DurableEventPayload {
         call_id: ToolCallId,
         tool_name: String,
         error: String,
-        #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         metadata: std::collections::BTreeMap<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
@@ -189,7 +215,10 @@ pub enum DurableEventPayload {
     /// 当前 projection 仍位于 `source_seq` 时，原子替换 provider transcript。
     TranscriptRewritten {
         source_seq: u64,
-        messages: Vec<LlmMessage>,
+        /// 被替换前缀（system prompt + provider 视角消息）的 `transcript_prefix_fingerprint`；
+        /// 提交时必须与 projection 重算结果一致。
+        source_fingerprint: String,
+        messages: Vec<TranscriptMessage>,
         reason: TranscriptRewriteReason,
     },
     SessionForked {
@@ -197,14 +226,14 @@ pub enum DurableEventPayload {
         source_cursor: Cursor,
         #[serde(skip_serializing_if = "Option::is_none")]
         first_user_message: Option<String>,
-        messages: Vec<LlmMessage>,
+        messages: Vec<TranscriptMessage>,
     },
     ErrorOccurred {
         code: i32,
         message: String,
         recoverable: bool,
     },
-    ExtensionEvent(ExtensionEventData),
+    CustomEvent(CustomEventData),
 }
 
 /// 只在进程内事件流和客户端通知中存在的瞬态事实。
@@ -266,5 +295,73 @@ pub enum LiveEventPayload {
         message: String,
         recoverable: bool,
     },
-    ExtensionEvent(ExtensionEventData),
+    CustomEvent(CustomEventData),
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_payload_uses_canonical_tags_and_requires_complete_facts() {
+        let payload = DurableEventPayload::CustomEvent(CustomEventData {
+            extension_id: "ext".into(),
+            event_type: "thing".into(),
+            schema_version: 1,
+            audience: CustomEventAudience::Session,
+            causation_id: None,
+            cascade_depth: 0,
+            payload: serde_json::json!({}),
+        });
+        let canonical = serde_json::to_value(&payload).unwrap();
+        assert_eq!(canonical["type"], "custom_event");
+        assert_eq!(canonical["audience"], "session");
+        assert!(canonical.get("causation_id").is_none());
+        assert_eq!(canonical["cascade_depth"], 0);
+        assert_eq!(
+            serde_json::from_value::<DurableEventPayload>(canonical.clone()).unwrap(),
+            payload
+        );
+
+        let mut incomplete_custom_event = canonical.clone();
+        incomplete_custom_event
+            .as_object_mut()
+            .unwrap()
+            .remove("cascade_depth");
+        assert!(serde_json::from_value::<DurableEventPayload>(incomplete_custom_event).is_err());
+
+        let mut incomplete_custom_event = canonical;
+        incomplete_custom_event
+            .as_object_mut()
+            .unwrap()
+            .remove("audience");
+        assert!(serde_json::from_value::<DurableEventPayload>(incomplete_custom_event).is_err());
+
+        let mut configured = serde_json::json!({
+            "type": "system_prompt_configured",
+            "text": "hi",
+            "fingerprint": "fp",
+            "source": "native"
+        });
+        assert!(serde_json::from_value::<DurableEventPayload>(configured.clone()).is_ok());
+        configured.as_object_mut().unwrap().remove("source");
+        assert!(serde_json::from_value::<DurableEventPayload>(configured).is_err());
+
+        let mut failed = serde_json::json!({
+            "type": "tool_call_failed",
+            "call_id": "c1",
+            "tool_name": "t",
+            "error": "boom",
+            "metadata": {},
+            "arguments": "{}"
+        });
+        let decoded = serde_json::from_value::<DurableEventPayload>(failed.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["metadata"],
+            serde_json::json!({})
+        );
+        failed.as_object_mut().unwrap().remove("metadata");
+        assert!(serde_json::from_value::<DurableEventPayload>(failed).is_err());
+    }
 }

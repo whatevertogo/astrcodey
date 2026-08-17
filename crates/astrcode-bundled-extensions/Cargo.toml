@@ -6,8 +6,9 @@ license.workspace = true
 description = "First-party bundled extension registration"
 
 [features]
-default = ["agent-tools", "mcp", "skill", "todo-tool", "mode", "ask-user", "goal", "memory", "channels", "web-tools"]
+default = ["agent-tools", "coding", "mcp", "skill", "todo-tool", "mode", "ask-user", "goal", "memory", "channels", "web-tools", "session-commands"]
 agent-tools = ["dep:astrcode-extension-agent-tools"]
+coding = ["dep:astrcode-extension-coding"]
 mcp = ["dep:astrcode-extension-mcp"]
 skill = ["dep:astrcode-extension-skill"]
 todo-tool = ["dep:astrcode-extension-todo-tool"]
@@ -17,12 +18,14 @@ goal = ["dep:astrcode-extension-goal"]
 memory = ["dep:astrcode-extension-memory"]
 channels = ["dep:astrcode-extension-channels"]
 web-tools = ["dep:astrcode-extension-web-tools"]
+session-commands = ["dep:astrcode-extension-session-commands"]
 
 [dependencies]
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 async-trait = { workspace = true }
 astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", optional = true, default-features = false }
+astrcode-extension-coding = { path = "../astrcode-extension-coding", optional = true, default-features = false }
 astrcode-extension-mcp = { path = "../astrcode-extension-mcp", optional = true, default-features = false }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", optional = true, default-features = false }
 astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", optional = true, default-features = false }
@@ -32,3 +35,5 @@ astrcode-extension-goal = { path = "../astrcode-extension-goal", optional = true
 astrcode-extension-memory = { path = "../astrcode-extension-memory", optional = true, default-features = false }
 astrcode-extension-channels = { path = "../astrcode-extension-channels", optional = true, default-features = false }
 astrcode-extension-web-tools = { path = "../astrcode-extension-web-tools", optional = true, default-features = false }
+astrcode-extension-session-commands = { path = "../astrcode-extension-session-commands", optional = true, default-features = false }
+serde_json = { workspace = true }

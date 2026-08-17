@@ -64,10 +64,10 @@ fn compile_openai_tool_schema(schema: &mut Value) {
     // OpenAI forbids a root `anyOf`. First-party executors remain authoritative for cross-field
     // invariants (for example edit's single-edit versus batch-edit shape), while the compiled
     // schema still constrains every field name and value type.
-    if schema.get("anyOf").is_some_and(is_required_only_root_union) {
-        if let Some(object) = schema.as_object_mut() {
-            object.remove("anyOf");
-        }
+    if schema.get("anyOf").is_some_and(is_required_only_root_union)
+        && let Some(object) = schema.as_object_mut()
+    {
+        object.remove("anyOf");
     }
     compile_openai_schema(schema);
 }
@@ -97,7 +97,7 @@ fn prepare_anthropic_tools(tools: &mut [ToolDefinition]) -> Result<(), LlmError>
             let mut candidate = tool.clone();
             compile_anthropic_schema(
                 &mut candidate.parameters,
-                matches!(candidate.origin, ToolOrigin::Builtin | ToolOrigin::Bundled),
+                candidate.origin == ToolOrigin::Bundled,
             );
             (index, candidate)
         })
@@ -239,10 +239,10 @@ fn for_each_child_schema_mut(
             }
         }
     }
-    if let Some(items) = schema.get_mut("items") {
-        if !visit(items) {
-            return false;
-        }
+    if let Some(items) = schema.get_mut("items")
+        && !visit(items)
+    {
+        return false;
     }
     for keyword in CHILD_SCHEMA_KEYWORDS {
         if let Some(Value::Array(children)) = schema.get_mut(keyword) {
@@ -283,10 +283,8 @@ fn visit_child_schemas_mut_count(
 
 fn tool_origin_priority(origin: ToolOrigin) -> u8 {
     match origin {
-        ToolOrigin::Builtin => 0,
-        ToolOrigin::Bundled => 1,
-        ToolOrigin::Extension => 2,
-        ToolOrigin::Sdk => 3,
+        ToolOrigin::Bundled => 0,
+        ToolOrigin::Extension => 1,
     }
 }
 
@@ -381,10 +379,10 @@ fn make_nullable(schema: &mut Value) {
         wrap_nullable(schema);
         return;
     }
-    if let Some(Value::Array(values)) = object.get_mut("enum") {
-        if !values.iter().any(Value::is_null) {
-            values.push(Value::Null);
-        }
+    if let Some(Value::Array(values)) = object.get_mut("enum")
+        && !values.iter().any(Value::is_null)
+    {
+        values.push(Value::Null);
     }
     if let Some(schema_type) = object.get_mut("type") {
         match schema_type {
@@ -815,14 +813,14 @@ fn validate_anthropic_schema(
         }
     }
 
-    if let Some(min_items) = object.get("minItems") {
-        if !matches!(min_items.as_u64(), Some(0 | 1)) {
-            return Err(schema_error(
-                tool,
-                &child_path(path, "minItems"),
-                "Anthropic strict tool schemas only support `minItems` values of 0 or 1",
-            ));
-        }
+    if let Some(min_items) = object.get("minItems")
+        && !matches!(min_items.as_u64(), Some(0 | 1))
+    {
+        return Err(schema_error(
+            tool,
+            &child_path(path, "minItems"),
+            "Anthropic strict tool schemas only support `minItems` values of 0 or 1",
+        ));
     }
 
     if let Some(values) = schema_enum_values(tool, object, path, "Anthropic")? {
@@ -1053,30 +1051,30 @@ fn detect_recursive_refs_from(
         return Ok(());
     };
 
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(pointer) = reference.strip_prefix('#') {
-            match ref_states.get(pointer) {
-                Some(RefVisitState::Visiting) => {
-                    return Err(schema_error(
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+        && let Some(pointer) = reference.strip_prefix('#')
+    {
+        match ref_states.get(pointer) {
+            Some(RefVisitState::Visiting) => {
+                return Err(schema_error(
+                    tool,
+                    &child_path(path, "$ref"),
+                    "Anthropic strict tool schemas do not support recursive schemas",
+                ));
+            },
+            Some(RefVisitState::Done) => {},
+            None => {
+                let target = root.pointer(pointer).ok_or_else(|| {
+                    schema_error(
                         tool,
                         &child_path(path, "$ref"),
-                        "Anthropic strict tool schemas do not support recursive schemas",
-                    ));
-                },
-                Some(RefVisitState::Done) => {},
-                None => {
-                    let target = root.pointer(pointer).ok_or_else(|| {
-                        schema_error(
-                            tool,
-                            &child_path(path, "$ref"),
-                            &format!("local `$ref` target `{reference}` does not exist"),
-                        )
-                    })?;
-                    ref_states.insert(pointer.to_string(), RefVisitState::Visiting);
-                    detect_recursive_refs_from(tool, root, target, reference, ref_states)?;
-                    ref_states.insert(pointer.to_string(), RefVisitState::Done);
-                },
-            }
+                        &format!("local `$ref` target `{reference}` does not exist"),
+                    )
+                })?;
+                ref_states.insert(pointer.to_string(), RefVisitState::Visiting);
+                detect_recursive_refs_from(tool, root, target, reference, ref_states)?;
+                ref_states.insert(pointer.to_string(), RefVisitState::Done);
+            },
         }
     }
 
@@ -1214,9 +1212,9 @@ fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::tool::ToolOrigin;
     use astrcode_extension_sdk::extension::Registrar;
     use serde_json::json;
 
@@ -1228,8 +1226,7 @@ mod tests {
             description: String::new(),
             parameters,
             strict: true,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Parallel,
+            origin: ToolOrigin::Bundled,
         }
     }
 
@@ -1757,7 +1754,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        capped_tools[0].origin = ToolOrigin::Bundled;
+        capped_tools[0].origin = ToolOrigin::Extension;
         prepare_strict_tools(&mut capped_tools, true, StrictToolProvider::Anthropic)
             .expect("Anthropic overflow should degrade deterministically");
         assert!(!capped_tools[0].strict);
@@ -1803,25 +1800,26 @@ mod tests {
 
     #[test]
     fn compiles_all_first_party_non_mcp_tool_schemas() {
-        let mut definitions = astrcode_tools::registry::builtin_tools(PathBuf::from("."), 30)
-            .into_iter()
-            .map(|tool| tool.definition())
-            .collect::<Vec<_>>();
+        let mut definitions = Vec::new();
         let states = astrcode_bundled_extensions::bundled_extension_ids()
             .into_iter()
             .map(|id| (id.to_string(), true))
             .collect::<BTreeMap<_, _>>();
         for extension in astrcode_bundled_extensions::bundled_extensions(&states) {
-            if extension.id() == "astrcode-mcp" {
+            let manifest = extension.manifest();
+            if manifest.id() == "astrcode-mcp" {
                 continue;
             }
             let mut registrar = Registrar::new();
             extension.register(&mut registrar);
+            let (_, registrations) = registrar
+                .finish(manifest)
+                .expect("bundled extension registrations should match its manifest");
             definitions.extend(
-                registrar
+                registrations
                     .tools()
                     .iter()
-                    .map(|(definition, _)| definition.clone()),
+                    .map(|registration| registration.definition().clone()),
             );
         }
         let mut openai_definitions = definitions.clone();
@@ -1833,33 +1831,55 @@ mod tests {
                 .all(|definition| definition.strict)
         );
 
-        let mut anthropic_builtins = definitions
+        let mut anthropic_bundled = definitions
             .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Builtin)
+            .filter(|definition| definition.origin == ToolOrigin::Bundled)
             .cloned()
             .collect::<Vec<_>>();
-        for definition in &mut anthropic_builtins {
+        for definition in &mut anthropic_bundled {
             compile_anthropic_schema(&mut definition.parameters, true);
         }
-        let builtin_refs = anthropic_builtins.iter().collect::<Vec<_>>();
-        let builtin_stats = collect_anthropic_schema_stats(&builtin_refs)
-            .expect("compiled built-ins should be valid Anthropic schemas");
+        let bundled_refs = anthropic_bundled.iter().collect::<Vec<_>>();
+        let bundled_stats = collect_anthropic_schema_stats(&bundled_refs)
+            .expect("compiled bundled tools should be valid Anthropic schemas");
 
         prepare_strict_tools(&mut definitions, true, StrictToolProvider::Anthropic)
             .expect("all first-party schemas should compile or deterministically degrade");
-        let downgraded_builtins = definitions
+        let downgraded_bundled = definitions
             .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Builtin && !definition.strict)
+            .filter(|definition| definition.origin == ToolOrigin::Bundled && !definition.strict)
             .map(|definition| definition.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            downgraded_builtins,
-            ["terminal"],
-            "Anthropic's 24 optional + 16 union limits cannot fit all built-ins when their \
-             natural schema has optional={}, unions={}",
-            builtin_stats.optional_parameters,
-            builtin_stats.union_parameters
+        assert!(
+            !downgraded_bundled.is_empty(),
+            "Anthropic's strict aggregate limits should downgrade overflow from optional={}, \
+             unions={}",
+            bundled_stats.optional_parameters,
+            bundled_stats.union_parameters,
         );
+        let accepted = definitions
+            .iter()
+            .filter(|definition| definition.strict)
+            .collect::<Vec<_>>();
+        validate_anthropic_tools(&accepted)
+            .expect("the accepted first-party strict subset must satisfy aggregate limits");
+        for coding_tool in [
+            "read",
+            "read_tool_result",
+            "write",
+            "edit",
+            "patch",
+            "glob",
+            "grep",
+            "shell",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == coding_tool && definition.strict),
+                "bundled coding tool {coding_tool} should remain in the prioritized strict subset"
+            );
+        }
     }
 
     #[test]

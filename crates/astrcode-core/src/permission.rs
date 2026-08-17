@@ -87,10 +87,10 @@ pub struct PermissionRule {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ApprovalMode;
 
     #[test]
-    fn approval_mode_from_str() {
+    fn approval_mode_parsing_is_case_insensitive_and_closed() {
         assert_eq!("yolo".parse(), Ok(ApprovalMode::Yolo));
         assert_eq!("MANUAL".parse(), Ok(ApprovalMode::Manual));
         assert!("unknown".parse::<ApprovalMode>().is_err());

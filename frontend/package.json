@@ -23,12 +23,14 @@
     "test:contract": "esbuild src/services/protocol.ts --bundle --format=esm --outfile=../target/frontend-contract/services/protocol.js && node scripts/protocol-contract.test.mjs",
     "test:dev-server": "node scripts/dev-server.test.mjs",
     "test:assistant-run": "esbuild src/components/Chat/assistantRunModel.ts src/components/Chat/tools/askUser.ts --bundle --format=esm --outdir=../target/frontend-assistant-run && node scripts/assistant-run-model.test.mjs",
+    "test:conversation-history": "esbuild src/store/conversationHistory.ts --bundle --format=esm --outdir=../target/frontend-conversation-history && node scripts/conversation-history.test.mjs",
     "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts src/components/Chat/tools/helpers.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
+    "test:tool-renderers": "esbuild scripts/tool-renderers.test.mjs --bundle --platform=node --format=cjs --outfile=../target/frontend-tool-renderers/test.cjs && node ../target/frontend-tool-renderers/test.cjs",
     "test:delta": "esbuild src/store/delta/coalesce.ts src/store/delta/applyDelta.ts src/store/delta/effects.ts src/store/delta/frameBuffer.ts --bundle --platform=node --format=esm --outdir=../target/frontend-delta && node scripts/delta-coalesce.test.mjs",
     "profile:conversation": "esbuild src/store/delta/applyDelta.ts --bundle --platform=node --format=esm --outfile=../target/frontend-delta/applyDelta.js && node scripts/conversation-performance.mjs",
     "test:session-stream": "esbuild src/store/sessionStreamController.ts src/store/pendingAskUserPoller.ts --bundle --platform=node --format=esm --outdir=../target/frontend-session-stream && node scripts/session-stream-controller.test.mjs",
     "test:settings-model-options": "esbuild src/components/Settings/settingsSupport.ts --bundle --platform=node --format=esm --outfile=../target/frontend-settings-model-options/settingsSupport.js && node scripts/settings-model-options.test.mjs",
-    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta && npm run test:session-stream && npm run test:settings-model-options"
+    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:conversation-history && npm run test:streaming-cache && npm run test:tool-renderers && npm run test:delta && npm run test:session-stream && npm run test:settings-model-options"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.8",

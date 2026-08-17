@@ -7,14 +7,14 @@ description = "Extension/hook system: lifecycle events, hook modes, extension lo
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-context = { path = "../astrcode-context" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
-tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 arc-swap = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -23,9 +23,12 @@ tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 futures-util = { workspace = true }
 globset = { workspace = true }
+ignore = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
 sha2 = { workspace = true }
+similar = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -33,7 +36,12 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 process-wrap = { workspace = true, features = ["job-object", "kill-on-drop", "tokio1"] }
 
+[features]
+testing = []
+
 [dev-dependencies]
+# 自引用让 tests/ 下的集成测试看到 `testing` feature gate 的 API(feature unification)。
+astrcode-extensions = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
 tempfile = { workspace = true }

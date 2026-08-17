@@ -24,23 +24,25 @@ mod plan;
 mod post_compact;
 mod prompt;
 
-pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
-pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
+use parse::{CompactParseError, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
-pub use post_compact::{
-    PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
-    recent_read_paths,
-};
+pub use post_compact::append_compact_retained_context;
 
-pub use crate::{
+use crate::{
     COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
-    CompactSummaryRenderOptions, is_compact_summary_message, is_compact_summary_text,
-    is_prompt_too_long_message, is_synthetic_context_message,
+    CompactSummaryRenderOptions, is_prompt_too_long_message, is_synthetic_context_message,
 };
 
 pub struct CompactExecution {
     pub result: CompactResult,
-    pub llm_api_failed: bool,
+    pub llm_attempt: LlmCompactAttempt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmCompactAttempt {
+    NotAttempted,
+    Succeeded,
+    Failed,
 }
 
 struct PreparedCompactParts {
@@ -86,7 +88,7 @@ fn compact_messages_with_render_options_and_keep(
 }
 
 /// 使用调用方提供的文本请求函数生成 compact summary。
-pub async fn compact_messages_with_request<F, Fut>(
+async fn compact_messages_with_request<F, Fut>(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
     settings: &ContextSettings,
@@ -189,11 +191,15 @@ where
     {
         Ok(result) => Ok(CompactExecution {
             result,
-            llm_api_failed: false,
+            llm_attempt: LlmCompactAttempt::Succeeded,
         }),
         Err(CompactError::Skip(reason)) => Err(reason),
         Err(error) => {
-            let llm_api_failed = matches!(error, CompactError::Llm(_));
+            let llm_attempt = if matches!(error, CompactError::Llm(_)) {
+                LlmCompactAttempt::Failed
+            } else {
+                LlmCompactAttempt::Succeeded
+            };
             tracing::warn!(%error, "LLM compact failed, falling back to deterministic");
             compact_messages_with_render_options_and_keep(
                 messages,
@@ -203,7 +209,7 @@ where
             )
             .map(|result| CompactExecution {
                 result,
-                llm_api_failed,
+                llm_attempt,
             })
         },
     }
@@ -224,7 +230,7 @@ pub fn compact_messages_deterministic(
     )
     .map(|result| CompactExecution {
         result,
-        llm_api_failed: true,
+        llm_attempt: LlmCompactAttempt::NotAttempted,
     })
 }
 
@@ -235,14 +241,10 @@ fn should_retry_prompt_too_long(error: &CompactError) -> bool {
     ) || is_prompt_too_long_message(&error.to_string())
 }
 
-pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
-    assemble::parse_compact_summary_message(content)
-}
-
 /// 是否可在 `split_after` 所指的 message 之后切分压缩边界（Kimi `canSplitAfter` 语义）。
 ///
 /// `keep_start` 为保留区首条消息下标时，应对 `split_after = keep_start - 1` 调用本函数。
-pub fn can_split_after(messages: &[LlmMessage], split_after: usize) -> bool {
+fn can_split_after(messages: &[LlmMessage], split_after: usize) -> bool {
     let Some(message) = messages.get(split_after) else {
         return true;
     };
@@ -548,6 +550,76 @@ The summary should preserve the compact contract and omit this scratchpad later.
     }
 
     #[test]
+    fn summary_formatting_and_message_round_trip_strip_scratchpad_markup() {
+        let formatted = assemble::format_compact_summary(
+            r#"
+<analysis>
+scratchpad that should not survive
+</analysis>
+
+<summary>
+1. Primary Request and Intent:
+   migrate context-window
+</summary>
+"#,
+        );
+        assert_eq!(
+            formatted,
+            "Summary:\n1. Primary Request and Intent:\n   migrate context-window"
+        );
+        assert!(!formatted.contains("<analysis>"));
+        assert!(!formatted.contains("<summary>"));
+
+        let message = assemble::compact_summary_message_text(
+            "1. Primary Request and Intent:\n   keep user intent",
+            &CompactSummaryRenderOptions {
+                transcript_path: Some("C:\\Users\\18794\\.astrcode\\compact.jsonl".into()),
+                custom_instructions: Vec::new(),
+            },
+        );
+        assert!(message.starts_with("<compact_summary>\nThis session is being continued"));
+        assert!(message.contains("Resume directly: do not acknowledge this summary"));
+        assert!(message.contains("read the full transcript at C:\\Users\\18794"));
+        assert_eq!(
+            assemble::parse_compact_summary_message(&message)
+                .unwrap()
+                .summary,
+            "1. Primary Request and Intent:\n   keep user intent"
+        );
+    }
+
+    #[test]
+    fn compact_prompts_keep_the_required_analysis_and_summary_contract() {
+        let settings = ContextSettings::default();
+        let prompt = prompt::render_compact_contract(
+            Some("system prompt"),
+            &plan::CompactPromptMode::Fresh,
+            &settings,
+            None,
+            &[],
+        );
+        for section in parse::REQUIRED_SUMMARY_SECTIONS {
+            assert!(prompt.contains(section), "missing {section}");
+        }
+        assert!(prompt.contains("<summary>"));
+        assert!(prompt.contains("<analysis>"));
+        assert!(prompt.contains("scratchpad"));
+        assert!(!prompt.contains("<recent_user_context_digest>"));
+
+        let repair = prompt::render_compact_contract(
+            None,
+            &plan::CompactPromptMode::Fresh,
+            &settings,
+            Some("missing section"),
+            &[],
+        );
+        assert!(
+            repair.contains("Return one <analysis> scratchpad block followed by the <summary>")
+        );
+        assert!(!repair.contains("Return the <summary> block exactly"));
+    }
+
+    #[test]
     fn compact_keeps_recent_user_turns_and_builds_context_message() {
         let messages = vec![
             LlmMessage::user("old one"),
@@ -562,7 +634,9 @@ The summary should preserve the compact contract and omit this scratchpad later.
         assert_eq!(result.messages_removed, 4);
         assert_eq!(result.retained_messages.len(), 1);
         assert_eq!(visible_message_text(&result.retained_messages[0]), "recent");
-        assert!(is_compact_summary_message(&result.summary_messages[0]));
+        assert!(crate::is_compact_summary_message(
+            &result.summary_messages[0]
+        ));
         assert!(visible_message_text(&result.summary_messages[0]).contains("Summary:\n"));
     }
 
@@ -670,51 +744,6 @@ The summary should preserve the compact contract and omit this scratchpad later.
     }
 
     #[test]
-    fn format_compact_summary_strips_analysis_and_summary_xml() {
-        let raw = r#"
-<analysis>
-scratchpad that should not survive
-</analysis>
-
-<summary>
-1. Primary Request and Intent:
-   migrate context-window
-</summary>
-"#;
-
-        let formatted = format_compact_summary(raw);
-
-        assert_eq!(
-            formatted,
-            "Summary:\n1. Primary Request and Intent:\n   migrate context-window"
-        );
-        assert!(!formatted.contains("<analysis>"));
-        assert!(!formatted.contains("<summary>"));
-    }
-
-    #[test]
-    fn compact_summary_message_adds_fixed_context_and_parses_model_summary() {
-        let message = assemble::compact_summary_message_text(
-            "1. Primary Request and Intent:\n   keep user intent",
-            &CompactSummaryRenderOptions {
-                transcript_path: Some("C:\\Users\\18794\\.astrcode\\compact.jsonl".into()),
-                custom_instructions: Vec::new(),
-            },
-        );
-
-        assert!(message.starts_with("<compact_summary>\nThis session is being continued"));
-        assert!(message.contains("Resume directly: do not acknowledge this summary"));
-        assert!(message.contains("Summary:\n1. Primary Request and Intent:"));
-        assert!(message.contains("read the full transcript at C:\\Users\\18794"));
-
-        let parsed = parse_compact_summary_message(&message).unwrap();
-        assert_eq!(
-            parsed.summary,
-            "1. Primary Request and Intent:\n   keep user intent"
-        );
-    }
-
-    #[test]
     fn parse_compact_output_accepts_required_nine_section_summary() {
         let parsed = parse_compact_output(valid_compact_summary()).unwrap();
 
@@ -739,43 +768,6 @@ scratchpad that should not survive
                 .to_string()
                 .contains("compact summary missing required section title")
         );
-    }
-
-    #[test]
-    fn compact_template_contains_required_nine_section_contract() {
-        let settings = ContextSettings::default();
-        let prompt = prompt::render_compact_contract(
-            Some("system prompt"),
-            &plan::CompactPromptMode::Fresh,
-            &settings,
-            None,
-            &[],
-        );
-
-        for section in parse::REQUIRED_SUMMARY_SECTIONS {
-            assert!(prompt.contains(section), "missing {section}");
-        }
-        assert!(prompt.contains("<summary>"));
-        assert!(prompt.contains("<analysis>"));
-        assert!(prompt.contains("scratchpad"));
-        assert!(!prompt.contains("<recent_user_context_digest>"));
-    }
-
-    #[test]
-    fn compact_repair_prompt_preserves_analysis_then_summary_contract() {
-        let settings = ContextSettings::default();
-        let prompt = prompt::render_compact_contract(
-            None,
-            &plan::CompactPromptMode::Fresh,
-            &settings,
-            Some("missing section"),
-            &[],
-        );
-
-        assert!(
-            prompt.contains("Return one <analysis> scratchpad block followed by the <summary>")
-        );
-        assert!(!prompt.contains("Return the <summary> block exactly"));
     }
 
     #[tokio::test]

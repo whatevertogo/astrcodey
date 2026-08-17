@@ -10,7 +10,6 @@ import { isRegisteredSlashCommand } from '../lib/keybindings'
 import {
   commandNoteBlock,
   isCompactCommand,
-  resolvePhase,
   withTimeout,
 } from './delta/blockHelpers'
 import { startSessionStream } from './stream'
@@ -18,12 +17,20 @@ import {
   PendingAskUserPoller,
   type PendingAskUserPollScheduler,
 } from './pendingAskUserPoller'
-import { canInjectMidTurn, isExecutionPhase } from './phaseHelpers'
+import {
+  canInjectMidTurn,
+  effectiveConversationPhase,
+  isExecutionPhase,
+} from './phaseHelpers'
 import {
   computeInitialProjectFolderOrder,
   syncProjectFolderOrder,
 } from '../components/Sidebar/projectFolderOrder'
 import type { AppState } from './types'
+import {
+  buildConversationView,
+  prependTimelinePage,
+} from './conversationHistory'
 
 let commandRefreshGeneration = 0
 let sessionSwitchGeneration = 0
@@ -38,29 +45,36 @@ const pendingAskUserPollScheduler: PendingAskUserPollScheduler = {
   cancel: (timer) => window.clearTimeout(timer as number),
 }
 
+// ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
+const DEFAULT_SESSION_STATE = {
+  activeSessionId: null,
+  activeSessionTitle: null,
+  blocks: [],
+  transientBlockOwners: {},
+  control: null,
+  cursor: null,
+  timelineOlderCursor: null,
+  timelineHasOlder: false,
+  timelineLoading: false,
+  timelinePageBlockIds: [],
+  timelineDetachedFromLatest: false,
+  compactSubmitting: false,
+  sessionStream: null,
+  sessionStreamStatus: 'disconnected',
+  sessionStreamError: null,
+  workingDir: null,
+  agentSessions: [],
+  pendingMessages: [],
+  composerDeliveryMode: 'queued',
+  slashCommands: [],
+  keybindings: [],
+  statusItems: {},
+  statusItemRevisions: {},
+  transientHint: null,
+} as const satisfies Partial<AppState>
+
 function resetSessionView(): Partial<AppState> {
-  return {
-    activeSessionId: null,
-    activeSessionTitle: null,
-    blocks: [],
-    control: null,
-    cursor: null,
-    phase: 'idle',
-    compactSubmitting: false,
-    sessionStream: null,
-    sessionStreamStatus: 'disconnected',
-    sessionStreamError: null,
-    workingDir: null,
-    agentSessions: [],
-    pendingMessages: [],
-    // ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
-    composerDeliveryMode: 'queued',
-    slashCommands: [],
-    keybindings: [],
-    statusItems: {},
-    statusItemRevisions: {},
-    transientHint: null,
-  }
+  return { ...DEFAULT_SESSION_STATE }
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -68,32 +82,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   connectionStatus: 'disconnected',
   connectionError: null,
   sessions: [],
-  activeSessionId: null,
-  activeSessionTitle: null,
-  workingDir: null,
-  blocks: [],
-  control: null,
-  cursor: null,
-  phase: 'idle',
-  compactSubmitting: false,
-  sessionStream: null,
-  sessionStreamStatus: 'disconnected',
-  sessionStreamError: null,
+  ...DEFAULT_SESSION_STATE,
   modelRefreshKey: 0,
-  agentSessions: [],
-  statusItems: {},
-  statusItemRevisions: {},
-  keybindings: [],
-  slashCommands: [],
   extensions: [],
-  transientHint: null,
-  pendingMessages: [],
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
   pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   askUserExtensionAvailable: null,
-  composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
   initServer: async () => {
@@ -105,11 +101,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         const { invoke } = await import('@tauri-apps/api/core')
         const result = await withTimeout(
-          invoke<{ port: number; token?: string }>('start_server'),
+          invoke<{ port: number }>('start_server'),
           15_000,
           '启动 AstrCode 服务超时，请关闭残留 astrcode-http-server 进程后重试'
         )
-        api.setServerPort(result.port, result.token)
+        api.setServerPort(result.port)
         set({ serverPort: result.port })
       } catch (err) {
         set({
@@ -120,12 +116,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     } else {
       api.initBaseUrl()
-      const envToken = (
-        import.meta as unknown as { env: Record<string, string> }
-      ).env?.VITE_AUTH_TOKEN
-      if (envToken) {
-        api.setAuthToken(envToken)
-      }
     }
 
     set({ connectionStatus: 'connected' })
@@ -236,7 +226,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
 
     try {
-      const snapshot = await api.getConversation(sessionId)
+      const [conversationState, timelinePage] = await Promise.all([
+        api.getConversationState(sessionId),
+        api.getConversationItems(sessionId),
+      ])
       if (
         get().activeSessionId !== sessionId ||
         switchGeneration !== sessionSwitchGeneration
@@ -246,22 +239,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const sessions = get().sessions
       const sessionItem = sessions.find((s) => s.sessionId === sessionId)
 
+      const view = buildConversationView(conversationState, timelinePage)
       set({
-        blocks: snapshot.blocks,
-        control: snapshot.control,
-        cursor: snapshot.cursor.value,
-        phase: resolvePhase(snapshot.control, false),
-        activeSessionTitle: snapshot.sessionTitle,
+        ...view,
         workingDir: sessionItem?.workingDir ?? null,
-        agentSessions: snapshot.agentSessions ?? [],
       })
 
-      const sessionStream = startSessionStream(
-        sessionId,
-        snapshot.cursor.value,
-        get,
-        set
-      )
+      const sessionStream = startSessionStream(sessionId, view.cursor, get, set)
       if (
         get().activeSessionId !== sessionId ||
         switchGeneration !== sessionSwitchGeneration
@@ -295,7 +279,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const refreshGeneration = ++conversationRefreshGeneration
 
     try {
-      const snapshot = await api.getConversation(activeSessionId)
+      const [conversationState, timelinePage] = await Promise.all([
+        api.getConversationState(activeSessionId),
+        api.getConversationItems(activeSessionId),
+      ])
       if (
         get().activeSessionId !== activeSessionId ||
         switchGeneration !== sessionSwitchGeneration ||
@@ -303,15 +290,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       ) {
         return null
       }
-      set({
-        blocks: snapshot.blocks,
-        control: snapshot.control,
-        cursor: snapshot.cursor.value,
-        phase: resolvePhase(snapshot.control, get().compactSubmitting),
-        activeSessionTitle: snapshot.sessionTitle,
-        agentSessions: snapshot.agentSessions ?? [],
-      })
-      return snapshot.cursor.value
+      const view = buildConversationView(conversationState, timelinePage)
+      set(view)
+      return view.cursor
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
       if (
@@ -326,6 +307,91 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       return null
     }
+  },
+
+  loadOlderConversationItems: async () => {
+    const current = get()
+    if (
+      !current.activeSessionId ||
+      !current.timelineHasOlder ||
+      !current.timelineOlderCursor ||
+      current.timelineLoading
+    ) {
+      return
+    }
+    const sessionId = current.activeSessionId
+    const before = current.timelineOlderCursor
+    const switchGeneration = sessionSwitchGeneration
+    set({ timelineLoading: true })
+
+    try {
+      const page = await api.getConversationItems(sessionId, before)
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
+      set((state) => {
+        const timeline = prependTimelinePage(
+          {
+            blocks: state.blocks,
+            pageBlockIds: state.timelinePageBlockIds,
+            detachedFromLatest: state.timelineDetachedFromLatest,
+          },
+          page.items
+        )
+        return {
+          blocks: timeline.blocks,
+          transientBlockOwners: timeline.detachedFromLatest
+            ? {}
+            : state.transientBlockOwners,
+          timelineOlderCursor: page.olderCursor?.value ?? null,
+          timelineHasOlder: page.hasOlder,
+          timelineLoading: false,
+          timelinePageBlockIds: timeline.pageBlockIds,
+          timelineDetachedFromLatest: timeline.detachedFromLatest,
+        }
+      })
+    } catch (err) {
+      console.error('Failed to load older conversation items:', err)
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
+      set({
+        timelineLoading: false,
+        transientHint:
+          err instanceof Error ? err.message : '加载更早会话历史失败',
+      })
+    }
+  },
+
+  returnToLatestConversation: async () => {
+    const current = get()
+    const sessionId = current.activeSessionId
+    if (!sessionId) return
+
+    const fallbackCursor = current.cursor
+    current.sessionStream?.stop()
+    set({ sessionStream: null, sessionStreamStatus: 'connecting' })
+
+    const snapshotCursor = await get().refreshConversationSnapshot()
+    if (get().activeSessionId !== sessionId) return
+    const resumeCursor = snapshotCursor ?? fallbackCursor
+    if (resumeCursor == null) {
+      set({ sessionStreamStatus: 'degraded' })
+      return
+    }
+
+    const sessionStream = startSessionStream(sessionId, resumeCursor, get, set)
+    if (get().activeSessionId !== sessionId) {
+      sessionStream.stop()
+      return
+    }
+    set({ sessionStream })
   },
 
   refreshPendingAskUserQuestions: async () => {
@@ -490,10 +556,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const compactCommand = isCompactCommand(text)
     if (compactCommand) {
-      set({ compactSubmitting: true, phase: 'compacting' })
+      set({ compactSubmitting: true })
     }
 
-    const busy = isExecutionPhase(state.phase, state.compactSubmitting)
+    const busy = isExecutionPhase(
+      effectiveConversationPhase(state.control, state.compactSubmitting)
+    )
     const slashCommand = isRegisteredSlashCommand(text, state.slashCommands)
     const injectable = canInjectMidTurn(state.control, state.compactSubmitting)
 
@@ -540,13 +608,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       )
       if (response.kind === 'accepted') {
         set((current) => ({
-          phase: 'thinking',
           control: {
             phase: 'thinking',
             canSubmitPrompt: false,
             canRequestCompact: current.control?.canRequestCompact ?? false,
-            compactPending: current.control?.compactPending ?? false,
-            compacting: false,
             activeTurnId: response.turnId,
           },
         }))
@@ -554,7 +619,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (get().activeSessionId !== response.sessionId) {
           return true
         }
-        if (response.message === 'compact accepted') {
+        if (compactCommand) {
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
         } else if (
@@ -562,7 +627,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           response.message.trim() &&
           response.message !== 'command handled'
         ) {
-          // 内置命令（compact/model 等）走 HTTP；扩展斜杠命令走 SSE，避免重复展示。
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
           }))
@@ -577,11 +641,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return false
     } finally {
       if (compactCommand) {
-        const current = get()
-        set({
-          compactSubmitting: false,
-          phase: resolvePhase(current.control, false),
-        })
+        set({ compactSubmitting: false })
       }
     }
   },
@@ -655,9 +715,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   flushPendingQueued: async () => {
     const state = get()
-    const { activeSessionId, phase, compactSubmitting } = state
+    const { activeSessionId, compactSubmitting } = state
     if (!activeSessionId) return
-    if (isExecutionPhase(phase, compactSubmitting)) return
+    if (
+      isExecutionPhase(
+        effectiveConversationPhase(state.control, compactSubmitting)
+      )
+    ) {
+      return
+    }
 
     const normalized = state.pendingMessages.map((item) =>
       item.delivery === 'inject'

@@ -1,14 +1,16 @@
 //! astrcode-storage: Session persistence and config storage.
 //!
-//! JSONL event log, snapshots, and atomic config writes.
+//! JSONL event log and atomic config writes.
 
 pub mod config_store;
+mod durable_write;
 mod error;
-pub mod event_log;
+mod event_log;
 #[cfg(feature = "testing")]
 pub mod in_memory;
 pub mod session_repo;
-pub(crate) mod snapshot;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub(crate) mod tool_artifacts;
 mod traits;
 mod types;
@@ -19,7 +21,8 @@ mod test_support;
 pub use astrcode_core::tool::ToolResultArtifactSlice;
 pub use error::StorageError;
 pub use traits::{
-    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
-    ToolResultArtifactStore,
+    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
+    EventConsumerQuarantine, EventConsumerSkip, EventConsumerState, EventReader,
+    SessionEventJournal, SessionPathResolver, SessionReader, SessionStore, ToolResultArtifactStore,
 };
 pub use types::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactRef};

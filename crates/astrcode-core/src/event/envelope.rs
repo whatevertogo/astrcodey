@@ -5,7 +5,7 @@ use std::ops::Deref;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use super::payload::{DurableEventPayload, LiveEventPayload};
+use super::payload::{CustomEventData, DurableEventPayload, LiveEventPayload};
 use crate::types::*;
 
 /// 会话的执行阶段。
@@ -123,6 +123,15 @@ impl EventPayload {
         match self {
             Self::Durable(_) => None,
             Self::Live(payload) => Some(payload),
+        }
+    }
+
+    /// 返回 custom event 数据，统一 Durable/Live 两个变体的访问。
+    pub fn custom_event(&self) -> Option<&CustomEventData> {
+        match self {
+            Self::Durable(DurableEventPayload::CustomEvent(event))
+            | Self::Live(LiveEventPayload::CustomEvent(event)) => Some(event),
+            _ => None,
         }
     }
 }

@@ -1,22 +1,22 @@
 //! Session 跨实例恢复时 extra_system_prompt 不丢失。
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
 use astrcode_core::{
     event::{PersistedSystemPrompt, SystemPromptSource},
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
-        ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolOrigin,
+        SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
     },
-    types::{SessionId, ToolCallId, new_session_id},
+    types::{SessionId, ToolCallId, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext, PromptContributions,
+        ExtensionError, LifecycleEvent, PromptContributions,
+        internal::{RuntimeLifecycleContext, RuntimePromptBuildContext},
     },
     runtime_ports::{
         NoopRuntimePorts, PromptContributor, ToolCatalogProvider, ToolCatalogScope,
@@ -34,6 +34,11 @@ mod common;
 
 struct UnusedLlm;
 
+#[derive(Default)]
+struct RecordingToolsLlm {
+    requested_tools: Mutex<Vec<String>>,
+}
+
 struct FailingPromptContributor;
 
 struct ReadWriteToolCatalog;
@@ -44,10 +49,10 @@ struct RecordingLifecycleHooks(AtomicUsize);
 impl TurnHooks for RecordingLifecycleHooks {
     async fn emit_lifecycle(
         &self,
-        event: ExtensionEvent,
-        _ctx: LifecycleContext,
+        event: LifecycleEvent,
+        _ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
-        if event == ExtensionEvent::SessionStart {
+        if event == LifecycleEvent::SessionStart {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
@@ -79,9 +84,16 @@ impl Tool for NamedTool {
             description: String::new(),
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Sdk,
-            execution_mode: ExecutionMode::Sequential,
+            origin: ToolOrigin::Extension,
         }
+    }
+
+    async fn plan(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &astrcode_core::tool::ToolPlanningContext,
+    ) -> Result<astrcode_core::tool::access::ToolPlan, ToolError> {
+        Ok(astrcode_core::tool::access::ToolPlan::default())
     }
 
     async fn execute(
@@ -97,7 +109,7 @@ impl Tool for NamedTool {
 impl PromptContributor for FailingPromptContributor {
     async fn collect_prompt_contributions(
         &self,
-        _ctx: PromptBuildContext,
+        _ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         Err(ExtensionError::Internal(
             "intentional prompt failure".into(),
@@ -107,10 +119,9 @@ impl PromptContributor for FailingPromptContributor {
 
 #[async_trait::async_trait]
 impl LlmProvider for UnusedLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         unreachable!("test does not run a turn")
     }
@@ -119,6 +130,34 @@ impl LlmProvider for UnusedLlm {
         ModelLimits {
             max_input_tokens: 1024,
             max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RecordingToolsLlm {
+    async fn generate_request(
+        &self,
+        request: astrcode_core::llm::LlmRequest,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        *self.requested_tools.lock().unwrap() =
+            request.tools.into_iter().map(|tool| tool.name).collect();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LlmEvent::ContentDelta {
+            delta: "done".into(),
+        })
+        .unwrap();
+        tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        })
+        .unwrap();
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
+            max_output_tokens: 4096,
         }
     }
 }
@@ -177,8 +216,10 @@ async fn reopen_restores_native_extra_system_prompt() {
 #[tokio::test]
 async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    let caps = common::test_runtime_services_with_tool_catalog(llm, Arc::new(ReadWriteToolCatalog));
+    let llm = Arc::new(RecordingToolsLlm::default());
+    let provider: Arc<dyn LlmProvider> = llm.clone();
+    let caps =
+        common::test_runtime_services_with_tool_catalog(provider, Arc::new(ReadWriteToolCatalog));
     let parent_selection = SessionToolSelection::Only {
         names: vec!["write".into(), "read".into()],
     };
@@ -235,7 +276,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
                 except: vec!["read".into()],
             }),
             source_extension: None,
-            tool_call_id: ToolCallId::new("call-1"),
+            tool_call_id: Some(ToolCallId::new("call-1")),
         })
         .await
         .unwrap();
@@ -277,9 +318,20 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         })
         .await
         .unwrap();
-    let effective_registry = reopened.tool_registry_snapshot(".").await.unwrap();
+    let result = reopened
+        .submit("verify effective tools".into(), new_turn_id(), None)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     assert!(
-        effective_registry.list_definitions().is_empty(),
+        result.output.is_ok(),
+        "the reopened child turn should complete: {:?}",
+        result.output
+    );
+    assert!(
+        llm.requested_tools.lock().unwrap().is_empty(),
         "a reopened child must not retain tools removed from its parent boundary",
     );
 }
@@ -292,7 +344,12 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(
         llm,
-        SessionExtensionPorts::from_immutable_ports(noop.clone(), hooks.clone(), noop),
+        SessionExtensionPorts::from_immutable_ports(
+            noop.clone(),
+            noop.clone(),
+            hooks.clone(),
+            noop,
+        ),
     );
     let parent_id = new_session_id();
     let parent = Session::create_with_params(SessionCreateParams {
@@ -310,11 +367,11 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
     .unwrap();
 
     parent
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
         .await
         .unwrap();
     parent
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
         .await
         .unwrap();
     let child = parent
@@ -326,12 +383,12 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
             extra_system_prompt: None,
             tool_selection: None,
             source_extension: None,
-            tool_call_id: ToolCallId::new("call-lifecycle"),
+            tool_call_id: Some(ToolCallId::new("call-lifecycle")),
         })
         .await
         .unwrap();
     child
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
         .await
         .unwrap();
 
@@ -346,6 +403,7 @@ async fn prompt_failure_does_not_create_session() {
     let caps = common::test_runtime_services_with_extensions(
         Arc::clone(&llm),
         SessionExtensionPorts::from_immutable_ports(
+            noop.clone(),
             Arc::new(FailingPromptContributor),
             noop.clone(),
             noop,

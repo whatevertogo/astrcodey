@@ -29,7 +29,7 @@ tokio-util = { workspace = true }
 globset = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-astrcode-ai = { path = "../astrcode-ai" }
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }

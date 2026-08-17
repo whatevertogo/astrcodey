@@ -1,48 +1,35 @@
 use std::{
     fmt,
+    path::PathBuf,
     sync::{Arc, Weak},
 };
 
-use astrcode_extension_sdk::extension::*;
+use astrcode_extension_sdk::extension::{
+    internal::{
+        RuntimeHookCallContext, command_completion_context, command_context,
+        command_discovery_context,
+    },
+    *,
+};
+use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionRunner, ExtensionView, HandlerIndex};
-
-#[derive(Debug, Clone)]
-pub struct RegisteredSlashCommand {
-    pub extension_id: String,
-    pub command: SlashCommand,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    Extension,
-    Skill,
-}
-
-impl CommandSource {
-    fn for_extension(extension_id: &str) -> Self {
-        if extension_id == "astrcode-skill" {
-            Self::Skill
-        } else {
-            Self::Extension
-        }
-    }
-
-    const fn precedence(self) -> u8 {
-        match self {
-            Self::Extension => 2,
-            Self::Skill => 1,
-        }
-    }
-}
+use super::{
+    ExtensionCallContextInput, ExtensionRunner, ExtensionUiContributions, ExtensionView,
+    HandlerIndex,
+};
 
 #[derive(Clone)]
 pub struct ResolvedSlashCommand {
     pub extension_id: String,
     pub command: astrcode_extension_sdk::extension::SlashCommand,
-    pub source: CommandSource,
     pub shadowed: Vec<ShadowedSlashCommand>,
     handler: Arc<dyn CommandHandler>,
+    index: Weak<HandlerIndex>,
+}
+
+pub struct ResolvedCommandSurface {
+    pub commands: Vec<ResolvedSlashCommand>,
+    pub ui: ExtensionUiContributions,
 }
 
 impl fmt::Debug for ResolvedSlashCommand {
@@ -50,7 +37,6 @@ impl fmt::Debug for ResolvedSlashCommand {
         f.debug_struct("ResolvedSlashCommand")
             .field("extension_id", &self.extension_id)
             .field("command", &self.command)
-            .field("source", &self.source)
             .field("shadowed", &self.shadowed)
             .finish_non_exhaustive()
     }
@@ -59,61 +45,108 @@ impl fmt::Debug for ResolvedSlashCommand {
 #[derive(Debug, Clone)]
 pub struct ShadowedSlashCommand {
     pub extension_id: String,
-    pub source: CommandSource,
     pub priority: i32,
 }
 
 impl ExtensionView {
+    fn extension_command_context(
+        &self,
+        index: &Arc<HandlerIndex>,
+        extension_id: &str,
+        command_name: &str,
+        argument: &str,
+        runtime: &RuntimeHookCallContext,
+    ) -> Result<(CommandContext, CancellationToken), ExtensionError> {
+        let cancellation = runtime.cancellation().child_token();
+        let call = self.make_registered_extension_call_context_from_index(
+            index,
+            extension_id,
+            ExtensionCallContextInput::from_hook(runtime, cancellation.clone()),
+        )?;
+        let cancellation = call.cancellation().clone();
+        Ok((
+            command_context(
+                call,
+                runtime.session_id().clone(),
+                runtime.turn_id().map(str::to_owned),
+                runtime.working_dir().to_path_buf(),
+                runtime.model().clone(),
+                command_name,
+                argument,
+            ),
+            cancellation,
+        ))
+    }
+
     /// 从 HandlerIndex 缓存收集斜杠命令。
-    pub async fn collect_commands_for_typed(
+    async fn collect_commands_for_typed(
         &self,
         working_dir: &str,
     ) -> Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> {
         let index = &self.index;
-        let mut cmds = Vec::new();
-        for (ext_id, cmd, handler) in &index.static_commands {
-            cmds.push((
-                ext_id.clone(),
-                cmd.clone(),
-                Arc::new(ViewCommandHandler {
-                    handler: Arc::clone(handler),
-                    index: Arc::downgrade(index),
-                }) as Arc<dyn CommandHandler>,
-            ));
-        }
+        let mut cmds = index.static_commands.clone();
         for (extension_id, discovery) in &index.command_discoveries {
-            match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
-                .await
-            {
+            let cancellation = CancellationToken::new();
+            let call = self.make_registered_extension_call_context(
+                extension_id,
+                ExtensionCallContextInput {
+                    working_dir: Some(PathBuf::from(working_dir)),
+                    ..ExtensionCallContextInput::unscoped(cancellation.clone())
+                },
+            );
+            let discovered = match call {
+                Ok(call) => {
+                    let cancellation = call.cancellation().clone();
+                    let ctx = command_discovery_context(
+                        call,
+                        PathBuf::from(working_dir),
+                        self.generation(),
+                    );
+                    self.run_recorded_hook(
+                        extension_id,
+                        "command_discovery",
+                        cancellation,
+                        discovery.discover(ctx),
+                    )
+                    .await
+                },
+                Err(error) => Err(error),
+            };
+            match discovered {
                 Ok(discovered) => {
-                    for (cmd, handler) in discovered {
-                        cmds.push((
-                            extension_id.clone(),
-                            cmd,
-                            Arc::new(ViewCommandHandler {
-                                handler,
-                                index: Arc::downgrade(index),
-                            }) as Arc<dyn CommandHandler>,
-                        ));
+                    for command in discovered.into_commands() {
+                        let (cmd, handler) = command.into_parts();
+                        if !command_execution_is_authorized(index, extension_id, &cmd) {
+                            tracing::warn!(
+                                extension_id,
+                                command = %cmd.name,
+                                "slash command requested a host session command without capability"
+                            );
+                            continue;
+                        }
+                        cmds.push((extension_id.clone(), cmd, handler));
                     }
                 },
-                Err(_) => {
-                    tracing::warn!("command discovery timed out");
+                Err(error) => {
+                    tracing::warn!(
+                        extension_id,
+                        error = %error,
+                        "command discovery failed"
+                    );
                 },
             }
         }
         cmds
     }
 
-    /// Resolve visible slash commands and report commands hidden by the
-    /// explicit source/priority policy.
+    /// Resolve visible slash commands and retain lower-priority declarations
+    /// for diagnostics.
     pub async fn resolve_commands_for_typed(&self, working_dir: &str) -> Vec<ResolvedSlashCommand> {
         let mut commands = self.collect_commands_for_typed(working_dir).await;
         commands.sort_by(compare_command_registration);
 
         let mut resolved = Vec::<ResolvedSlashCommand>::new();
         for (extension_id, command, handler) in commands {
-            let source = CommandSource::for_extension(&extension_id);
             if let Some(active) = resolved
                 .iter_mut()
                 .find(|resolved| resolved.command.name == command.name)
@@ -121,16 +154,13 @@ impl ExtensionView {
                 tracing::warn!(
                     command = %command.name,
                     extension_id = %extension_id,
-                    source = ?source,
                     priority = command.priority,
                     active_extension_id = %active.extension_id,
-                    active_source = ?active.source,
                     active_priority = active.command.priority,
                     "slash command shadowed by higher priority command"
                 );
                 active.shadowed.push(ShadowedSlashCommand {
                     extension_id,
-                    source,
                     priority: command.priority,
                 });
                 continue;
@@ -138,12 +168,21 @@ impl ExtensionView {
             resolved.push(ResolvedSlashCommand {
                 extension_id,
                 command,
-                source,
                 shadowed: Vec::new(),
                 handler,
+                index: Arc::downgrade(&self.index),
             });
         }
         resolved
+    }
+
+    async fn resolve_command_surface(&self, working_dir: &str) -> ResolvedCommandSurface {
+        let commands = self.resolve_commands_for_typed(working_dir).await;
+        let ui = ExtensionUiContributions {
+            keybindings: self.index.keybindings.clone(),
+            status_items: self.index.status_items.clone(),
+        };
+        ResolvedCommandSurface { commands, ui }
     }
 
     /// Execute an already-resolved slash command without re-reading the command registry.
@@ -151,48 +190,30 @@ impl ExtensionView {
         &self,
         resolved: &ResolvedSlashCommand,
         arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        resolved
-            .handler
-            .execute(&resolved.command.name, arguments, working_dir, ctx)
-            .await
-    }
-
-    /// 命令派发。兼容入口统一复用 resolved command 选择策略。
-    pub async fn dispatch_command_typed(
-        &self,
-        command_name: &str,
-        arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let resolved = self.resolve_commands_for_typed(working_dir).await;
-        let command = resolved
-            .iter()
-            .find(|resolved| resolved.command.name == command_name)
-            .ok_or_else(|| ExtensionError::NotFound(command_name.into()))?;
-        self.invoke_resolved_command_typed(command, arguments, working_dir, ctx)
-            .await
-    }
-
-    /// 命令参数补全派发。兼容入口统一复用 resolved command 选择策略。
-    pub async fn complete_command_typed(
-        &self,
-        command_name: &str,
-        argument: &str,
-        cursor: usize,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<CommandCompletions, ExtensionError> {
-        let resolved = self.resolve_commands_for_typed(working_dir).await;
-        let command = resolved
-            .iter()
-            .find(|resolved| resolved.command.name == command_name)
-            .ok_or_else(|| ExtensionError::NotFound(command_name.into()))?;
-        self.complete_resolved_command_typed(command, argument, cursor, working_dir, ctx)
-            .await
+        let active_index = resolved.index.upgrade().ok_or_else(|| {
+            ExtensionError::NotFound(format!(
+                "command {} generation is no longer available",
+                resolved.command.name
+            ))
+        })?;
+        let (ctx, cancellation) = self.extension_command_context(
+            &active_index,
+            &resolved.extension_id,
+            &resolved.command.name,
+            arguments,
+            runtime,
+        )?;
+        let result = self
+            .run_recorded_hook(
+                &resolved.extension_id,
+                "command",
+                cancellation,
+                resolved.handler.execute(ctx),
+            )
+            .await?;
+        admit_command_result(&active_index, resolved, result)
     }
 
     /// Complete arguments for an already-resolved slash command without re-reading the registry.
@@ -201,28 +222,103 @@ impl ExtensionView {
         resolved: &ResolvedSlashCommand,
         argument: &str,
         cursor: usize,
-        working_dir: &str,
-        ctx: &CommandContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<CommandCompletions, ExtensionError> {
-        resolved
-            .handler
-            .complete(&resolved.command.name, argument, cursor, working_dir, ctx)
-            .await
+        let active_index = resolved.index.upgrade().ok_or_else(|| {
+            ExtensionError::NotFound(format!(
+                "command {} generation is no longer available",
+                resolved.command.name
+            ))
+        })?;
+        let (ctx, cancellation) = self.extension_command_context(
+            &active_index,
+            &resolved.extension_id,
+            &resolved.command.name,
+            argument,
+            runtime,
+        )?;
+        let ctx = command_completion_context(ctx, cursor);
+        self.run_recorded_hook(
+            &resolved.extension_id,
+            "command_complete",
+            cancellation,
+            resolved.handler.complete(ctx),
+        )
+        .await
     }
 }
 
+fn command_execution_is_authorized(
+    index: &HandlerIndex,
+    extension_id: &str,
+    command: &SlashCommand,
+) -> bool {
+    !matches!(command.execution, CommandExecution::Host(_))
+        || index
+            .extensions
+            .get(extension_id)
+            .is_some_and(|generation| {
+                generation
+                    .capabilities
+                    .contains(&ExtensionCapability::SessionCommand)
+            })
+}
+
+fn admit_command_result(
+    index: &HandlerIndex,
+    resolved: &ResolvedSlashCommand,
+    result: ExtensionCommandResult,
+) -> Result<ExtensionCommandResult, ExtensionError> {
+    let ExtensionCommandResult::HostCommand { intent } = &result else {
+        if matches!(resolved.command.execution, CommandExecution::Host(_)) {
+            return Err(ExtensionError::InvalidRegistration {
+                extension_id: resolved.extension_id.clone(),
+                reason: format!(
+                    "host command {} did not return a host command intent",
+                    resolved.command.name
+                ),
+            });
+        }
+        return Ok(result);
+    };
+    let generation = index
+        .extensions
+        .get(&resolved.extension_id)
+        .ok_or_else(|| ExtensionError::NotFound(resolved.extension_id.clone()))?;
+    if !generation
+        .capabilities
+        .contains(&ExtensionCapability::SessionCommand)
+    {
+        return Err(ExtensionError::MissingCapability {
+            extension_id: resolved.extension_id.clone(),
+            hook: "command",
+            capability: ExtensionCapability::SessionCommand,
+        });
+    }
+    if resolved.command.execution != CommandExecution::Host(intent.kind()) {
+        return Err(ExtensionError::InvalidRegistration {
+            extension_id: resolved.extension_id.clone(),
+            reason: format!(
+                "command {} returned undeclared host intent {:?}",
+                resolved.command.name,
+                intent.kind()
+            ),
+        });
+    }
+    Ok(result)
+}
+
 impl ExtensionRunner {
-    pub async fn collect_commands_for_typed(
-        &self,
-        working_dir: &str,
-    ) -> Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> {
+    pub async fn resolve_command_surface(&self, working_dir: &str) -> ResolvedCommandSurface {
         self.extension_view()
-            .collect_commands_for_typed(working_dir)
+            .await
+            .resolve_command_surface(working_dir)
             .await
     }
 
     pub async fn resolve_commands_for_typed(&self, working_dir: &str) -> Vec<ResolvedSlashCommand> {
         self.extension_view()
+            .await
             .resolve_commands_for_typed(working_dir)
             .await
     }
@@ -231,37 +327,11 @@ impl ExtensionRunner {
         &self,
         resolved: &ResolvedSlashCommand,
         arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        resolved
-            .handler
-            .execute(&resolved.command.name, arguments, working_dir, ctx)
-            .await
-    }
-
-    pub async fn dispatch_command_typed(
-        &self,
-        command_name: &str,
-        arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         self.extension_view()
-            .dispatch_command_typed(command_name, arguments, working_dir, ctx)
             .await
-    }
-
-    pub async fn complete_command_typed(
-        &self,
-        command_name: &str,
-        argument: &str,
-        cursor: usize,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<CommandCompletions, ExtensionError> {
-        self.extension_view()
-            .complete_command_typed(command_name, argument, cursor, working_dir, ctx)
+            .invoke_resolved_command_typed(resolved, arguments, runtime)
             .await
     }
 
@@ -270,57 +340,11 @@ impl ExtensionRunner {
         resolved: &ResolvedSlashCommand,
         argument: &str,
         cursor: usize,
-        working_dir: &str,
-        ctx: &CommandContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<CommandCompletions, ExtensionError> {
-        resolved
-            .handler
-            .complete(&resolved.command.name, argument, cursor, working_dir, ctx)
+        self.extension_view()
             .await
-    }
-}
-
-struct ViewCommandHandler {
-    handler: Arc<dyn CommandHandler>,
-    index: Weak<HandlerIndex>,
-}
-
-impl ViewCommandHandler {
-    fn retain_generation(&self, command_name: &str) -> Result<Arc<HandlerIndex>, ExtensionError> {
-        self.index.upgrade().ok_or_else(|| {
-            ExtensionError::NotFound(format!(
-                "command {command_name} generation is no longer available"
-            ))
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl CommandHandler for ViewCommandHandler {
-    async fn execute(
-        &self,
-        command_name: &str,
-        args: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let _active_index = self.retain_generation(command_name)?;
-        self.handler
-            .execute(command_name, args, working_dir, ctx)
-            .await
-    }
-
-    async fn complete(
-        &self,
-        command_name: &str,
-        argument: &str,
-        cursor: usize,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<CommandCompletions, ExtensionError> {
-        let _active_index = self.retain_generation(command_name)?;
-        self.handler
-            .complete(command_name, argument, cursor, working_dir, ctx)
+            .complete_resolved_command_typed(resolved, argument, cursor, runtime)
             .await
     }
 }
@@ -329,10 +353,10 @@ fn compare_command_registration(
     left: &(String, SlashCommand, Arc<dyn CommandHandler>),
     right: &(String, SlashCommand, Arc<dyn CommandHandler>),
 ) -> std::cmp::Ordering {
-    CommandSource::for_extension(&right.0)
-        .precedence()
-        .cmp(&CommandSource::for_extension(&left.0).precedence())
-        .then_with(|| right.1.priority.cmp(&left.1.priority))
+    right
+        .1
+        .priority
+        .cmp(&left.1.priority)
         .then_with(|| left.0.cmp(&right.0))
         .then_with(|| left.1.name.cmp(&right.1.name))
 }

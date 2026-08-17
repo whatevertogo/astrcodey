@@ -253,7 +253,7 @@ impl ParsedToolName {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_extension_sdk::tool::ToolOrigin;
 
     use super::*;
 
@@ -297,15 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn render_output_uses_functions_block() {
-        let output = ToolSearchOutput {
+    fn rendered_search_output_uses_the_functions_contract() {
+        let rendered = render_search_output(&ToolSearchOutput {
             query: "github".into(),
             total_mcp_tools: 1,
             matches: vec![candidates().remove(0)],
-        };
-
-        let rendered = render_search_output(&output);
-
+        });
         assert!(rendered.contains("<functions>"));
         assert!(rendered.contains("<function>{\"description\""));
         assert!(rendered.contains("\"name\":\"mcp__github__create_issue\""));
@@ -326,7 +323,6 @@ mod tests {
                 parameters: json!({"type": "object"}),
                 strict: false,
                 origin: ToolOrigin::Bundled,
-                execution_mode: ExecutionMode::Sequential,
             },
             server: server.into(),
             tool: tool.into(),

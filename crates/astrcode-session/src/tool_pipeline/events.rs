@@ -1,4 +1,4 @@
-use astrcode_core::{event::DurableEventPayload, tool::ToolResult};
+use astrcode_core::event::DurableEventPayload;
 
 use crate::{
     tool_types::{PreparedToolInvocation, ToolBatch, ToolExecutionOutcome},
@@ -74,23 +74,6 @@ pub(super) async fn finish_tool_call(
         },
     };
     publisher.durable(payload).await
-}
-
-pub(super) fn tool_result_for_output(outcome: &ToolExecutionOutcome) -> ToolResult {
-    match outcome {
-        ToolExecutionOutcome::Completed(result) => result.result.clone(),
-        ToolExecutionOutcome::Failed {
-            error,
-            metadata,
-            duration_ms,
-        } => ToolResult::error(error.clone())
-            .with_metadata(metadata.clone())
-            .with_duration_ms(*duration_ms),
-        ToolExecutionOutcome::Cancelled {
-            reason,
-            duration_ms,
-        } => ToolResult::error(format!("Tool cancelled: {reason}")).with_duration_ms(*duration_ms),
-    }
 }
 
 /// release 下的兜底：`commit_tool_outcomes` 要求每个 declared call 必有 outcome，

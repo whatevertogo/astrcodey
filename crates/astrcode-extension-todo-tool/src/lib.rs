@@ -1,19 +1,20 @@
 //! astrcode-extension-todo-tool — session-local progress todo list.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
-        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderResult, Registrar, ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
+        ExtensionPaths, HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        PreparedProviderContribution, PreparedProviderEffect, ProviderContext,
+        ProviderContributionHandler, ProviderContributionId, ProviderSettlementContext, Registrar,
+        ToolContext, ToolHandler, ToolPlanContext,
     },
-    state,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,15 +35,10 @@ const TODO_WRITE_DESCRIPTION: &str =
      fully done (tests pass, implementation complete).\n- After receiving new instructions, \
      immediately add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + \
      `activeForm` (continuous: \"Fixing auth bug\").";
-const PROGRESS_SCHEMA_VERSION: u32 = 1;
+const PROGRESS_SCHEMA_VERSION: u32 = 2;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
-
-/// Compute todo storage root from a known session base directory.
-pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
-    state::session_data_dir(base, "astrcode-todo-tool").join("todos")
-}
 
 /// Return bundled todo extension.
 pub fn extension() -> Arc<dyn Extension> {
@@ -53,26 +49,22 @@ struct TodoToolExtension;
 
 #[async_trait::async_trait]
 impl Extension for TodoToolExtension {
-    fn id(&self) -> &str {
-        "astrcode-todo-tool"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::ProviderRequest,
-            ExtensionCapability::ToolIntercept,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-todo-tool")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::ToolIntercept)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.tool(todo_write_tool_definition(), Arc::new(TodoWriteToolHandler));
-        reg.tool_metadata(todo_write_metadata());
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
-            0,
-            Arc::new(TodoReminderHandler),
+        reg.tool(
+            ExtensionToolDefinition::from_definition(todo_write_tool_definition())
+                .with_prompt(todo_write_prompt()),
+            Arc::new(TodoWriteToolHandler),
         );
+        reg.on_provider_contribution(0, Arc::new(TodoReminderHandler));
         reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(TodoPostToolUseHandler));
     }
 }
@@ -81,25 +73,21 @@ struct TodoWriteToolHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for TodoWriteToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let root = ctx
-            .capabilities
-            .paths
-            .store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = todo_root(ctx.paths())?;
         let store = ProgressListStore::new(root);
-        Ok(match handle_todo_write(arguments, &store) {
+        Ok(match handle_todo_write(ctx.arguments()?, &store) {
             Ok(result) => result,
             Err(error) => {
                 let meta = tool_metadata([("error", json!(&error))]);
@@ -113,15 +101,22 @@ impl ToolHandler for TodoWriteToolHandler {
 struct TodoReminderHandler;
 
 #[async_trait::async_trait]
-impl ProviderHandler for TodoReminderHandler {
-    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+impl ProviderContributionHandler for TodoReminderHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
+        let root = todo_root(ctx.paths())?;
         ProgressReminder::new(root)
-            .before_provider_request()
+            .prepare_provider_request()
+            .map(Some)
+            .map_err(ExtensionError::Internal)
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let root = todo_root(ctx.paths())?;
+        ProgressReminder::new(root)
+            .acknowledge_provider_cycle(ctx.contribution_id().as_str())
             .map_err(ExtensionError::Internal)
     }
 }
@@ -131,12 +126,8 @@ struct TodoPostToolUseHandler;
 #[async_trait::async_trait]
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
-        if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = ctx
-                .session_store_dir
-                .as_deref()
-                .map(todo_dir_from_base)
-                .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        if ctx.tool_name() == TODO_WRITE_TOOL_NAME && !ctx.tool_result().is_error {
+            let root = todo_root(ctx.paths())?;
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;
@@ -145,21 +136,19 @@ impl PostToolUseHandler for TodoPostToolUseHandler {
     }
 }
 
-fn todo_write_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        TODO_WRITE_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
-            .example(
-                "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
-                 \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
-                 \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
-                 \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
-            )
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map
+fn todo_root(paths: &ExtensionPaths) -> Result<PathBuf, ExtensionError> {
+    Ok(paths.require_session_data_dir()?.join("todos"))
+}
+
+fn todo_write_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new())
+        .example(
+            "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
+             \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
+             \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
+             \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
+        )
+        .prompt_tag(ToolPromptTag::Planning)
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,7 +202,6 @@ pub(crate) struct ProgressItem {
     pub content: String,
     pub active_form: String,
     pub status: ProgressStatus,
-    #[serde(default)]
     pub executor: TodoExecutor,
     #[serde(default)]
     pub agent_type: Option<String>,
@@ -279,10 +267,10 @@ impl ProgressListStore {
 
     fn load_progress(&self) -> Result<ProgressList, String> {
         let path = self.root.join(PROGRESS_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let progress = serde_json::from_str::<ProgressList>(&content)
-                    .map_err(|error| format!("parse progress list: {error}"))?;
+        let progress = astrcode_extension_sdk::hostpaths::read_json_state::<ProgressList>(&path)
+            .map_err(|error| format!("read progress list: {error}"))?;
+        match progress {
+            Some(progress) => {
                 if progress.schema_version != PROGRESS_SCHEMA_VERSION {
                     return Err(format!(
                         "unsupported progress list schema version {}",
@@ -291,12 +279,11 @@ impl ProgressListStore {
                 }
                 Ok(progress)
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ProgressList {
+            None => Ok(ProgressList {
                 schema_version: PROGRESS_SCHEMA_VERSION,
                 items: Vec::new(),
                 updated_at: now_utc(),
             }),
-            Err(error) => Err(format!("read progress list: {error}")),
         }
     }
 
@@ -307,17 +294,11 @@ impl ProgressListStore {
             items: items.to_vec(),
             updated_at: now_utc(),
         };
-        self.write_json(PROGRESS_FILE, &progress)
-    }
-
-    fn write_json<T: Serialize>(&self, file_name: &str, value: &T) -> Result<(), String> {
-        let path = self.root.join(file_name);
-        let tmp = self.root.join(format!("{file_name}.tmp"));
-        let json = serde_json::to_string_pretty(value)
-            .map_err(|error| format!("serialize {file_name}: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write {file_name}: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save {file_name}: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(PROGRESS_FILE),
+            &progress,
+        )
+        .map_err(|error| format!("save progress list: {error}"))
     }
 
     fn ensure_dir(&self) -> Result<(), String> {
@@ -329,6 +310,7 @@ impl ProgressListStore {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ProgressReminderState {
+    revision: u64,
     assistant_cycles_since_todo_write: u32,
     assistant_cycles_since_reminder: u32,
 }
@@ -342,65 +324,80 @@ impl ProgressReminder {
         Self { root }
     }
 
-    fn before_provider_request(&self) -> Result<ProviderResult, String> {
-        let mut state = self.load_state()?;
-        state.assistant_cycles_since_todo_write =
-            state.assistant_cycles_since_todo_write.saturating_add(1);
-        state.assistant_cycles_since_reminder =
-            state.assistant_cycles_since_reminder.saturating_add(1);
-
+    fn prepare_provider_request(&self) -> Result<PreparedProviderContribution, String> {
+        let state = self.load_state()?;
+        let next_todo_cycles = state.assistant_cycles_since_todo_write.saturating_add(1);
+        let next_reminder_cycles = state.assistant_cycles_since_reminder.saturating_add(1);
         let items = ProgressListStore::new(self.root.clone()).load_items()?;
         let should_remind = !items.is_empty()
-            && state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
-            && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD;
-
-        let result = if should_remind {
-            state.assistant_cycles_since_reminder = 0;
-            ProviderResult::AppendMessages {
-                messages: vec![astrcode_extension_sdk::llm::LlmMessage::user(
-                    reminder_message(&items),
-                )],
-            }
+            && next_todo_cycles >= REMINDER_THRESHOLD
+            && next_reminder_cycles >= REMINDER_THRESHOLD;
+        let effect = if should_remind {
+            PreparedProviderEffect::AppendMessages(vec![
+                astrcode_extension_sdk::llm::LlmMessage::user(reminder_message(&items)),
+            ])
         } else {
-            ProviderResult::Allow
+            PreparedProviderEffect::Unchanged
         };
+        Ok(PreparedProviderContribution::new(
+            ProviderContributionId::new(format!("todo-cycle:{}", state.revision)),
+            effect,
+        ))
+    }
 
-        self.save_state(&state)?;
-        Ok(result)
+    fn acknowledge_provider_cycle(&self, contribution_id: &str) -> Result<(), String> {
+        let items = ProgressListStore::new(self.root.clone()).load_items()?;
+        astrcode_extension_sdk::hostpaths::update_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            |state: Option<ProgressReminderState>| {
+                let mut state = state.unwrap_or_default();
+                if contribution_id != format!("todo-cycle:{}", state.revision) {
+                    return Ok((None, ()));
+                }
+                state.assistant_cycles_since_todo_write =
+                    state.assistant_cycles_since_todo_write.saturating_add(1);
+                state.assistant_cycles_since_reminder =
+                    state.assistant_cycles_since_reminder.saturating_add(1);
+                if !items.is_empty()
+                    && state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
+                    && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD
+                {
+                    state.assistant_cycles_since_reminder = 0;
+                }
+                state.revision = state.revision.saturating_add(1);
+                Ok((Some(state), ()))
+            },
+        )
+        .map_err(|error| format!("ack reminder state: {error}"))
     }
 
     fn record_todo_write(&self) -> Result<(), String> {
-        let mut state = self.load_state()?;
-        state.assistant_cycles_since_todo_write = 0;
-        self.save_state(&state)
+        astrcode_extension_sdk::hostpaths::update_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            |state: Option<ProgressReminderState>| {
+                let mut state = state.unwrap_or_default();
+                state.assistant_cycles_since_todo_write = 0;
+                state.revision = state.revision.saturating_add(1);
+                Ok((Some(state), ()))
+            },
+        )
+        .map_err(|error| format!("update reminder state after todo write: {error}"))
     }
 
     fn load_state(&self) -> Result<ProgressReminderState, String> {
         let path = self.root.join(REMINDER_STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|error| format!("parse reminder state: {error}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(ProgressReminderState::default())
-            },
-            Err(error) => Err(format!("read reminder state: {error}")),
-        }
+        Ok(astrcode_extension_sdk::hostpaths::read_json_state(&path)
+            .map_err(|error| format!("read reminder state: {error}"))?
+            .unwrap_or_default())
     }
 
+    #[cfg(test)]
     fn save_state(&self, state: &ProgressReminderState) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(|error| {
-            format!(
-                "create todo reminder directory {}: {error}",
-                self.root.display()
-            )
-        })?;
-        let path = self.root.join(REMINDER_STATE_FILE);
-        let tmp = self.root.join(format!("{REMINDER_STATE_FILE}.tmp"));
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|error| format!("serialize reminder state: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write reminder state: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save reminder state: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            state,
+        )
+        .map_err(|error| format!("save reminder state: {error}"))
     }
 }
 
@@ -426,9 +423,7 @@ fn reminder_message(items: &[ProgressItem]) -> String {
     )
 }
 
-fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
-    let args = serde_json::from_value::<TodoWriteArgs>(arguments)
-        .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
+fn handle_todo_write(args: TodoWriteArgs, store: &ProgressListStore) -> Result<ToolResult, String> {
     let items = args
         .todos
         .into_iter()
@@ -600,7 +595,6 @@ fn todo_write_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
     }
 }
 
@@ -669,7 +663,7 @@ mod tests {
     fn todo_write_replaces_list_and_returns_metadata() {
         let store = test_store("replace");
         let first = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Inspect files",
@@ -678,7 +672,8 @@ mod tests {
                         "executor": "self"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("write should succeed");
@@ -687,7 +682,7 @@ mod tests {
         assert_eq!(first.metadata["newTodos"][0]["executor"], "self");
 
         let second = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Run tests",
@@ -698,7 +693,8 @@ mod tests {
                         "mode": "serial"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("replace should succeed");
@@ -792,38 +788,17 @@ mod tests {
 
     #[test]
     fn rejects_todo_without_executor_field() {
-        let store = test_store("missing-executor");
-        let result = handle_todo_write(
-            json!({
-                "todos": [
-                    {
-                        "content": "Inspect files",
-                        "activeForm": "Inspecting files",
-                        "status": "in_progress"
-                    }
-                ]
-            }),
-            &store,
-        );
-        assert!(
-            result
-                .expect_err("missing executor should fail")
-                .contains("executor")
-        );
-    }
-
-    #[test]
-    fn loads_legacy_items_without_executor_as_self() {
-        let store = test_store("legacy");
-        std::fs::create_dir_all(&store.root).unwrap();
-        let legacy = r#"{"schemaVersion":1,"items":[{"content":"Run tests","activeForm":"Running tests","status":"pending"}],"updatedAt":"2026-01-01T00:00:00Z"}"#;
-        std::fs::write(store.root.join(PROGRESS_FILE), legacy).unwrap();
-
-        let items = store.load_items().unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].executor, TodoExecutor::MainAgent);
-        assert_eq!(items[0].agent_type, None);
-        assert_eq!(items[0].mode, None);
+        let error = serde_json::from_value::<TodoWriteArgs>(json!({
+            "todos": [
+                {
+                    "content": "Inspect files",
+                    "activeForm": "Inspecting files",
+                    "status": "in_progress"
+                }
+            ]
+        }))
+        .expect_err("missing executor must fail");
+        assert!(error.to_string().contains("executor"));
     }
 
     #[test]
@@ -866,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn before_provider_request_injects_stale_nonempty_todo_reminder() {
+    fn provider_cycle_is_retryable_and_acknowledges_only_its_exact_revision() {
         let root = reminder_root("stale");
         let store = ProgressListStore::new(root.clone());
         store
@@ -886,15 +861,25 @@ mod tests {
         let reminder = ProgressReminder::new(root);
         reminder
             .save_state(&ProgressReminderState {
+                revision: 7,
                 assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
                 assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
             })
             .unwrap();
 
-        let effect = reminder.before_provider_request().unwrap();
+        let first = reminder.prepare_provider_request().unwrap();
+        let retry = reminder.prepare_provider_request().unwrap();
+        let (first_id, effect) = first.into_parts();
+        let (retry_id, _) = retry.into_parts();
+        assert_eq!(retry_id, first_id, "failure must leave the cycle retryable");
+        assert_eq!(
+            reminder.load_state().unwrap().revision,
+            7,
+            "prepare must not commit counters"
+        );
 
         let messages = match effect {
-            ProviderResult::AppendMessages { messages } => messages,
+            PreparedProviderEffect::AppendMessages(messages) => messages,
             _ => panic!("stale todo list should inject a provider reminder"),
         };
         assert!(text_exists(
@@ -902,6 +887,28 @@ mod tests {
             "The todoWrite tool has not been used recently"
         ));
         assert!(text_exists(&messages, "Replace task tools"));
+
+        reminder.record_todo_write().unwrap();
+        let after_write = reminder.load_state().unwrap();
+        assert_eq!(after_write.revision, 8);
+        assert_eq!(after_write.assistant_cycles_since_todo_write, 0);
+        reminder
+            .acknowledge_provider_cycle(first_id.as_str())
+            .unwrap();
+        assert_eq!(
+            reminder.load_state().unwrap(),
+            after_write,
+            "an old ack must not clear or advance state updated in flight"
+        );
+
+        let current = reminder.prepare_provider_request().unwrap();
+        let (current_id, _) = current.into_parts();
+        reminder
+            .acknowledge_provider_cycle(current_id.as_str())
+            .unwrap();
+        let settled = reminder.load_state().unwrap();
+        assert_eq!(settled.revision, 9);
+        assert_eq!(settled.assistant_cycles_since_todo_write, 1);
     }
 
     #[test]
@@ -910,35 +917,15 @@ mod tests {
         let reminder = ProgressReminder::new(root);
         reminder
             .save_state(&ProgressReminderState {
+                revision: 0,
                 assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
                 assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
             })
             .unwrap();
 
-        let effect = reminder.before_provider_request().unwrap();
+        let (_, effect) = reminder.prepare_provider_request().unwrap().into_parts();
 
-        assert!(matches!(effect, ProviderResult::Allow));
-    }
-
-    #[test]
-    fn post_tool_use_resets_todo_write_staleness() {
-        let root = reminder_root("post-tool-reset");
-        let reminder = ProgressReminder::new(root);
-        reminder
-            .save_state(&ProgressReminderState {
-                assistant_cycles_since_todo_write: REMINDER_THRESHOLD,
-                assistant_cycles_since_reminder: REMINDER_THRESHOLD,
-            })
-            .unwrap();
-        reminder.record_todo_write().unwrap();
-
-        assert_eq!(
-            reminder
-                .load_state()
-                .unwrap()
-                .assistant_cycles_since_todo_write,
-            0
-        );
+        assert!(matches!(effect, PreparedProviderEffect::Unchanged));
     }
 
     #[test]

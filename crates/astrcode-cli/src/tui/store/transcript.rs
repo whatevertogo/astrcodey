@@ -39,19 +39,11 @@ impl MessageBody {
         self.render.as_ref()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.plain.is_empty()
-    }
-
     pub fn set_text(&mut self, text: String) {
         self.plain = text;
         self.render = None;
         self.custom_type = None;
         self.payload = None;
-    }
-
-    pub fn append_text(&mut self, text: &str) {
-        self.plain.push_str(text);
     }
 
     pub fn set_render(&mut self, spec: RenderSpec, fallback: String) {

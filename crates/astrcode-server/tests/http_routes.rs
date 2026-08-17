@@ -1,50 +1,47 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
-use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
+use astrcode_context::ContextSettings;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{
-        DurableEvent, DurableEventPayload, ExtensionEventData, LiveEvent, LiveEventPayload,
+        CustomEventData, DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload,
         StoredEvent,
     },
-    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
-    types::{Cursor, SessionId, new_message_id},
+    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits},
+    tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
+    types::{Cursor, SessionId, new_message_id, new_turn_id},
 };
-use astrcode_extension_sdk::extension::{
-    ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-    ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES,
-    Registrar,
+use astrcode_extension_sdk::{
+    builder::manifest,
+    extension::{
+        CustomEventContext, CustomEventDisposition, CustomEventHandler, CustomEventSubscription,
+        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HttpContext,
+        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
+    },
 };
-use astrcode_extensions::{Extension, runner::ExtensionRunner};
+use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
-        ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto, CreateSessionResponseDto,
-        PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
-        ToolSelectionDto,
+        ConversationItemsPageResponseDto, ConversationSnapshotResponseDto,
+        ConversationStateResponseDto, CreateSessionResponseDto, CustomEventConsumerListResponseDto,
+        CustomEventConsumerStatusDto, PromptSubmitResponse, ProviderCatalogResponseDto,
+        SlashCommandListResponseDto, ToolSelectionDto,
     },
-    wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
+    wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
     bootstrap::{ServerApp, ServerRuntime},
-    http::{router as app_router, router_with_event_publisher},
+    http::router as app_router,
     test_support::{
-        ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
-        TurnRegistry, TurnScheduler,
+        ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, ServerRuntimeTestExt,
+        SessionManager, TurnRegistry, TurnScheduler, assemble_server_runtime,
+        router_with_event_bus,
     },
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary};
@@ -62,9 +59,7 @@ use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-fn router(
-    runtime: Arc<ServerRuntime>,
-) -> Result<(Router, String), astrcode_server::http::HttpServerError> {
+fn router(runtime: Arc<ServerRuntime>) -> Result<Router, astrcode_server::http::HttpServerError> {
     app_router(ServerApp::new(runtime))
 }
 
@@ -74,12 +69,14 @@ struct HttpRoutesExtension;
 
 struct HttpRoutesHandler;
 
+struct EventConsumerHttpExtension;
+
+struct EventConsumerHttpHandler;
+
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for HttpRoutesHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
         Ok(ExtensionHttpResponse::json(
             201,
             serde_json::json!({
@@ -93,15 +90,13 @@ impl ExtensionHttpHandler for HttpRoutesHandler {
 
 #[async_trait::async_trait]
 impl Extension for HttpRoutesExtension {
-    fn id(&self) -> &str {
-        "http-routes-test"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::PublicHttp,
-            ExtensionCapability::AuthenticatedHttp,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("http-routes-test")
+            .version("test")
+            .description("Server HTTP route test extension")
+            .capability(ExtensionCapability::PublicHttp)
+            .capability(ExtensionCapability::AuthenticatedHttp)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -117,11 +112,39 @@ impl Extension for HttpRoutesExtension {
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for ImmediateLlm {
-    async fn generate(
+impl Extension for EventConsumerHttpExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("event-consumer-http-test")
+            .version("test")
+            .description("Event consumer HTTP control test extension")
+            .capability(ExtensionCapability::ConsumeCustomEvents)
+            .build()
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.on_custom_event(
+            CustomEventSubscription::from_extension("producer", "job.completed"),
+            0,
+            Arc::new(EventConsumerHttpHandler),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomEventHandler for EventConsumerHttpHandler {
+    async fn handle(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError> {
+        Ok(CustomEventDisposition::Ack)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ImmediateLlm {
+    async fn generate_request(
+        &self,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -147,10 +170,9 @@ struct SummaryLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         std::future::pending().await
     }
@@ -165,10 +187,9 @@ impl LlmProvider for PendingLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for SummaryLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -217,11 +238,11 @@ impl LlmProvider for SummaryLlm {
 }
 
 #[tokio::test]
-async fn http_routes_require_bearer_token() {
+async fn http_routes_do_not_require_auth_token() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
-    let unauthorized = app
+    let no_auth = app
         .clone()
         .oneshot(
             Request::builder()
@@ -232,26 +253,13 @@ async fn http_routes_require_bearer_token() {
         )
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let authorized = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/sessions")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(authorized.status(), StatusCode::OK);
+    assert_eq!(no_auth.status(), StatusCode::OK);
 }
 
 #[tokio::test]
 async fn cors_allows_supported_tauri_origins_only() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, _token) = router(runtime).unwrap();
+    let app = router(runtime).unwrap();
 
     for origin in [
         "tauri://localhost",
@@ -312,12 +320,11 @@ async fn cors_allows_supported_tauri_origins_only() {
 #[tokio::test]
 async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let created = post_json_owned(
         app.clone(),
         "/api/sessions",
         r#"{"workingDir":".","toolSelection":{"mode":"all","except":[" shell ","shell"]}}"#.into(),
-        &token,
     )
     .await;
     assert_eq!(created.status(), StatusCode::OK);
@@ -345,7 +352,6 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
                 .method(Method::PUT)
                 .uri(&uri)
                 .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
                     r#"{"selection":{"mode":"only","names":["write"," read ","write"]}}"#,
                 ))
@@ -388,7 +394,6 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
                 .method(Method::PUT)
                 .uri(uri)
                 .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(r#"{"selection":{"mode":"all","except":[" "]}}"#))
                 .unwrap(),
         )
@@ -399,13 +404,9 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
 
 #[tokio::test]
 async fn extension_http_routes_allow_only_declared_public_routes() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    runtime
-        .extension_runner()
-        .register(Arc::new(HttpRoutesExtension))
-        .await
-        .unwrap();
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let runtime =
+        runtime_with_extensions(Arc::new(ImmediateLlm), vec![Arc::new(HttpRoutesExtension)]).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
         .clone()
@@ -422,18 +423,19 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
     assert_eq!(public.status(), StatusCode::CREATED);
 
     let protected_path = "/api/extensions/http-routes-test/protected-probe/8";
-    let unauthorized = app
+    let no_auth = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri(protected_path)
-                .body(Body::from("{}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"authenticated"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(no_auth.status(), StatusCode::CREATED);
 
     let authorized = app
         .clone()
@@ -441,7 +443,6 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
             Request::builder()
                 .method(Method::POST)
                 .uri(protected_path)
-                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"source":"authenticated"}"#))
                 .unwrap(),
@@ -492,10 +493,9 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
 #[tokio::test]
 async fn provider_catalog_route_returns_endpoint_presets() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
-    let catalog =
-        get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog", &token).await;
+    let catalog = get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog").await;
 
     let qwen = catalog
         .providers
@@ -539,28 +539,9 @@ async fn provider_catalog_route_returns_endpoint_presets() {
 }
 
 #[tokio::test]
-async fn active_selection_rejects_unknown_approval_mode_with_structured_error() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(runtime).unwrap();
-
-    let response = post_json(
-        app,
-        "/api/config/active-selection",
-        r#"{"activeProfile":"test","activeModel":"test","approvalMode":"future"}"#,
-        &token,
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ConversationErrorEnvelopeDto =
-        serde_json::from_slice(&body_bytes(response).await).unwrap();
-    assert_eq!(error.code, "invalid_approval_mode");
-}
-
-#[tokio::test]
 async fn provider_preset_apply_persists_profile_from_catalog() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "qwen",
         "endpointId": "dashscope-compatible",
@@ -569,13 +550,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
     })
     .to_string();
 
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let applied: ApplyProviderPresetResponseDto =
@@ -605,7 +580,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
 #[tokio::test]
 async fn concurrent_config_updates_preserve_both_profiles() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let first = post_json_owned(
         app.clone(),
         "/api/config/provider-preset/apply",
@@ -616,7 +591,6 @@ async fn concurrent_config_updates_preserve_both_profiles() {
             "activate": false
         })
         .to_string(),
-        &token,
     );
     let second = post_json_owned(
         app,
@@ -629,12 +603,13 @@ async fn concurrent_config_updates_preserve_both_profiles() {
             "activate": false
         })
         .to_string(),
-        &token,
     );
 
     let (first, second) = tokio::join!(first, second);
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(second.status(), StatusCode::OK);
+    let first = response_status_and_body(first).await;
+    let second = response_status_and_body(second).await;
+    assert_eq!(first.0, StatusCode::OK, "first response: {}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "second response: {}", second.1);
 
     let config = runtime.config_manager().raw_config_snapshot();
     for expected in ["concurrent-qwen", "concurrent-compatible"] {
@@ -651,7 +626,7 @@ async fn concurrent_config_updates_preserve_both_profiles() {
 #[tokio::test]
 async fn provider_preset_apply_uses_submitted_api_key() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "openai-compatible",
         "baseUrl": "https://api.example.test/v1",
@@ -661,13 +636,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
     })
     .to_string();
 
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let applied: ApplyProviderPresetResponseDto =
@@ -694,13 +663,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
         "activate": true
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let config = runtime.config_manager().raw_config_snapshot();
@@ -716,7 +679,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
         "profileName": "openai-compatible"
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/provider-preset/remove", body, &token).await;
+    let response = post_json_owned(app, "/api/config/provider-preset/remove", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let config = runtime.config_manager().raw_config_snapshot();
@@ -733,7 +696,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 #[tokio::test]
 async fn model_options_rejects_unknown_profile() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "profileName": "nonexistent",
         "modelId": "test",
@@ -741,7 +704,7 @@ async fn model_options_rejects_unknown_profile() {
     })
     .to_string();
 
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -752,7 +715,7 @@ async fn model_options_rejects_unknown_profile() {
 #[tokio::test]
 async fn model_options_rejects_unknown_model() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // First create a profile via provider preset
     let body = serde_json::json!({
@@ -762,13 +725,7 @@ async fn model_options_rejects_unknown_model() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Now try updating a non-existent model
@@ -778,7 +735,7 @@ async fn model_options_rejects_unknown_model() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -789,7 +746,7 @@ async fn model_options_rejects_unknown_model() {
 #[tokio::test]
 async fn model_options_rejects_thinking_without_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // openai-compatible has no built-in thinking capability
     let body = serde_json::json!({
@@ -799,13 +756,7 @@ async fn model_options_rejects_thinking_without_capability() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Try enabling thinking (should fail since no capability exists)
@@ -815,7 +766,7 @@ async fn model_options_rejects_thinking_without_capability() {
         "thinking": { "enabled": true, "effort": "high" }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -826,7 +777,7 @@ async fn model_options_rejects_thinking_without_capability() {
 #[tokio::test]
 async fn model_options_persists_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
     let body = serde_json::json!({
@@ -836,13 +787,7 @@ async fn model_options_persists_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -853,7 +798,7 @@ async fn model_options_persists_thinking() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let resp: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
     assert_eq!(resp["success"], true);
@@ -880,7 +825,7 @@ async fn model_options_persists_thinking() {
 #[tokio::test]
 async fn model_options_can_disable_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // Use deepseek which has a built-in thinking capability
     let body = serde_json::json!({
@@ -890,13 +835,7 @@ async fn model_options_can_disable_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -907,7 +846,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Now disable by sending enabled:false
@@ -917,7 +856,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": false }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify disabled
@@ -948,13 +887,7 @@ async fn model_options_can_disable_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = serde_json::json!({
@@ -963,7 +896,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": false }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
     let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -973,7 +906,7 @@ async fn model_options_can_disable_thinking() {
 #[tokio::test]
 async fn model_options_null_thinking_restores_model_default() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     let body = serde_json::json!({
         "providerId": "deepseek",
@@ -982,13 +915,7 @@ async fn model_options_null_thinking_restores_model_default() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -999,7 +926,7 @@ async fn model_options_null_thinking_restores_model_default() {
         "thinking": null
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let config = runtime.config_manager().raw_config_snapshot();
@@ -1018,7 +945,7 @@ async fn model_options_null_thinking_restores_model_default() {
 #[tokio::test]
 async fn get_config_exposes_thinking_and_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat mapping)
     let body = serde_json::json!({
@@ -1028,13 +955,7 @@ async fn get_config_exposes_thinking_and_capability() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -1045,10 +966,10 @@ async fn get_config_exposes_thinking_and_capability() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let _ = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let _ = post_json_owned(app.clone(), "/api/config/model-options", body).await;
 
     // GET /api/config should show thinking and capability
-    let config_resp = get_json::<serde_json::Value>(app, "/api/config", &token).await;
+    let config_resp = get_json::<serde_json::Value>(app, "/api/config").await;
     let profiles = config_resp["profiles"].as_array().unwrap();
     let test_profile = profiles
         .iter()
@@ -1077,12 +998,12 @@ async fn get_config_exposes_thinking_and_capability() {
 #[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
 
-    let first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#, &token);
-    let second = post_json(app, &prompt_uri, r#"{"text":"second"}"#, &token);
+    let first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#);
+    let second = post_json(app, &prompt_uri, r#"{"text":"second"}"#);
 
     let (first, second) = tokio::join!(first, second);
     let statuses = [first.status(), second.status()];
@@ -1122,8 +1043,8 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 #[tokio::test]
 async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let attachment_session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let attachment_session_id = create_session(app.clone()).await;
     let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
     let valid_attachment_body = serde_json::json!({
         "text": "",
@@ -1135,23 +1056,18 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     })
     .to_string();
 
-    let accepted = post_json_owned(
-        app.clone(),
-        &attachment_prompt_uri,
-        valid_attachment_body,
-        &token,
-    )
-    .await;
+    let accepted =
+        post_json_owned(app.clone(), &attachment_prompt_uri, valid_attachment_body).await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
-    let oversized_session_id = create_session(app.clone(), &token).await;
+    let oversized_session_id = create_session(app.clone()).await;
     let oversized_prompt_uri = format!("/api/sessions/{oversized_session_id}/prompt");
     let body = serde_json::json!({
         "text": "x".repeat(MAX_PROMPT_TEXT_BYTES + 1)
     })
     .to_string();
 
-    let response = post_json_owned(app, &oversized_prompt_uri, body, &token).await;
+    let response = post_json_owned(app, &oversized_prompt_uri, body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
@@ -1159,14 +1075,14 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
 #[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
     let inject_uri = format!("/api/sessions/{session_id}/inject");
-    let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#, &token).await;
+    let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#).await;
 
-    let inject = post_json(app, &inject_uri, r#"{"text":"steer me"}"#, &token).await;
+    let inject = post_json(app, &inject_uri, r#"{"text":"steer me"}"#).await;
     assert_eq!(inject.status(), StatusCode::OK);
     let body: PromptSubmitResponse = serde_json::from_slice(&body_bytes(inject).await).unwrap();
     assert!(matches!(
@@ -1179,24 +1095,23 @@ async fn inject_route_writes_mid_turn_user_message() {
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let inject_uri = format!("/api/sessions/{session_id}/inject");
 
-    let response = post_json(app, &inject_uri, r#"{"text":"too early"}"#, &token).await;
+    let response = post_json(app, &inject_uri, r#"{"text":"too early"}"#).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
@@ -1208,7 +1123,6 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1231,7 +1145,6 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         app,
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"hello"}"#,
-        &token,
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1242,28 +1155,150 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     assert!(body.contains("hello from http"));
     assert!(body.contains(r#""status":"complete""#));
 
-    let (after_app, after_token) = router(runtime).unwrap();
+    let after_app = router(runtime).unwrap();
     let after = get_json::<ConversationSnapshotResponseDto>(
         after_app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &after_token,
     )
     .await;
     assert_eq!(after.blocks.len(), 2);
 }
 
 #[tokio::test]
+async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapshot_contract() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
+    let session_id_value = SessionId::new(&session_id);
+
+    for index in 1..=3 {
+        let turn_id = new_turn_id();
+        runtime
+            .event_store()
+            .append_events(vec![
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::TurnStarted,
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: format!("user-{index}"),
+                        attachments: Vec::new(),
+                        accepted_seq: None,
+                    },
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::AssistantMessageCompleted {
+                        message_id: new_message_id(),
+                        text: format!("assistant-{index}"),
+                        reasoning_content: None,
+                    },
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id,
+                    DurableEventPayload::TurnCompleted {
+                        finish_reason: "stop".into(),
+                    },
+                ),
+            ])
+            .await
+            .unwrap();
+    }
+
+    let state = get_json::<ConversationStateResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/state"),
+    )
+    .await;
+    assert_eq!(state.cursor.value, "12");
+    assert!(state.transient_blocks.is_empty());
+
+    let latest = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/items?limit=2"),
+    )
+    .await;
+    assert_eq!(visible_texts(&latest.items), ["user-3", "assistant-3"]);
+    assert!(latest.has_older);
+    let older_cursor = latest.older_cursor.unwrap().value;
+
+    let older = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/items?limit=2&before={older_cursor}"),
+    )
+    .await;
+    assert_eq!(visible_texts(&older.items), ["user-2", "assistant-2"]);
+    assert!(older.has_older);
+
+    let forked = post_json_owned(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/fork"),
+        "{}".into(),
+    )
+    .await;
+    let forked_id = serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(forked).await)
+        .unwrap()
+        .session_id;
+    let forked_latest = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{forked_id}/conversation/items?limit=2"),
+    )
+    .await;
+    assert_eq!(
+        visible_texts(&forked_latest.items),
+        ["user-3", "assistant-3"]
+    );
+    assert!(forked_latest.has_older);
+    let forked_older = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!(
+            "/api/sessions/{forked_id}/conversation/items?limit=2&before={}",
+            forked_latest.older_cursor.unwrap().value
+        ),
+    )
+    .await;
+    assert_eq!(
+        visible_texts(&forked_older.items),
+        ["user-2", "assistant-2"]
+    );
+
+    let legacy = get_json::<ConversationSnapshotResponseDto>(
+        app,
+        &format!("/api/sessions/{session_id}/conversation"),
+    )
+    .await;
+    assert_eq!(legacy.blocks.len(), 6);
+}
+
+fn visible_texts(blocks: &[ConversationBlockDto]) -> Vec<&str> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ConversationBlockDto::User { text, .. }
+            | ConversationBlockDto::Assistant { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let stream_response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1275,7 +1310,6 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
         app,
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"hello"}"#,
-        &token,
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1288,8 +1322,8 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1312,7 +1346,6 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1320,7 +1353,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .await
         .unwrap();
 
-    let reload = post_json(app, "/api/extensions/reload", "{}", &token).await;
+    let reload = post_json(app, "/api/extensions/reload", "{}").await;
     assert_eq!(reload.status(), StatusCode::OK);
 
     let body = read_sse_until(response.into_body(), "extensionRegistryChanged").await;
@@ -1331,9 +1364,8 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 #[tokio::test]
 async fn stream_preserves_ask_user_events_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1356,7 +1388,6 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1370,10 +1401,13 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
         LiveEvent::new(
             SessionId::from("other-session"),
             None,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Global,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             }),
         )
@@ -1389,15 +1423,13 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
 #[tokio::test]
 async fn stream_suppresses_current_session_ask_user_global_copy() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1415,10 +1447,13 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
         LiveEvent::new(
             SessionId::from(session_id),
             None,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Global,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "current-session-call" }),
             }),
         )
@@ -1438,10 +1473,127 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
 }
 
 #[tokio::test]
+async fn event_consumer_http_control_reports_pending_events_and_updates_persisted_state() {
+    let runtime = runtime_with_extensions(
+        Arc::new(ImmediateLlm),
+        vec![Arc::new(EventConsumerHttpExtension)],
+    )
+    .await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
+    runtime
+        .event_store()
+        .append_event(DurableEvent::session(
+            SessionId::from(session_id.clone()),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "durable-job"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let session_id = SessionId::from(session_id);
+    for _ in 0..20 {
+        runtime
+            .event_store()
+            .record_event_consumer_failure(
+                &session_id,
+                "event-consumer-http-test:producer:job.completed:v1",
+                0,
+                1,
+                "injected failure",
+                20,
+            )
+            .await
+            .unwrap();
+    }
+    runtime
+        .event_store()
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "pending-job"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let session_id = session_id.to_string();
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/event-consumers"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list: CustomEventConsumerListResponseDto =
+        serde_json::from_slice(&body_bytes(list).await).unwrap();
+    let consumer = list
+        .consumers
+        .iter()
+        .find(|consumer| consumer.extension_id == "event-consumer-http-test")
+        .unwrap();
+    assert_eq!(consumer.pending_events, 1);
+    assert!(!consumer.paused);
+    assert_eq!(consumer.quarantined_events, 1);
+
+    let control = |action: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .uri(format!(
+                "/api/sessions/{session_id}/event-consumers/control"
+            ))
+            .body(Body::from(format!(
+                r#"{{"extensionId":"event-consumer-http-test","subscriptionId":"producer:job.completed","action":"{action}"}}"#
+            )))
+            .unwrap()
+    };
+    let paused = app.clone().oneshot(control("pause")).await.unwrap();
+    let paused: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(paused).await).unwrap();
+    assert!(paused.paused);
+    assert_eq!(paused.pending_events, 1);
+
+    let skipped = app
+        .clone()
+        .oneshot(control("skip_to_stream_head"))
+        .await
+        .unwrap();
+    let skipped: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(skipped).await).unwrap();
+    assert!(skipped.paused);
+    assert_eq!(skipped.checkpoint, skipped.stream_head);
+    assert_eq!(skipped.pending_events, 0);
+
+    let resumed = app.oneshot(control("resume")).await.unwrap();
+    let resumed: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(resumed).await).unwrap();
+    assert!(!resumed.paused);
+    assert_eq!(resumed.pending_events, 0);
+}
+
+#[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1462,7 +1614,6 @@ async fn stream_replays_events_after_snapshot_cursor() {
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.blocks.len(), 1);
@@ -1499,7 +1650,6 @@ async fn stream_replays_events_after_snapshot_cursor() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!(
                     "/api/sessions/{session_id}/stream?cursor={}",
                     snapshot.cursor.value
@@ -1519,8 +1669,8 @@ async fn stream_replays_events_after_snapshot_cursor() {
 #[tokio::test]
 async fn snapshot_and_replay_preserve_durable_errors() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1540,7 +1690,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
     let before = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
 
@@ -1588,7 +1737,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!(
                     "/api/sessions/{session_id}/stream?cursor={}",
                     before.cursor.value
@@ -1608,7 +1756,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
     let latest = get_json::<ConversationSnapshotResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert!(
@@ -1629,8 +1776,8 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 #[tokio::test]
 async fn stream_invalid_cursors_request_rehydrate_and_close() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     for cursor in ["invalid", "999999"] {
         let response = app
@@ -1638,7 +1785,6 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .header("authorization", format!("Bearer {token}"))
                     .uri(format!("/api/sessions/{session_id}/stream?cursor={cursor}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1661,8 +1807,8 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
 #[tokio::test]
 async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     for _ in 0..=1_000 {
@@ -1681,7 +1827,6 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1703,16 +1848,15 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
 #[tokio::test]
 async fn stream_ignores_events_from_other_sessions() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_a = create_session(app.clone(), &token).await;
-    let session_b = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_a = create_session(app.clone()).await;
+    let session_b = create_session(app.clone()).await;
 
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_a}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1724,7 +1868,6 @@ async fn stream_ignores_events_from_other_sessions() {
         app.clone(),
         &format!("/api/sessions/{session_b}/prompt"),
         r#"{"text":"from session b"}"#,
-        &token,
     )
     .await;
     assert_eq!(session_b_prompt.status(), StatusCode::OK);
@@ -1733,7 +1876,6 @@ async fn stream_ignores_events_from_other_sessions() {
         app,
         &format!("/api/sessions/{session_a}/prompt"),
         r#"{"text":"from session a"}"#,
-        &token,
     )
     .await;
     assert_eq!(session_a_prompt.status(), StatusCode::OK);
@@ -1746,9 +1888,8 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
     let child_id = child_sid.to_string();
@@ -1763,7 +1904,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
                 agent_name: "worker".into(),
                 task: "check fanout routing".into(),
                 tool_selection: None,
-                tool_call_id: "child-call".into(),
+                tool_call_id: Some("child-call".into()),
             },
         ))
         .await
@@ -1773,7 +1914,6 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1812,13 +1952,12 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let body = get_json::<SlashCommandListResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/commands"),
-        &token,
     )
     .await;
 
@@ -1827,7 +1966,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "compact")
         .expect("compact command");
-    assert_eq!(compact.source, CommandSourceDto::Builtin);
+    assert_eq!(compact.extension_id, "astrcode-session-commands");
     assert!(!compact.needs_argument);
     assert!(compact.requires_idle);
     assert!(!compact.argument_completions);
@@ -1837,7 +1976,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "mode")
         .expect("mode extension command");
-    assert_eq!(mode_cmd.source, CommandSourceDto::Extension);
+    assert_eq!(mode_cmd.extension_id, "astrcode-mode");
 
     let shift_tab = body
         .keybindings
@@ -1850,14 +1989,13 @@ async fn command_list_route_exposes_backend_slash_commands() {
 #[tokio::test]
 async fn invoke_command_route_toggles_mode() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let http_response = post_json(
         app,
         &format!("/api/sessions/{session_id}/commands/mode"),
         r#"{"arguments":""}"#,
-        &token,
     )
     .await;
     assert_eq!(http_response.status(), StatusCode::OK);
@@ -1875,14 +2013,13 @@ async fn invoke_command_route_toggles_mode() {
 #[tokio::test]
 async fn command_completion_route_returns_empty_for_commands_without_completion() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let http_response = post_json(
         app,
         &format!("/api/sessions/{session_id}/commands/mode/complete"),
         r#"{"argument":"","cursor":0}"#,
-        &token,
     )
     .await;
     assert_eq!(http_response.status(), StatusCode::OK);
@@ -1896,8 +2033,8 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 #[tokio::test]
 async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     for text in ["one", "two", "three"] {
@@ -1934,7 +2071,6 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
         app.clone(),
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"/compact"}"#,
-        &token,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1946,10 +2082,10 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(state.compactions.iter().any(|compaction| {
+    assert!(state.model_context.compactions.iter().any(|compaction| {
         compaction.trigger == "manual_command" && !compaction.summary.is_empty()
     }));
-    assert!(!state.transcript.messages.iter().any(|message| {
+    assert!(!state.model_context.messages.iter().any(|message| {
         message
             .message
             .content
@@ -1960,9 +2096,10 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
 
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
+    // bundled set(含 astrcode-coding)已由 runtime helper 经 source generation 加载。
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
     let read_fixture = "target/post-compact-read-fixture.txt";
     fs::create_dir_all("target").unwrap();
@@ -2038,13 +2175,18 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         app.clone(),
         &format!("/api/sessions/{session_id}/compact"),
         r#"{}"#,
-        &token,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
-    let returned_session_id = body.session_id.expect("compact should return session_id");
-    assert_eq!(returned_session_id, session_id, "same-session compact");
+    let status = response.status();
+    let response_body = body_bytes(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "compact response: {}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let body: CompactSessionResponse = serde_json::from_slice(&response_body).unwrap();
+    assert!(body.compacted, "compact should complete synchronously");
 
     let state = runtime
         .event_store()
@@ -2053,7 +2195,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .unwrap();
     let restored_context = astrcode_core::llm::LlmContent::join_text(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .flat_map(|message| &message.message.content),
@@ -2066,7 +2208,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
@@ -2074,26 +2215,20 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     let _ = fs::remove_file(read_fixture);
 }
 
-async fn create_session(app: Router, token: &str) -> String {
-    let response = post_json(app, "/api/sessions", r#"{"workingDir":"."}"#, token).await;
+async fn create_session(app: Router) -> String {
+    let response = post_json(app, "/api/sessions", r#"{"workingDir":"."}"#).await;
     assert_eq!(response.status(), StatusCode::OK);
     serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(response).await)
         .unwrap()
         .session_id
 }
 
-async fn post_json(
-    app: Router,
-    uri: &str,
-    body: &'static str,
-    token: &str,
-) -> axum::response::Response {
+async fn post_json(app: Router, uri: &str, body: &'static str) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method(Method::POST)
             .uri(uri)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
             .body(Body::from(body))
             .unwrap(),
     )
@@ -2101,18 +2236,12 @@ async fn post_json(
     .unwrap()
 }
 
-async fn post_json_owned(
-    app: Router,
-    uri: &str,
-    body: String,
-    token: &str,
-) -> axum::response::Response {
+async fn post_json_owned(app: Router, uri: &str, body: String) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method(Method::POST)
             .uri(uri)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
             .body(Body::from(body))
             .unwrap(),
     )
@@ -2120,13 +2249,12 @@ async fn post_json_owned(
     .unwrap()
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(app: Router, uri: &str, token: &str) -> T {
+async fn get_json<T: serde::de::DeserializeOwned>(app: Router, uri: &str) -> T {
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .uri(uri)
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2143,6 +2271,12 @@ async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
         .to_vec()
 }
 
+async fn response_status_and_body(response: axum::response::Response) -> (StatusCode, String) {
+    let status = response.status();
+    let body = String::from_utf8_lossy(&body_bytes(response).await).into_owned();
+    (status, body)
+}
+
 async fn read_sse_until(mut body: Body, needle: &str) -> String {
     let deadline = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(deadline);
@@ -2150,7 +2284,7 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 
     loop {
         tokio::select! {
-            _ = &mut deadline => panic!("timed out waiting for SSE payload containing {needle}"),
+            _ = &mut deadline => panic!("timed out waiting for SSE payload containing {needle}; collected: {collected}"),
             frame = body.frame() => {
                 let frame = frame.expect("sse body should stay open").unwrap();
                 let Some(chunk) = frame.data_ref() else {
@@ -2170,15 +2304,19 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 /// filesystem path for state persistence.
 struct TestEventStore {
     inner: InMemoryEventStore,
-    temp_dir: PathBuf,
+    temp_dir: tempfile::TempDir,
 }
 
 impl TestEventStore {
     fn new() -> Self {
         Self {
             inner: InMemoryEventStore::new(),
-            temp_dir: std::env::temp_dir(),
+            temp_dir: tempfile::tempdir().unwrap(),
         }
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.temp_dir.path().join("config.toml")
     }
 }
 
@@ -2224,15 +2362,15 @@ impl SessionReader for TestEventStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for TestEventStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
         self.inner
-            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
             .await
     }
 
@@ -2255,7 +2393,7 @@ impl SessionPathResolver for TestEventStore {
     ) -> Result<Option<PathBuf>, StorageError> {
         // Verify the session exists, then return a subdirectory in temp.
         self.inner.session_read_model(session_id).await?;
-        Ok(Some(self.temp_dir.join(session_id.as_str())))
+        Ok(Some(self.temp_dir.path().join(session_id.as_str())))
     }
 
     async fn planned_session_store_dir(
@@ -2265,7 +2403,7 @@ impl SessionPathResolver for TestEventStore {
         _parent_session_id: Option<&SessionId>,
         _source_extension: Option<&str>,
     ) -> Result<Option<PathBuf>, StorageError> {
-        Ok(Some(self.temp_dir.join(session_id.as_str())))
+        Ok(Some(self.temp_dir.path().join(session_id.as_str())))
     }
 }
 
@@ -2278,16 +2416,80 @@ impl SessionEventJournal for TestEventStore {
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.inner.append_event(event).await
     }
+
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner.append_events(events).await
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionStore for TestEventStore {
-    async fn checkpoint(
+    async fn event_consumer_state(
         &self,
         session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.inner.checkpoint(session_id, cursor).await
+        consumer_id: &str,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .event_consumer_state(session_id, consumer_id)
+            .await
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+        self.inner
+            .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+            .await
+    }
+
+    async fn record_event_consumer_failure(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+        error: &str,
+        quarantine_after: u32,
+    ) -> Result<astrcode_storage::EventConsumerFailureOutcome, StorageError> {
+        self.inner
+            .record_event_consumer_failure(
+                session_id,
+                consumer_id,
+                expected_revision,
+                seq,
+                error,
+                quarantine_after,
+            )
+            .await
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .set_event_consumer_paused(session_id, consumer_id, paused)
+            .await
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: astrcode_storage::EventConsumerCheckpointReset,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+            .await
     }
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.inner.delete_session(session_id).await
@@ -2295,51 +2497,51 @@ impl SessionStore for TestEventStore {
 }
 
 async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
-    static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
+    runtime_with_extensions(llm_provider, Vec::new()).await
+}
 
+async fn runtime_with_extensions(
+    llm_provider: Arc<dyn LlmProvider>,
+    extensions: Vec<Arc<dyn Extension>>,
+) -> Arc<ServerRuntime> {
+    let event_store = Arc::new(TestEventStore::new());
+    let config_path = event_store.config_path();
+    runtime_with_event_store(llm_provider, event_store, config_path, extensions).await
+}
+
+fn mock_llm_settings() -> LlmSettings {
+    LlmSettings {
+        provider_kind: "mock".into(),
+        base_url: String::new(),
+        api_key: String::new(),
+        wire_format: ProviderWireFormat::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        model_id: "mock-model".into(),
+        max_tokens: 1024,
+        context_limit: 1024,
+        connect_timeout_secs: 1,
+        read_timeout_secs: 1,
+        max_retries: 0,
+        retry_base_delay_ms: 0,
+        supports_prompt_cache_key: false,
+        supports_stream_usage: false,
+        supports_strict_tool_use: false,
+        prompt_cache_retention: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
+    }
+}
+
+async fn runtime_with_event_store(
+    llm_provider: Arc<dyn LlmProvider>,
+    event_store: Arc<dyn SessionStore>,
+    config_path: PathBuf,
+    extensions: Vec<Arc<dyn Extension>>,
+) -> Arc<ServerRuntime> {
     let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
+        llm: mock_llm_settings(),
+        small_llm: mock_llm_settings(),
         context: ContextSettings {
             auto_compact_enabled: true,
             predictive_compact_enabled: false,
@@ -2358,33 +2560,33 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn SessionStore>;
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    extension_runner
-        .register(astrcode_extension_mode::extension())
-        .await
-        .unwrap();
-    let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+    // 测试自定义扩展随 runner 一次性装配;bundled extensions(含 astrcode-mode)
+    // 与生产 bootstrap 一样经 source generation 加载——若以 Direct 起源预注册,
+    // 后续 config update 的 source reconcile 会与同名 Direct 实例冲突。
+    let extension_runner =
+        extension_runner_with_extensions(Duration::from_secs(1), None, extensions)
+            .await
+            .unwrap();
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
-        llm_provider,
-        effective,
+        llm_provider.clone(),
+        effective.clone(),
         extension_runner.clone(),
-        context_assembler.clone(),
-        std::sync::Arc::clone(&shell_timeout_secs),
+    );
+    astrcode_server::test_support::bind_extension_host_router_for_test(
+        &extension_runner,
+        &capabilities,
+        event_store.clone(),
+        &std::env::temp_dir(),
     );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from(format!(
-                "target/test-config-{}.toml",
-                NEXT_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
-            )),
+            config_path,
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
-        shell_timeout_secs,
         Arc::clone(&capabilities),
+        std::path::PathBuf::from("."),
     ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
@@ -2398,7 +2600,35 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         Arc::clone(&child_sessions),
     ));
     child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
-    Arc::new(ServerRuntime::assemble_for_test(
+    // bundled extensions(含 astrcode-mode、session-commands、coding)经 source
+    // generation 加载,与生产 reconcile 同 origin;publication 用测试注入的 LLM
+    // 发布同一 extension epoch,既不覆盖测试 provider,也让 turn pin 的 expected
+    // epoch 与 runner Stable 一致。
+    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::default();
+    let load_context = astrcode_extensions::loader::ExtensionLoadContext {
+        working_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        host_router: Some(extension_runner.host_router()),
+        transport_profile: Default::default(),
+    };
+    let publish_capabilities = Arc::clone(&capabilities);
+    astrcode_extensions::loader::prepare_extension_generation(
+        &extension_runner,
+        &load_context,
+        &[&bundled_source],
+        &BTreeMap::new(),
+    )
+    .await
+    .unwrap_or_else(|errors| panic!("bundled extension load failed: {errors:?}"))
+    .commit_with(move |extension_generation| {
+        publish_capabilities.publish_runtime_generation_for_extension(
+            effective,
+            llm_provider.clone(),
+            llm_provider,
+            extension_generation,
+        );
+    })
+    .await;
+    Arc::new(assemble_server_runtime(
         event_store,
         config,
         session_manager,

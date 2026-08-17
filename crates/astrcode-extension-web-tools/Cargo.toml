@@ -14,6 +14,9 @@ scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

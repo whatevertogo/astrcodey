@@ -17,7 +17,7 @@ function resolveRunInfo(): RunInfoDto | undefined {
     const raw = fs.readFileSync(runInfoPath, 'utf8')
     const info = JSON.parse(raw)
     if (info?.port) {
-      return { port: info.port, authToken: info.authToken ?? '' }
+      return { port: info.port }
     }
     return undefined
   } catch {
@@ -36,9 +36,6 @@ export default defineConfig({
     tailwindcss(),
   ],
   clearScreen: false,
-  define: runInfo
-    ? { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify(runInfo.authToken) }
-    : undefined,
   server: {
     port: 5173,
     strictPort: true,

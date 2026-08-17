@@ -24,6 +24,15 @@ pub enum StorageError {
     /// 调用方提交的持久事件不能作为会话的下一条事实。
     #[error("Invalid durable event: {0}")]
     InvalidEvent(String),
+    /// EventLog 已写入完整记录，但 fsync 的结果不可确定。
+    ///
+    /// 在明确的 sync retry 或重新打开会话前，该会话不得继续写入新事件。
+    #[error("Durability is uncertain for session {session_id} through seq {through_seq}: {reason}")]
+    DurabilityUncertain {
+        session_id: SessionId,
+        through_seq: u64,
+        reason: String,
+    },
     /// 持久事件流不能构造合法的会话状态。
     #[error("Corrupt session event log: {0}")]
     CorruptLog(String),
@@ -33,6 +42,12 @@ pub enum StorageError {
     /// 当前存储实现不支持该能力。
     #[error("Unsupported storage operation: {0}")]
     Unsupported(String),
+}
+
+/// `append_events` 契约要求返回与输入等长的批次；实现返回更短的批次属于实现 bug，
+/// 两个单事件入口在此收敛为同一个不可达兜底。
+pub(crate) fn short_batch_result() -> StorageError {
+    StorageError::InvalidEvent("batch append returned fewer events than submitted".into())
 }
 
 impl StorageError {
@@ -49,6 +64,13 @@ impl StorageError {
                     | std::io::ErrorKind::NotConnected
             ),
             _ => false,
+        }
+    }
+
+    pub const fn uncertain_through_seq(&self) -> Option<u64> {
+        match self {
+            Self::DurabilityUncertain { through_seq, .. } => Some(*through_seq),
+            _ => None,
         }
     }
 }

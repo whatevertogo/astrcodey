@@ -148,10 +148,10 @@ fn resolve_profile_api_key(
 
     // 2) fallback to known env keys (pi-mono style)
     for key in known_env_keys_for_profile(profile) {
-        if let Some(val) = env(key) {
-            if !val.trim().is_empty() {
-                return Ok(val);
-            }
+        if let Some(val) = env(key)
+            && !val.trim().is_empty()
+        {
+            return Ok(val);
         }
     }
 
@@ -363,16 +363,16 @@ fn resolve_api_key_with_policy(
 ///
 /// 注意：此函数不会执行 `!command`，只做静态判断和 env var presence 检测。
 pub fn profile_has_resolvable_api_key(profile: &Profile) -> bool {
-    if let Some(raw) = profile.api_key.as_deref() {
-        if let Some((kind, value)) = classify_api_key_input(raw) {
-            match kind {
-                ApiKeyInputKind::EnvRef => {
-                    return process_env_lookup(value).is_some_and(|v| !v.trim().is_empty());
-                },
-                ApiKeyInputKind::ShellCommand
-                | ApiKeyInputKind::EnvVarLike
-                | ApiKeyInputKind::PlainText => return true,
-            }
+    if let Some(raw) = profile.api_key.as_deref()
+        && let Some((kind, value)) = classify_api_key_input(raw)
+    {
+        match kind {
+            ApiKeyInputKind::EnvRef => {
+                return process_env_lookup(value).is_some_and(|v| !v.trim().is_empty());
+            },
+            ApiKeyInputKind::ShellCommand
+            | ApiKeyInputKind::EnvVarLike
+            | ApiKeyInputKind::PlainText => return true,
         }
     }
 
@@ -430,9 +430,6 @@ fn build_agent_settings(runtime: &RuntimeSection) -> AgentSettings {
         tool_max_parallel_calls: runtime
             .agent_tool_max_parallel_calls
             .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
-        shell_timeout_secs: runtime
-            .shell_timeout_secs
-            .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
         approval_mode: runtime
             .approval_mode
             .as_deref()
@@ -549,7 +546,6 @@ fn merge_runtime_section(base: &mut RuntimeSection, overlay: RuntimeSection) {
     merge_field!(post_compact_max_tokens_per_file);
     merge_field!(agent_max_depth);
     merge_field!(agent_tool_max_parallel_calls);
-    merge_field!(shell_timeout_secs);
     merge_field!(allow_api_key_shell_command);
     merge_field!(approval_mode);
     if let Some(states) = overlay.extension_states {

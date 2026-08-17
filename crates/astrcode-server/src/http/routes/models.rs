@@ -41,7 +41,12 @@ async fn run_model_test(
 ) -> ModelTestResponseDto {
     let start = std::time::Instant::now();
     match provider
-        .generate(vec![astrcode_core::llm::LlmMessage::user("Hi")], vec![])
+        .generate_request(astrcode_core::llm::LlmRequest::new(
+            vec![std::sync::Arc::new(astrcode_core::llm::LlmMessage::user(
+                "Hi",
+            ))],
+            vec![],
+        ))
         .await
     {
         Ok(mut rx) => {

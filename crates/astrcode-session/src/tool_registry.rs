@@ -2,13 +2,13 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    path::Path,
     sync::Arc,
 };
 
 use astrcode_core::tool::{
     ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-    ToolExecutionResult, ToolPromptMetadata, access::ResourceAccess,
+    ToolExecutionPolicy, ToolExecutionResult, ToolPlanningContext, ToolPromptMetadata,
+    access::ToolPlan,
 };
 use serde_json::Value;
 
@@ -17,6 +17,7 @@ use serde_json::Value;
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
     prompt_metadata: Option<ToolPromptMetadata>,
 }
 
@@ -46,8 +47,8 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolRegistryError> {
-        let mut definition = tool.definition();
-        definition.execution_mode = tool.execution_mode();
+        let definition = tool.definition();
+        let execution_policy = tool.execution_policy();
         let name = definition.name.clone();
         let prompt_metadata = tool.prompt_metadata();
         if self.tools.contains_key(&name) {
@@ -58,6 +59,7 @@ impl ToolRegistry {
             RegisteredTool {
                 tool,
                 definition,
+                execution_policy,
                 prompt_metadata,
             },
         );
@@ -86,20 +88,44 @@ impl ToolRegistry {
     pub async fn execute(
         &self,
         name: &str,
-        mut args: serde_json::Value,
+        args: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError> {
         match self.tools.get(name) {
-            Some(entry) => {
-                if entry.definition.strict {
-                    normalize_strict_arguments(
-                        &mut args,
-                        &entry.definition.parameters,
-                        &entry.definition.parameters,
-                    );
-                }
-                entry.tool.execute(args, ctx).await
-            },
+            Some(entry) => entry.tool.execute(args, ctx).await,
+            None => Err(ToolError::NotFound(name.into())),
+        }
+    }
+
+    /// Normalize provider quirks once, after input transforms and before admission/planning.
+    pub(crate) fn normalize_final_arguments(
+        &self,
+        name: &str,
+        args: &mut Value,
+    ) -> Result<(), ToolError> {
+        let entry = self
+            .tools
+            .get(name)
+            .ok_or_else(|| ToolError::NotFound(name.into()))?;
+        normalize_stringified_booleans(args, &entry.definition.parameters);
+        if entry.definition.strict {
+            normalize_strict_arguments(
+                args,
+                &entry.definition.parameters,
+                &entry.definition.parameters,
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn plan(
+        &self,
+        name: &str,
+        args: &Value,
+        ctx: &ToolPlanningContext,
+    ) -> Result<ToolPlan, ToolError> {
+        match self.tools.get(name) {
+            Some(entry) => entry.tool.plan(args, ctx).await,
             None => Err(ToolError::NotFound(name.into())),
         }
     }
@@ -107,20 +133,8 @@ impl ToolRegistry {
     pub fn execution_mode(&self, name: &str) -> ExecutionMode {
         self.tools
             .get(name)
-            .map(|entry| entry.definition.execution_mode)
+            .map(|entry| entry.execution_policy.mode)
             .unwrap_or(ExecutionMode::Sequential)
-    }
-
-    pub fn resource_accesses(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        working_dir: &Path,
-    ) -> Result<Vec<ResourceAccess>, ToolError> {
-        match self.tools.get(name) {
-            Some(entry) => entry.tool.resource_accesses(args, working_dir),
-            None => Err(ToolError::NotFound(name.into())),
-        }
     }
 
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
@@ -185,6 +199,50 @@ impl ToolRegistry {
                 .collect(),
         };
         Self { tools }
+    }
+}
+
+fn normalize_stringified_booleans(arguments: &mut Value, schema: &Value) -> usize {
+    match arguments {
+        Value::String(raw) if schema["type"] == "boolean" => {
+            let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                *arguments = Value::Bool(normalized);
+                1
+            } else {
+                0
+            }
+        },
+        Value::Object(values) => schema["properties"]
+            .as_object()
+            .map(|properties| {
+                values
+                    .iter_mut()
+                    .filter_map(|(name, value)| {
+                        properties
+                            .get(name)
+                            .map(|field_schema| normalize_stringified_booleans(value, field_schema))
+                    })
+                    .sum()
+            })
+            .unwrap_or_default(),
+        Value::Array(values) => match &schema["items"] {
+            Value::Array(item_schemas) => values
+                .iter_mut()
+                .zip(item_schemas)
+                .map(|(value, item_schema)| normalize_stringified_booleans(value, item_schema))
+                .sum(),
+            Value::Object(_) => values
+                .iter_mut()
+                .map(|value| normalize_stringified_booleans(value, &schema["items"]))
+                .sum(),
+            _ => 0,
+        },
+        _ => 0,
     }
 }
 
@@ -320,12 +378,22 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
             }
         }
 
-        fn execution_mode(&self) -> ExecutionMode {
-            self.1
+        fn execution_policy(&self) -> ToolExecutionPolicy {
+            ToolExecutionPolicy {
+                mode: self.1,
+                ..ToolExecutionPolicy::SEQUENTIAL
+            }
+        }
+
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &ToolPlanningContext,
+        ) -> Result<ToolPlan, ToolError> {
+            Ok(ToolPlan::default())
         }
 
         async fn execute(
@@ -346,12 +414,19 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
                 strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
             }
         }
 
         fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
             Some(ToolPromptMetadata::default().deferred_discovery_group(self.1))
+        }
+
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &ToolPlanningContext,
+        ) -> Result<ToolPlan, ToolError> {
+            Ok(ToolPlan::default())
         }
 
         async fn execute(
@@ -429,17 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn list_definitions_carries_tool_execution_mode() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .register(Arc::new(NamedTool("parallel", ExecutionMode::Parallel)))
-            .unwrap();
-
-        let definition = registry.find_definition("parallel").unwrap();
-        assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
-    }
-
-    #[test]
     fn session_tool_selection_derives_filtered_registry() {
         let mut registry = ToolRegistry::new();
         registry
@@ -463,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_argument_normalization_only_removes_synthetic_optional_nulls() {
+    fn final_argument_normalization_handles_provider_booleans_and_optional_nulls() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -486,9 +550,10 @@ mod tests {
             "required": "value",
             "optional": null,
             "nullable": null,
-            "items": [{"flag": null}]
+            "items": [{"flag": "TRUE"}, {"flag": null}]
         });
 
+        assert_eq!(normalize_stringified_booleans(&mut arguments, &schema), 1);
         normalize_strict_arguments(&mut arguments, &schema, &schema);
 
         assert_eq!(
@@ -496,7 +561,7 @@ mod tests {
             serde_json::json!({
                 "required": "value",
                 "nullable": null,
-                "items": [{}]
+                "items": [{"flag": true}, {}]
             })
         );
     }

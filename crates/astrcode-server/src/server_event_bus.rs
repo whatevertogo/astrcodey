@@ -5,7 +5,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
+    event::{
+        CustomEventAudience, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
+    },
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
@@ -15,10 +17,6 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
 use crate::protocol_mapping::session_snapshot;
-
-const ASK_USER_EXTENSION_ID: &str = "astrcode-ask-user";
-const ASK_USER_PENDING_EVENT_TYPE: &str = "ask_user.pending";
-const ASK_USER_RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
 
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -55,6 +53,7 @@ pub struct ServerEventBus {
     conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
+    downstream_observers: Mutex<Vec<Arc<dyn SessionEventObserver>>>,
 }
 
 impl ServerEventBus {
@@ -69,7 +68,12 @@ impl ServerEventBus {
             conversation_events: Mutex::new(HashMap::new()),
             session_routes: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashMap::new()),
+            downstream_observers: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn add_observer(&self, observer: Arc<dyn SessionEventObserver>) {
+        self.downstream_observers.lock().push(observer);
     }
 
     /// Subscribe to the complete transport-facing notification stream.
@@ -89,7 +93,11 @@ impl ServerEventBus {
         &self,
         session_id: &SessionId,
     ) -> broadcast::Receiver<Arc<Event>> {
-        self.conversation_fanout(session_id).subscribe()
+        let mut fanouts = self.conversation_events.lock();
+        fanouts
+            .entry(session_id.clone())
+            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
+            .subscribe()
     }
 
     pub(crate) fn register_conversation_children(
@@ -154,34 +162,31 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
-        self.broadcast_global_extension_event(&event);
+        self.broadcast_global_custom_event(&event);
         let _ = self
             .all_notifications
             .send(ClientNotification::Event((*event).clone()));
+        let observers = self.downstream_observers.lock().clone();
+        for observer in observers {
+            observer.publish(Arc::clone(&event));
+        }
     }
 
-    fn broadcast_global_extension_event(&self, event: &Event) {
-        let EventPayload::Live(LiveEventPayload::ExtensionEvent(extension_event)) = &event.payload
-        else {
+    fn broadcast_global_custom_event(&self, event: &Event) {
+        let Some(LiveEventPayload::CustomEvent(custom_event)) = event.payload.as_live() else {
             return;
         };
-        if extension_event.extension_id != ASK_USER_EXTENSION_ID {
-            return;
-        }
-        if !matches!(
-            extension_event.event_type.as_str(),
-            ASK_USER_PENDING_EVENT_TYPE | ASK_USER_RESOLVED_EVENT_TYPE
-        ) {
+        if custom_event.audience != CustomEventAudience::Global {
             return;
         }
         let _ = self
             .global_notifications
-            .send(ClientNotification::GlobalExtensionEvent {
+            .send(ClientNotification::GlobalCustomEvent {
                 session_id: event.session_id.to_string(),
-                extension_id: extension_event.extension_id.clone(),
-                event_type: extension_event.event_type.clone(),
-                schema_version: extension_event.schema_version,
-                payload: extension_event.payload.clone(),
+                extension_id: custom_event.extension_id.clone(),
+                event_type: custom_event.event_type.clone(),
+                schema_version: custom_event.schema_version,
+                payload: custom_event.payload.clone(),
             });
     }
 
@@ -212,14 +217,6 @@ impl ServerEventBus {
                     },
                 })
         })
-    }
-
-    fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
-        self.conversation_events
-            .lock()
-            .entry(session_id.clone())
-            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
-            .clone()
     }
 
     fn existing_conversation_fanout(
@@ -435,18 +432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribed_conversation_receives_published_event() {
-        let bus = ServerEventBus::new();
-        let session_id = SessionId::new("session-1");
-        let mut rx = bus.subscribe_conversation_events(&session_id);
-
-        bus.publish_event(turn_started(&session_id));
-
-        let event = rx.recv().await.expect("conversation event");
-        assert_eq!(event.session_id, session_id);
-    }
-
-    #[tokio::test]
     async fn all_notifications_include_events_and_global_notifications() {
         let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
@@ -521,7 +506,7 @@ mod tests {
                 agent_name: "explore".into(),
                 task: "inspect".into(),
                 tool_selection: None,
-                tool_call_id: ToolCallId::new("agent-call"),
+                tool_call_id: Some(ToolCallId::new("agent-call")),
             },
         ));
         assert!(matches!(
@@ -554,60 +539,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_user_pending_broadcasts_to_global_notifications() {
-        use astrcode_core::event::ExtensionEventData;
+    async fn custom_event_audience_routes_session_and_global_delivery() {
+        use astrcode_core::event::CustomEventData;
 
         let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
+        let mut conversation_rx = bus.subscribe_conversation_events(&session_id);
         let mut global_rx = bus.subscribe_global_notifications();
 
-        bus.publish_event(live(
+        bus.publish_event(durable(
             session_id.clone(),
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
-                extension_id: "astrcode-ask-user".into(),
-                event_type: "ask_user.pending".into(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "audit".into(),
+                event_type: "audit.recorded".into(),
                 schema_version: 1,
-                payload: serde_json::json!({ "callId": "call-1" }),
+                audience: CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({}),
             }),
         ));
         assert!(matches!(
+            conversation_rx.recv().await,
+            Ok(event) if matches!(&event.payload, EventPayload::Durable(
+                DurableEventPayload::CustomEvent(_)
+            ))
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "progress".into(),
+                event_type: "progress.changed".into(),
+                schema_version: 1,
+                audience: CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({}),
+            }),
+        ));
+        assert!(matches!(
+            conversation_rx.recv().await,
+            Ok(event) if matches!(&event.payload, EventPayload::Live(
+                LiveEventPayload::CustomEvent(_)
+            ))
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "questions".into(),
+                event_type: "question.pending".into(),
+                schema_version: 1,
+                audience: CustomEventAudience::Global,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        ));
+        assert!(conversation_rx.recv().await.is_ok());
+        assert!(matches!(
             global_rx.recv().await,
-            Ok(ClientNotification::GlobalExtensionEvent {
+            Ok(ClientNotification::GlobalCustomEvent {
                 session_id: broadcast_session,
                 extension_id,
                 event_type,
                 schema_version: 1,
                 ..
             }) if broadcast_session == session_id.to_string()
-                && extension_id == "astrcode-ask-user"
-                && event_type == "ask_user.pending"
+                && extension_id == "questions"
+                && event_type == "question.pending"
         ));
-
-        // resolved 同样广播；其他扩展的事件不广播。
-        bus.publish_event(live(
-            session_id.clone(),
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
-                extension_id: "astrcode-ask-user".into(),
-                event_type: "ask_user.resolved".into(),
-                schema_version: 1,
-                payload: serde_json::json!({ "callId": "call-1" }),
-            }),
-        ));
-        assert!(matches!(
-            global_rx.recv().await,
-            Ok(ClientNotification::GlobalExtensionEvent { event_type, .. })
-                if event_type == "ask_user.resolved"
-        ));
-
-        bus.publish_event(live(
-            session_id,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
-                extension_id: "other-extension".into(),
-                event_type: "whatever".into(),
-                schema_version: 1,
-                payload: serde_json::json!({}),
-            }),
-        ));
-        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

@@ -1,24 +1,34 @@
 //! 受并发、时间和输出上限约束的扩展子进程执行器。
 
-use std::{future::Future, process::Stdio, sync::Arc, time::Duration};
+use std::{ffi::OsString, process::Stdio, time::Duration};
 
-use astrcode_extension_sdk::s5r::ErrorPayload;
-use serde_json::{Value, json};
+use astrcode_extension_sdk::{
+    host::{
+        EmptyRequest, HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
+        HostProcessInputRequest, HostProcessOutput, HostProcessReadRequest, HostProcessRequest,
+        HostProcessStartRequest, HostProcessTargetRequest, internal::HostOperationGroup,
+    },
+    s5r::ErrorPayload,
+    wire::WireErrorCode,
+};
+use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Semaphore, SemaphorePermit},
-    time::{Instant, timeout_at},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{block_on_async, capability::ProcessCapability, path::canonicalize_workspace_path};
+use super::{
+    InvokeContext, acknowledgement, dispatch, invalid_group_operation,
+    path::canonicalize_host_path, process_handles::ProcessHandleStore, run_blocking_io,
+};
+use crate::process_supervision::{SupervisedChild, SupervisedCommand};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 const MAX_COMBINED_BYTES: usize = 1024 * 1024;
-const MAX_STDIN_BYTES: usize = 1024 * 1024;
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 
 const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("PAGER", "cat"),
@@ -43,43 +53,151 @@ const SAFE_INHERITED_ENV: &[&str] = &[
 ];
 
 pub(super) struct ProcessGroup {
-    runner: Arc<ProcessRunner>,
+    runner: ProcessRunner,
+    handles: ProcessHandleStore,
     default_working_dir: Option<String>,
 }
 
 impl ProcessGroup {
     pub(super) fn new(default_working_dir: Option<String>) -> Self {
         Self {
-            runner: Arc::new(ProcessRunner::default()),
+            runner: ProcessRunner::default(),
+            handles: ProcessHandleStore::default(),
             default_working_dir,
         }
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
-        capability: ProcessCapability,
+        operation: HostOperation,
         input: Value,
-        working_dir: Option<&str>,
-        cancel_token: Option<&CancellationToken>,
+        context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        match capability {
-            ProcessCapability::Spawn => {
-                let working_dir = working_dir
-                    .map(str::to_owned)
-                    .or_else(|| self.default_working_dir.clone());
-                let cancel_token = cancel_token.cloned();
-                let runner = Arc::clone(&self.runner);
-                block_on_async(async move {
-                    runner
-                        .spawn(input, working_dir.as_deref(), cancel_token.as_ref())
-                        .await
-                })?
+        let working_dir = context
+            .working_dir
+            .as_deref()
+            .or(self.default_working_dir.as_deref());
+        let owner = || {
+            context
+                .session_id
+                .as_deref()
+                .map(|session_id| (session_id, context.extension_instance_id))
+                .ok_or_else(|| {
+                    ErrorPayload::new(
+                        WireErrorCode::ContextUnavailable,
+                        format!("{} requires a session", operation.wire_name()),
+                    )
+                })
+        };
+        match operation {
+            HostOperation::ProcessSpawn => {
+                dispatch(operation, &input, |request| {
+                    self.runner
+                        .spawn(request, working_dir, context.cancel_token.as_ref())
+                })
+                .await
             },
+            HostOperation::ProcessStart => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessStartRequest, _, _>(operation, &input, |request| {
+                    self.handles.start(
+                        request,
+                        working_dir,
+                        session_id,
+                        extension_instance_id,
+                        context.cancel_token.as_ref(),
+                    )
+                })
+                .await
+            },
+            HostOperation::ProcessRead => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessReadRequest, _, _>(operation, &input, |request| {
+                    self.handles.read(
+                        request,
+                        session_id,
+                        extension_instance_id,
+                        context.cancel_token.as_ref(),
+                    )
+                })
+                .await
+            },
+            HostOperation::ProcessInput => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessInputRequest, _, _>(operation, &input, |request| async move {
+                    self.handles
+                        .input(request, session_id, extension_instance_id)
+                        .await?;
+                    Ok(acknowledgement())
+                })
+                .await
+            },
+            HostOperation::ProcessStatus => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles
+                            .status(request, session_id, extension_instance_id)
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessPromote => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles
+                            .promote(request, session_id, extension_instance_id)?;
+                        Ok(acknowledgement())
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessKill => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles
+                            .kill(request, session_id, extension_instance_id)?;
+                        Ok(acknowledgement())
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessList => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<EmptyRequest, _, _>(operation, &input, |_| async move {
+                    Ok(self.handles.list(session_id, extension_instance_id))
+                })
+                .await
+            },
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::Process,
+            )),
         }
+    }
+
+    pub(super) fn is_available(&self, working_dir: Option<&str>) -> bool {
+        working_dir.is_some() || self.default_working_dir.is_some()
+    }
+
+    pub(super) fn cleanup_session(&self, session_id: &str) {
+        self.handles.cleanup_session(session_id);
+    }
+
+    pub(super) fn cleanup_extension(&self, extension_instance_id: super::ExtensionInstanceId) {
+        self.handles.cleanup_extension(extension_instance_id);
     }
 }
 
-pub(super) struct ProcessRunner {
+struct ProcessRunner {
     permits: Semaphore,
 }
 
@@ -92,68 +210,64 @@ impl Default for ProcessRunner {
 }
 
 impl ProcessRunner {
-    pub(super) async fn spawn(
+    async fn spawn(
         &self,
-        input: Value,
+        request: HostProcessRequest,
         working_dir: Option<&str>,
         cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
-        let timeout = bounded_timeout(&input);
+    ) -> Result<HostProcessOutput, ErrorPayload> {
+        let timeout = validated_timeout(request.timeout_ms)?;
         let deadline = Instant::now() + timeout;
         let _permit = self.acquire_permit(deadline, cancel_token).await?;
-        let command = required_string(&input, "command")?;
-        let args = string_array(&input, "args")?;
-        let stdin = input.get("stdin").and_then(Value::as_str);
-        if stdin.is_some_and(|value| value.len() > MAX_STDIN_BYTES) {
+        if request.command.is_empty() {
             return Err(ErrorPayload::new(
-                "input_too_large",
-                format!("stdin exceeds {MAX_STDIN_BYTES} bytes"),
+                WireErrorCode::InvalidInput,
+                "command must not be empty",
             ));
         }
-        let cwd = resolve_cwd(working_dir, input.get("cwd").and_then(Value::as_str))?;
+        let HostProcessRequest {
+            command,
+            args,
+            cwd: relative_cwd,
+            stdin,
+            timeout_ms: _,
+        } = request;
+        let working_dir = working_dir.map(str::to_owned);
+        let cwd =
+            run_blocking_io(move || resolve_cwd(working_dir.as_deref(), relative_cwd.as_deref()))
+                .await?;
+        ensure_spawn_active(deadline, cancel_token)?;
 
         let mut process = tokio::process::Command::new(command);
         process
             .args(args)
             .current_dir(cwd)
-            .kill_on_drop(true)
-            .env_clear()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (key, value) in safe_child_env() {
-            process.env(key, value);
-        }
-        for (key, value) in NONINTERACTIVE_ENV {
-            process.env(key, value);
-        }
         if stdin.is_some() {
             process.stdin(Stdio::piped());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            process.as_std_mut().process_group(0);
-        }
 
-        let mut child = process
-            .spawn()
-            .map_err(|error| ErrorPayload::new("spawn_failed", error.to_string()))?;
-        let child_pid = child.id();
-        let mut child_stdin = child.stdin.take();
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ErrorPayload::new("process_failed", "child stdout pipe unavailable"))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ErrorPayload::new("process_failed", "child stderr pipe unavailable"))?;
+        let mut child = spawn_supervised(process)?;
+        let mut child_stdin = child.take_stdin();
+        let mut stdout = child.take_stdout().ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::ProcessFailed,
+                "child stdout pipe unavailable",
+            )
+        })?;
+        let mut stderr = child.take_stderr().ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::ProcessFailed,
+                "child stderr pipe unavailable",
+            )
+        })?;
 
         let write_stdin = async move {
             if let (Some(content), Some(mut pipe)) = (stdin, child_stdin.take()) {
-                pipe.write_all(content.as_bytes())
-                    .await
-                    .map_err(|error| ErrorPayload::new("stdin_failed", error.to_string()))?;
+                pipe.write_all(content.as_bytes()).await.map_err(|error| {
+                    ErrorPayload::new(WireErrorCode::StdinFailed, error.to_string())
+                })?;
             }
             Ok::<(), ErrorPayload>(())
         };
@@ -186,7 +300,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new("stdout_failed", error.to_string()));
+                                return Err(ErrorPayload::new(WireErrorCode::StdoutFailed, error.to_string()));
                             },
                         }
                     },
@@ -206,7 +320,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new("stderr_failed", error.to_string()));
+                                return Err(ErrorPayload::new(WireErrorCode::StderrFailed, error.to_string()));
                             },
                         }
                     },
@@ -223,30 +337,36 @@ impl ProcessRunner {
         };
         let collect = async {
             let ((), output) = tokio::try_join!(write_stdin, collect_output)?;
-            let status = child
-                .wait()
-                .await
-                .map_err(|error| ErrorPayload::new("process_failed", error.to_string()))?;
+            let status = child.wait().await.map_err(|error| {
+                ErrorPayload::new(WireErrorCode::ProcessFailed, error.to_string())
+            })?;
             Ok::<_, ErrorPayload>((output, status))
         };
 
-        let outcome = run_until_deadline(collect, deadline, cancel_token).await;
+        let outcome = super::run_until_deadline(
+            collect,
+            deadline,
+            cancel_token,
+            || ErrorPayload::new(WireErrorCode::Timeout, "process timed out"),
+            cancelled,
+        )
+        .await;
         match outcome {
-            Ok(Ok((
+            Ok((
                 (stdout, stderr, combined, stdout_truncated, stderr_truncated, combined_truncated),
                 status,
-            ))) => Ok(json!({
-                "status": status.code(),
-                "success": status.success(),
-                "stdout": String::from_utf8_lossy(&stdout),
-                "stderr": String::from_utf8_lossy(&stderr),
-                "combined": String::from_utf8_lossy(&combined),
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
-                "combined_truncated": combined_truncated,
-            })),
-            Ok(Err(error)) | Err(error) => {
-                terminate_child(&mut child, child_pid).await;
+            )) => Ok(HostProcessOutput {
+                status: status.code(),
+                success: status.success(),
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                combined: String::from_utf8_lossy(&combined).into_owned(),
+                stdout_truncated,
+                stderr_truncated,
+                combined_truncated,
+            }),
+            Err(error) => {
+                let _ = child.terminate(TERMINATION_GRACE).await;
                 Err(error)
             },
         }
@@ -258,48 +378,23 @@ impl ProcessRunner {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<SemaphorePermit<'a>, ErrorPayload> {
         let acquire = async {
-            timeout_at(deadline, self.permits.acquire())
-                .await
-                .map_err(|_| {
-                    ErrorPayload::new("timeout", "process timed out waiting for capacity")
-                })?
-                .map_err(|_| ErrorPayload::new("backend_unavailable", "process runner stopped"))
+            self.permits.acquire().await.map_err(|_| {
+                ErrorPayload::new(WireErrorCode::BackendUnavailable, "process runner stopped")
+            })
         };
-        match cancel_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => Err(cancelled()),
-                    result = acquire => result,
-                }
+        super::run_until_deadline(
+            acquire,
+            deadline,
+            cancel_token,
+            || {
+                ErrorPayload::new(
+                    WireErrorCode::Timeout,
+                    "process timed out waiting for capacity",
+                )
             },
-            None => acquire.await,
-        }
-    }
-}
-
-async fn run_until_deadline<F, T>(
-    operation: F,
-    deadline: Instant,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<Result<T, ErrorPayload>, ErrorPayload>
-where
-    F: Future<Output = Result<T, ErrorPayload>>,
-{
-    let timed = async {
-        timeout_at(deadline, operation)
-            .await
-            .map_err(|_| ErrorPayload::new("timeout", "process timed out"))
-    };
-    match cancel_token {
-        Some(token) => {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err(cancelled()),
-                result = timed => result,
-            }
-        },
-        None => timed.await,
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -314,60 +409,49 @@ where
     }
 }
 
-async fn terminate_child(child: &mut tokio::process::Child, child_pid: Option<u32>) {
-    kill_process_group(child_pid);
-    #[cfg(not(unix))]
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
-
-fn resolve_cwd(
+pub(super) fn resolve_cwd(
     working_dir: Option<&str>,
     relative_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, ErrorPayload> {
-    let root = working_dir
-        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))?;
-    let path = canonicalize_workspace_path(root, relative_cwd.unwrap_or("."))?;
+    let root = working_dir.ok_or_else(|| {
+        ErrorPayload::new(WireErrorCode::BackendUnavailable, "working_dir not set")
+    })?;
+    // 与文件工具一致：绝对路径按文件系统解析，相对路径仍限工作区内。
+    let path = canonicalize_host_path(root, relative_cwd.unwrap_or("."))?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            WireErrorCode::InvalidInput,
             "process cwd must be an existing directory",
         ));
     }
     Ok(path)
 }
 
-fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, ErrorPayload> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ErrorPayload::new("invalid_input", format!("{key} must be a string")))
+pub(super) fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> {
+    let timeout_ms = timeout_ms.unwrap_or(HOST_PROCESS_DEFAULT_TIMEOUT_MS);
+    if !(1..=HOST_PROCESS_MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("timeout_ms must be between 1 and {HOST_PROCESS_MAX_TIMEOUT_MS}"),
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
 }
 
-fn string_array<'a>(input: &'a Value, key: &str) -> Result<Vec<&'a str>, ErrorPayload> {
-    let Some(value) = input.get(key) else {
-        return Ok(Vec::new());
-    };
-    value
-        .as_array()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", format!("{key} must be an array")))?
-        .iter()
-        .map(|value| {
-            value.as_str().ok_or_else(|| {
-                ErrorPayload::new("invalid_input", format!("{key} values must be strings"))
-            })
-        })
-        .collect()
-}
-
-fn bounded_timeout(input: &Value) -> Duration {
-    input
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_TIMEOUT)
-        .min(MAX_TIMEOUT)
+fn ensure_spawn_active(
+    deadline: Instant,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(), ErrorPayload> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
+    }
+    if Instant::now() >= deadline {
+        return Err(ErrorPayload::new(
+            WireErrorCode::Timeout,
+            "process timed out",
+        ));
+    }
+    Ok(())
 }
 
 fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
@@ -376,90 +460,154 @@ fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
     accepted < chunk.len()
 }
 
-fn safe_child_env() -> impl Iterator<Item = (String, String)> {
-    std::env::vars()
-        .filter(|(key, _)| SAFE_INHERITED_ENV.contains(&key.as_str()) || key.starts_with("LC_"))
+fn safe_child_env() -> impl Iterator<Item = (OsString, OsString)> {
+    filter_safe_child_env(std::env::vars_os())
 }
 
-fn cancelled() -> ErrorPayload {
-    ErrorPayload::new("cancelled", "process cancelled")
-}
-
-#[cfg(unix)]
-fn kill_process_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        // SAFETY: the child was started as the leader of its own process group.
-        unsafe {
-            let _ = libc::kill(-(pid as i32), libc::SIGKILL);
-        }
+pub(super) fn configure_process(command: &mut tokio::process::Command) {
+    command.env_clear();
+    for (key, value) in safe_child_env() {
+        command.env(key, value);
+    }
+    for (key, value) in NONINTERACTIVE_ENV {
+        command.env(key, value);
     }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(_pid: Option<u32>) {}
+/// Configures and spawns a supervised child, mapping spawn failure to a wire payload.
+pub(super) fn spawn_supervised(
+    command: tokio::process::Command,
+) -> Result<SupervisedChild, ErrorPayload> {
+    let mut command = command;
+    configure_process(&mut command);
+    SupervisedCommand::new(command)
+        .spawn()
+        .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))
+}
+
+fn filter_safe_child_env(
+    environment: impl Iterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (OsString, OsString)> {
+    environment.filter(|(key, _)| {
+        key.to_str()
+            .is_some_and(|key| SAFE_INHERITED_ENV.contains(&key) || key.starts_with("LC_"))
+    })
+}
+
+fn cancelled() -> ErrorPayload {
+    ErrorPayload::new(WireErrorCode::Cancelled, "process cancelled")
+}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn spawn_checkpoint_rejects_cancellation_and_elapsed_deadline() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let cancelled = ensure_spawn_active(Instant::now() + Duration::from_secs(1), Some(&token))
+            .expect_err("cancelled process must not spawn");
+        assert_eq!(cancelled.code_enum(), Some(WireErrorCode::Cancelled));
+
+        let timed_out = ensure_spawn_active(Instant::now() - Duration::from_secs(1), None)
+            .expect_err("expired process must not spawn");
+        assert_eq!(timed_out.code_enum(), Some(WireErrorCode::Timeout));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_environment_is_bounded() {
+        let key = OsString::from_vec(b"ASTRCODE_INVALID_ENV_\xff".to_vec());
+        let inherited = filter_safe_child_env(
+            vec![
+                (key.clone(), "ignored".into()),
+                ("PATH".into(), OsString::from_vec(b"/bin:\xff".to_vec())),
+            ]
+            .into_iter(),
+        )
+        .collect::<Vec<_>>();
+
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].0, "PATH");
+    }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn drains_output_while_writing_stdin() {
         let workspace = tempdir().expect("workspace");
+        let mut request = HostProcessRequest::new("/bin/sh");
+        request.args = vec![
+            "-c".into(),
+            "dd if=/dev/zero bs=131072 count=1 2>/dev/null; cat >/dev/null".into(),
+        ];
+        request.stdin = Some("x".repeat(128 * 1024));
+        request.timeout_ms = Some(5_000);
         let output = ProcessRunner::default()
-            .spawn(
-                json!({
-                    "command": "/bin/sh",
-                    "args": ["-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null; cat >/dev/null"],
-                    "stdin": "x".repeat(128 * 1024),
-                    "timeout_ms": 5_000
-                }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect("process should not deadlock on full stdin and stdout pipes");
 
-        assert_eq!(output["success"], true);
-        assert_eq!(output["stdout"].as_str().expect("stdout").len(), 128 * 1024);
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), 128 * 1024);
     }
 
     #[tokio::test]
     async fn executes_process_in_workspace() {
         let workspace = tempdir().expect("workspace");
         let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("rustc");
+        request.args = vec!["--version".into()];
         let output = runner
-            .spawn(
-                json!({ "command": "rustc", "args": ["--version"] }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect("rustc should run");
 
-        assert_eq!(output["success"], true);
-        assert!(
-            output["stdout"]
-                .as_str()
-                .is_some_and(|text| text.contains("rustc"))
-        );
+        assert!(output.success);
+        assert!(output.stdout.contains("rustc"));
     }
 
     #[tokio::test]
     async fn rejects_cwd_outside_workspace() {
         let workspace = tempdir().expect("workspace");
         let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("rustc");
+        request.cwd = Some("..".into());
         let error = runner
-            .spawn(
-                json!({ "command": "rustc", "cwd": ".." }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect_err("parent cwd must be rejected");
 
-        assert_eq!(error.code, "permission_denied");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawns_with_absolute_cwd_outside_workspace() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside cwd");
+        let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("/bin/sh");
+        request.args = vec!["-c".into(), "pwd".into()];
+        request.cwd = Some(outside.path().to_str().expect("utf-8 cwd").into());
+        let output = runner
+            .spawn(request, workspace.path().to_str(), None)
+            .await
+            .expect("absolute cwd outside the workspace must be allowed");
+
+        assert!(output.success);
+        let expected = outside.path().canonicalize().expect("canonical cwd");
+        assert!(
+            output
+                .stdout
+                .contains(expected.to_str().expect("utf-8 path")),
+            "stdout: {:?}",
+            output.stdout
+        );
     }
 }

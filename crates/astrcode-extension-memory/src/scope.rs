@@ -1,5 +1,4 @@
-//! User vs project memory scopes — user/global under `~/.astrcode/memory/`, project under
-//! extension_data.
+//! User vs project memory scopes within the runtime-attributed extension data root.
 
 use std::sync::Arc;
 

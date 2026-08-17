@@ -66,29 +66,21 @@ mod tests {
     }
 
     #[test]
-    fn formats_recent_as_now() {
-        let ts = (now() - chrono::Duration::seconds(30)).to_rfc3339();
-        assert_eq!(format_relative_time(&ts, now()), "now");
-    }
-
-    #[test]
-    fn formats_minutes_hours_days() {
-        let m = (now() - chrono::Duration::minutes(5)).to_rfc3339();
-        assert_eq!(format_relative_time(&m, now()), "5m");
-        let h = (now() - chrono::Duration::hours(3)).to_rfc3339();
-        assert_eq!(format_relative_time(&h, now()), "3h");
-        let d = (now() - chrono::Duration::days(2)).to_rfc3339();
-        assert_eq!(format_relative_time(&d, now()), "2d");
-    }
-
-    #[test]
-    fn formats_weeks_months_years() {
-        let w = (now() - chrono::Duration::days(10)).to_rfc3339();
-        assert_eq!(format_relative_time(&w, now()), "1w");
-        let mo = (now() - chrono::Duration::days(60)).to_rfc3339();
-        assert_eq!(format_relative_time(&mo, now()), "2mo");
-        let y = (now() - chrono::Duration::days(400)).to_rfc3339();
-        assert_eq!(format_relative_time(&y, now()), "1y");
+    fn formats_each_relative_time_bucket() {
+        for (duration, expected) in [
+            (chrono::Duration::seconds(30), "now"),
+            (chrono::Duration::minutes(5), "5m"),
+            (chrono::Duration::hours(3), "3h"),
+            (chrono::Duration::days(2), "2d"),
+            (chrono::Duration::days(10), "1w"),
+            (chrono::Duration::days(60), "2mo"),
+            (chrono::Duration::days(400), "1y"),
+        ] {
+            assert_eq!(
+                format_relative_time(&(now() - duration).to_rfc3339(), now()),
+                expected
+            );
+        }
     }
 
     #[test]

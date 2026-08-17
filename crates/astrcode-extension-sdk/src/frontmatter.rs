@@ -1,5 +1,13 @@
 //! Markdown frontmatter splitting for extension-defined documents.
 
+/// 统一换行符（CRLF/CR → LF）并移除 BOM，供 frontmatter 分割前使用。
+pub fn normalize_markdown(content: &str) -> String {
+    content
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
 /// Splits Markdown that starts with YAML frontmatter into its YAML and body.
 ///
 /// The closing delimiter must be a line containing only `---` or `...`.

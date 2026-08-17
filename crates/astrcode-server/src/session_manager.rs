@@ -1,12 +1,18 @@
-use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::{Arc, Weak},
+};
 
 use astrcode_core::{
     event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
-    llm::LlmMessage,
+    llm::TranscriptMessage,
     tool::SessionToolSelection,
     types::{Cursor, SessionId, TurnId},
 };
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
+use astrcode_extensions::runner::{CustomEventSession, ExtensionRunner};
 use astrcode_session::{
     Session, SessionCreateParams, SessionCreationFailed, SessionError, SessionEventObserver,
     SessionEventSink, SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
@@ -30,7 +36,7 @@ struct ForkCreationInput {
     initial_system_prompt: PersistedSystemPrompt,
     source_cursor: Cursor,
     first_user_message: Option<String>,
-    messages: Vec<LlmMessage>,
+    messages: Vec<TranscriptMessage>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +59,13 @@ pub enum SessionManagerError {
     CreationTask(String),
 }
 
+impl SessionManagerError {
+    /// 底层存储报 `NotFound`（会话不存在）。
+    pub(crate) fn is_not_found(&self) -> bool {
+        matches!(self, Self::Storage(StorageError::NotFound(_)))
+    }
+}
+
 /// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
 ///
 /// 不处理 active turn、输入队列或 child completion——那些由 [`crate::turn_scheduler`]
@@ -66,6 +79,27 @@ pub struct SessionManager {
     event_bus: Arc<ServerEventBus>,
     event_sink: Arc<SessionEventSink>,
     resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
+    custom_event_runner: Arc<parking_lot::RwLock<Weak<ExtensionRunner>>>,
+}
+
+struct CustomEventObserver {
+    session_manager: std::sync::Weak<SessionManager>,
+    extension_runner: Arc<ExtensionRunner>,
+}
+
+impl SessionEventObserver for CustomEventObserver {
+    fn publish(&self, event: Arc<Event>) {
+        // Only custom events enter the consumer delivery subsystem.
+        if event.payload.custom_event().is_none() {
+            return;
+        }
+        let Some(session_manager) = self.session_manager.upgrade() else {
+            return;
+        };
+        let session = session_manager.custom_event_session(&event.session_id);
+        // observe_custom_event 的返回值只表示是否完全 admit,派发本身是尽力的,有意忽略。
+        let _ = self.extension_runner.observe_custom_event(event, session);
+    }
 }
 
 impl SessionManager {
@@ -86,11 +120,45 @@ impl SessionManager {
             event_bus,
             event_sink: Arc::new(SessionEventSink::new(observer)),
             resource_cleanups,
+            custom_event_runner: Arc::new(parking_lot::RwLock::new(Weak::new())),
         }
     }
 
     pub(crate) fn event_bus(&self) -> &Arc<ServerEventBus> {
         &self.event_bus
+    }
+
+    pub(crate) fn bind_custom_event_runner(self: &Arc<Self>, runner: Arc<ExtensionRunner>) {
+        *self.custom_event_runner.write() = Arc::downgrade(&runner);
+        self.event_bus.add_observer(Arc::new(CustomEventObserver {
+            session_manager: Arc::downgrade(self),
+            extension_runner: runner,
+        }));
+    }
+
+    /// Replays durable custom events so uncheckpointed subscriptions resume after restart/reload.
+    pub(crate) async fn replay_custom_events(
+        &self,
+        runner: &ExtensionRunner,
+    ) -> Result<(), SessionManagerError> {
+        for session_id in self.event_store.list_all_sessions().await? {
+            runner.reconcile_custom_events(&session_id, self.custom_event_session(&session_id));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn custom_event_session(&self, session_id: &SessionId) -> CustomEventSession {
+        let event_store = Arc::clone(&self.event_store);
+        let event_sink = Arc::clone(&self.event_sink);
+        let session_id = session_id.clone();
+        CustomEventSession::new(Arc::clone(&event_store), move |turn_id| {
+            SessionRuntimeState::event_sender_from_parts(
+                session_id.clone(),
+                Arc::clone(&event_store),
+                Arc::clone(&event_sink),
+                turn_id,
+            )
+        })
     }
 
     fn runtime_for(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
@@ -136,6 +204,7 @@ impl SessionManager {
         Ok(effective)
     }
 
+    #[cfg(test)]
     pub(crate) async fn create(&self, working_dir: &str) -> Result<Session, SessionManagerError> {
         self.create_with_tool_selection(working_dir, None).await
     }
@@ -144,6 +213,25 @@ impl SessionManager {
         &self,
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
+    ) -> Result<Session, SessionManagerError> {
+        self.create_root_with_options(working_dir, tool_selection, None)
+            .await
+    }
+
+    pub(crate) async fn create_for_extension(
+        &self,
+        working_dir: &str,
+        source_extension: Option<String>,
+    ) -> Result<Session, SessionManagerError> {
+        self.create_root_with_options(working_dir, None, source_extension)
+            .await
+    }
+
+    async fn create_root_with_options(
+        &self,
+        working_dir: &str,
+        tool_selection: Option<&SessionToolSelection>,
+        source_extension: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let manager = self.clone();
         let working_dir = working_dir.to_owned();
@@ -154,6 +242,7 @@ impl SessionManager {
                 sid.clone(),
                 working_dir,
                 tool_selection,
+                source_extension,
             ))
             .catch_unwind()
             .await
@@ -181,6 +270,7 @@ impl SessionManager {
         sid: SessionId,
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
+        source_extension: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let runtime = self.runtime_for(&sid);
         let creation = runtime.begin_creation();
@@ -193,7 +283,7 @@ impl SessionManager {
             model_id: self.runtime_services.read_effective().llm.model_id.clone(),
             parent_session_id: None,
             tool_selection,
-            source_extension: None,
+            source_extension,
             extra_system_prompt: None,
             initial_system_prompt: None,
             runtime,
@@ -220,7 +310,7 @@ impl SessionManager {
         };
 
         if let Err(error) = session
-            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
             .await
         {
             if let Err(compensation_error) = self.discard_failed_lifecycle_start(&session).await {
@@ -273,7 +363,7 @@ impl SessionManager {
                             .activate(&session_id)
                             .map_err(SessionError::from)?;
                         session
-                            .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+                            .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
                             .await?;
                         opening.complete();
                         return Ok(session);
@@ -300,11 +390,13 @@ impl SessionManager {
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
+        let session_store_dir = self.session_store_dir(session_id).await?;
         emit_lifecycle_for_read_model(
             &self.runtime_services,
             session_id,
             &model,
-            ExtensionEvent::SessionShutdown,
+            session_store_dir,
+            LifecycleEvent::SessionShutdown,
         )
         .await
         .map_err(SessionManagerError::from)
@@ -432,6 +524,29 @@ impl SessionManager {
         Ok(())
     }
 
+    pub(crate) async fn recover_durability_for_operation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        let through_seq = match self
+            .event_store
+            .ensure_no_uncertain_durability(session_id)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(StorageError::DurabilityUncertain { through_seq, .. }) => through_seq,
+            Err(error) => return Err(error.into()),
+        };
+        self.event_sink
+            .retry_uncertain_sync(self.event_store.clone(), session_id, through_seq)
+            .await
+            .map_err(SessionError::from)?;
+        self.event_store
+            .ensure_no_uncertain_durability(session_id)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn shutdown_event_sink(&self) {
         self.event_sink.shutdown().await;
     }
@@ -455,19 +570,33 @@ impl SessionManager {
         let event_bus = Arc::clone(&self.event_bus);
         let event_sink = Arc::clone(&self.event_sink);
         let resource_cleanups = self.resource_cleanups.clone();
+        let custom_event_runner = self.custom_event_runner.read().upgrade();
+        let custom_event_session = custom_event_runner
+            .as_ref()
+            .map(|_| self.custom_event_session(session_id));
         let session_resources = self.runtime_services.session_resources().clone();
         let session_id = session_id.clone();
 
         tokio::spawn(async move {
             let _closing = closing;
+            let mut event_lane_released = false;
+            let mut custom_events_quiesced = false;
             let result = async {
                 event_sink
                     .release(event_store.as_ref(), &session_id)
                     .await
                     .map_err(SessionError::from)?;
+                event_lane_released = true;
+                if let Some(runner) = &custom_event_runner {
+                    runner.quiesce_custom_event_session(&session_id).await;
+                    custom_events_quiesced = true;
+                }
                 match action {
                     CloseSessionAction::Delete => event_store.delete_session(&session_id).await?,
                     CloseSessionAction::Recycle => event_store.recycle_session(&session_id).await?,
+                }
+                if let Some(runner) = &custom_event_runner {
+                    runner.forget_custom_event_session(&session_id);
                 }
                 event_bus.detach(&session_id);
                 session_resources.cleanup(&session_id);
@@ -477,6 +606,25 @@ impl SessionManager {
                 Ok::<_, SessionManagerError>(())
             }
             .await;
+            if result.is_err() && event_lane_released {
+                match event_sink.activate(&session_id) {
+                    Ok(()) => {
+                        if custom_events_quiesced
+                            && let (Some(runner), Some(session)) =
+                                (&custom_event_runner, custom_event_session)
+                        {
+                            runner.resume_custom_event_session(&session_id, session);
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(
+                            %session_id,
+                            %error,
+                            "failed to reactivate event lane after session close failure"
+                        );
+                    },
+                }
+            }
             if let Err(error) = &result {
                 tracing::error!(%session_id, %error, "session close task failed");
             }
@@ -553,10 +701,10 @@ impl SessionManager {
             let truncated_model =
                 astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
             let first_user_message = truncated_model.first_user_message().map(str::to_owned);
-            (truncated_model.transcript.messages, first_user_message)
+            (truncated_model.model_context.messages, first_user_message)
         } else {
             (
-                source_model.transcript.messages.clone(),
+                source_model.model_context.messages.clone(),
                 source_model.first_user_message().map(str::to_owned),
             )
         };
@@ -576,7 +724,10 @@ impl SessionManager {
             first_user_message,
             messages: transcript_messages
                 .into_iter()
-                .map(|message| message.message)
+                .map(|entry| TranscriptMessage {
+                    message: Arc::unwrap_or_clone(entry.message),
+                    origin: entry.origin,
+                })
                 .collect(),
         };
         let new_sid = input.session_id.clone();
@@ -679,7 +830,7 @@ impl SessionManager {
         }
 
         if let Err(error) = session
-            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
             .await
         {
             self.compensate_failed_fork_creation(
@@ -767,7 +918,7 @@ impl SessionManager {
 
     async fn discard_failed_lifecycle_start(&self, session: &Session) -> Result<(), String> {
         let shutdown_result =
-            AssertUnwindSafe(session.emit_lifecycle(ExtensionEvent::SessionShutdown))
+            AssertUnwindSafe(session.emit_lifecycle(LifecycleEvent::SessionShutdown))
                 .catch_unwind()
                 .await;
         let discard_result = self.discard_failed_creation(session.id()).await;
@@ -789,34 +940,48 @@ impl SessionManager {
 
     async fn discard_failed_creation(&self, session_id: &SessionId) -> Result<(), String> {
         let closing = self.begin_session_transition(session_id).await;
-        let release_result = self
-            .event_sink
+        self.event_sink
             .release(self.event_store.as_ref(), session_id)
-            .await;
-        let delete_result = self.event_store.delete_session(session_id).await;
-        if delete_result.is_ok() {
-            self.event_bus.detach(session_id);
-            self.runtime_services
-                .session_resources()
-                .cleanup(session_id);
-            for cleanup in &self.resource_cleanups {
-                cleanup.cleanup(session_id);
+            .await
+            .map_err(|error| format!("release event lane: {error}"))?;
+        let custom_event_runner = self.custom_event_runner.read().upgrade();
+        let custom_event_session = custom_event_runner
+            .as_ref()
+            .map(|_| self.custom_event_session(session_id));
+        if let Some(runner) = &custom_event_runner {
+            runner.quiesce_custom_event_session(session_id).await;
+        }
+        if let Err(error) = self.event_store.delete_session(session_id).await {
+            match self.event_sink.activate(session_id) {
+                Ok(()) => {
+                    if let (Some(runner), Some(session)) =
+                        (&custom_event_runner, custom_event_session)
+                    {
+                        runner.resume_custom_event_session(session_id, session);
+                    }
+                },
+                Err(activate_error) => {
+                    tracing::error!(
+                        %session_id,
+                        %activate_error,
+                        "failed to reactivate event lane after creation compensation failed"
+                    );
+                },
             }
+            return Err(format!("delete persisted session: {error}"));
+        }
+        if let Some(runner) = custom_event_runner {
+            runner.forget_custom_event_session(session_id);
+        }
+        self.event_bus.detach(session_id);
+        self.runtime_services
+            .session_resources()
+            .cleanup(session_id);
+        for cleanup in &self.resource_cleanups {
+            cleanup.cleanup(session_id);
         }
         closing.complete();
-
-        let mut errors = Vec::new();
-        if let Err(error) = release_result {
-            errors.push(format!("release event lane: {error}"));
-        }
-        if let Err(error) = delete_result {
-            errors.push(format!("delete persisted session: {error}"));
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        Ok(())
     }
 }
 
@@ -934,20 +1099,26 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        time::Duration,
     };
 
-    use astrcode_context::{NoopPostCompactEnricher, context_assembler::LlmContextAssembler};
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings},
-        event::{DurableEvent, StoredEvent},
-        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        tool::{ToolDefinition, ToolResultArtifactSlice},
+        event::{CustomEventData, DurableEvent, DurableEventPayload, Event, StoredEvent},
+        llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
+        tool::ToolResultArtifactSlice,
         types::ToolCallId,
     };
     use astrcode_extension_sdk::{
-        extension::{ExtensionError, ExtensionEvent, LifecycleContext},
+        builder::manifest,
+        extension::{
+            CustomEventContext, CustomEventDisposition, CustomEventHandler,
+            CustomEventSubscription, Extension, ExtensionCapability, ExtensionError,
+            ExtensionManifest, LifecycleEvent, Registrar, internal::RuntimeLifecycleContext,
+        },
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
+    use astrcode_extensions::testing::extension_runner_with_extensions;
     use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
     use astrcode_session_projection::{
         AgentSessionLinkView, AgentSessionStatus, SessionReadModel, SessionSummary,
@@ -956,6 +1127,7 @@ mod tests {
         CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
         ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
         in_memory::InMemoryEventStore,
+        testing::{fail_next_durable_sync, filesystem_session_repository},
     };
     use tokio::sync::{Notify, Semaphore, mpsc};
 
@@ -967,10 +1139,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for UnusedLlm {
-        async fn generate(
+        async fn generate_request(
             &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
+            _request: astrcode_core::llm::LlmRequest,
         ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
             unreachable!("creation compensation tests do not run a turn")
         }
@@ -1003,17 +1174,19 @@ mod tests {
                 permissions: Default::default(),
                 extensions: Default::default(),
             },
-            SessionExtensionPorts::from_immutable_ports(noop.clone(), hooks, noop.clone()),
-            Arc::new(LlmContextAssembler::new(Default::default())),
-            Arc::new(NoopPostCompactEnricher),
-            noop,
+            SessionExtensionPorts::from_immutable_ports(
+                noop.clone(),
+                noop.clone(),
+                hooks,
+                noop.clone(),
+            ),
         ))
     }
 
     struct FailingStartHooks {
         fail_start_at: usize,
         starts: AtomicUsize,
-        events: Mutex<Vec<(ExtensionEvent, String)>>,
+        events: Mutex<Vec<(LifecycleEvent, String)>>,
     }
 
     impl FailingStartHooks {
@@ -1025,7 +1198,7 @@ mod tests {
             }
         }
 
-        fn observed(&self, event: ExtensionEvent, session_id: &SessionId) -> bool {
+        fn observed(&self, event: LifecycleEvent, session_id: &SessionId) -> bool {
             self.events
                 .lock()
                 .iter()
@@ -1039,11 +1212,13 @@ mod tests {
     impl TurnHooks for FailingStartHooks {
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
-            ctx: LifecycleContext,
+            event: LifecycleEvent,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
-            self.events.lock().push((event.clone(), ctx.session_id));
-            if event == ExtensionEvent::SessionStart {
+            self.events
+                .lock()
+                .push((event.clone(), ctx.call().session_id().to_string()));
+            if event == LifecycleEvent::SessionStart {
                 let start = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
                 if start == self.fail_start_at {
                     return Err(ExtensionError::Internal(
@@ -1062,7 +1237,79 @@ mod tests {
         entered: Notify,
         release: Semaphore,
         outcome: AtomicU8,
-        events: Mutex<Vec<(ExtensionEvent, String)>>,
+        events: Mutex<Vec<(LifecycleEvent, String)>>,
+    }
+
+    struct BlockingCustomEventExtension(Arc<BlockingCustomEventHandler>);
+
+    struct BlockingCustomEventHandler {
+        entered: AtomicBool,
+        entered_sessions: Mutex<Vec<SessionId>>,
+        entered_notify: Notify,
+        release: Semaphore,
+    }
+
+    impl BlockingCustomEventHandler {
+        fn new() -> Self {
+            Self {
+                entered: AtomicBool::new(false),
+                entered_sessions: Mutex::new(Vec::new()),
+                entered_notify: Notify::new(),
+                release: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_until_entered(&self) {
+            loop {
+                let notified = self.entered_notify.notified();
+                if self.entered.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        async fn wait_until_entered_count(&self, count: usize) {
+            loop {
+                let notified = self.entered_notify.notified();
+                if self.entered_sessions.lock().len() >= count {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for BlockingCustomEventExtension {
+        fn manifest(&self) -> ExtensionManifest {
+            manifest("blocking-custom-event")
+                .version("test")
+                .capability(ExtensionCapability::ConsumeCustomEvents)
+                .build()
+        }
+
+        fn register(&self, registrar: &mut Registrar) {
+            registrar.on_custom_event(
+                CustomEventSubscription::from_extension("producer", "job.completed"),
+                0,
+                Arc::clone(&self.0) as Arc<dyn CustomEventHandler>,
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CustomEventHandler for BlockingCustomEventHandler {
+        async fn handle(
+            &self,
+            ctx: CustomEventContext,
+        ) -> Result<CustomEventDisposition, ExtensionError> {
+            self.entered_sessions.lock().push(ctx.session_id().clone());
+            self.entered.store(true, Ordering::Release);
+            self.entered_notify.notify_waiters();
+            self.release.acquire().await.unwrap().forget();
+            Ok(CustomEventDisposition::Ack)
+        }
     }
 
     impl BlockingStartHooks {
@@ -1103,7 +1350,7 @@ mod tests {
             self.release.add_permits(1);
         }
 
-        fn observed(&self, event: ExtensionEvent, session_id: &SessionId) -> bool {
+        fn observed(&self, event: LifecycleEvent, session_id: &SessionId) -> bool {
             self.events
                 .lock()
                 .iter()
@@ -1117,11 +1364,13 @@ mod tests {
     impl TurnHooks for BlockingStartHooks {
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
-            ctx: LifecycleContext,
+            event: LifecycleEvent,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
-            self.events.lock().push((event.clone(), ctx.session_id));
-            if event != ExtensionEvent::SessionStart {
+            self.events
+                .lock()
+                .push((event.clone(), ctx.call().session_id().to_string()));
+            if event != LifecycleEvent::SessionStart {
                 return Ok(());
             }
 
@@ -1298,15 +1547,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolResultArtifactStore for FailingAppendStore {
-        async fn read_tool_result_artifact_by_path(
+        async fn read_tool_result_artifact(
             &self,
             session_id: &SessionId,
-            path: &str,
-            char_offset: usize,
-            max_chars: usize,
+            artifact_id: &str,
+            byte_offset: usize,
+            max_bytes: usize,
         ) -> Result<ToolResultArtifactSlice, StorageError> {
             self.inner
-                .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+                .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
                 .await
         }
 
@@ -1339,6 +1588,38 @@ mod tests {
             self.inner.append_event(event).await
         }
 
+        async fn append_events(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            for _ in &events {
+                let append_number = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_append_at.load(Ordering::SeqCst) == append_number {
+                    return Err(StorageError::InvalidEvent(INJECTED_APPEND_ERROR.into()));
+                }
+            }
+            self.inner.append_events(events).await
+        }
+
+        async fn append_events_and_sync(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            for _ in &events {
+                let append_number = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_append_at.load(Ordering::SeqCst) == append_number {
+                    return Err(StorageError::InvalidEvent(INJECTED_APPEND_ERROR.into()));
+                }
+            }
+            let sync_number = self.sync_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_sync_at.load(Ordering::SeqCst) == sync_number {
+                return Err(StorageError::InvalidEvent(
+                    "injected event-lane release failure".into(),
+                ));
+            }
+            self.inner.append_events_and_sync(events).await
+        }
+
         async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
             let sync_number = self.sync_count.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail_sync_at.load(Ordering::SeqCst) == sync_number {
@@ -1348,16 +1629,69 @@ mod tests {
             }
             self.inner.sync_durable_events(session_id).await
         }
+
+        async fn retry_uncertain_sync(
+            &self,
+            session_id: &SessionId,
+            expected_through_seq: u64,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            self.inner
+                .retry_uncertain_sync(session_id, expected_through_seq)
+                .await
+        }
+
+        async fn ensure_no_uncertain_durability(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), StorageError> {
+            self.inner.ensure_no_uncertain_durability(session_id).await
+        }
     }
 
     #[async_trait::async_trait]
     impl SessionStore for FailingAppendStore {
-        async fn checkpoint(
+        async fn event_consumer_state(
             &self,
             session_id: &SessionId,
-            cursor: &Cursor,
-        ) -> Result<(), StorageError> {
-            self.inner.checkpoint(session_id, cursor).await
+            consumer_id: &str,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .event_consumer_state(session_id, consumer_id)
+                .await
+        }
+
+        async fn checkpoint_event_consumer(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            expected_revision: u64,
+            seq: u64,
+        ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+            self.inner
+                .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+                .await
+        }
+
+        async fn set_event_consumer_paused(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            paused: bool,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .set_event_consumer_paused(session_id, consumer_id, paused)
+                .await
+        }
+
+        async fn reset_event_consumer_checkpoint(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            reset: astrcode_storage::EventConsumerCheckpointReset,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+                .await
         }
 
         async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -1538,8 +1872,8 @@ mod tests {
         );
         let root_id = root_store.created_sessions()[0].clone();
         assert!(root_store.list_sessions().await.unwrap().is_empty());
-        assert!(root_hooks.observed(ExtensionEvent::SessionStart, &root_id));
-        assert!(root_hooks.observed(ExtensionEvent::SessionShutdown, &root_id));
+        assert!(root_hooks.observed(LifecycleEvent::SessionStart, &root_id));
+        assert!(root_hooks.observed(LifecycleEvent::SessionShutdown, &root_id));
         assert!(
             root_events.try_recv().is_err(),
             "failed creation must not publish buffered session events"
@@ -1597,7 +1931,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-compensation")),
             })
             .await
         {
@@ -1627,7 +1961,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-sync-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-sync-compensation")),
             })
             .await
         {
@@ -1678,7 +2012,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-lifecycle-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-lifecycle-compensation")),
             })
             .await
         {
@@ -1704,9 +2038,9 @@ mod tests {
                 .is_empty(),
             "a child is linked only after lifecycle initialization succeeds"
         );
-        assert!(child_lifecycle_hooks.observed(ExtensionEvent::SessionStart, &lifecycle_child_id));
+        assert!(child_lifecycle_hooks.observed(LifecycleEvent::SessionStart, &lifecycle_child_id));
         assert!(
-            child_lifecycle_hooks.observed(ExtensionEvent::SessionShutdown, &lifecycle_child_id)
+            child_lifecycle_hooks.observed(LifecycleEvent::SessionShutdown, &lifecycle_child_id)
         );
         assert_runtime_was_released(
             child_lifecycle_services.as_ref(),
@@ -1773,9 +2107,9 @@ mod tests {
             fork_lifecycle_store.list_sessions().await.unwrap(),
             vec![lifecycle_source.id().clone()]
         );
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionStart, lifecycle_source.id()));
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionStart, &lifecycle_fork_id));
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionShutdown, &lifecycle_fork_id));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionStart, lifecycle_source.id()));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionStart, &lifecycle_fork_id));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionShutdown, &lifecycle_fork_id));
         assert_runtime_was_released(
             fork_lifecycle_services.as_ref(),
             Arc::clone(&fork_lifecycle_store_port),
@@ -1813,6 +2147,210 @@ mod tests {
             Arc::clone(&close_store_port),
             &close_session_id,
         );
+        close_session
+            .emit_durable(
+                None,
+                DurableEventPayload::CustomEvent(CustomEventData {
+                    extension_id: "producer".into(),
+                    event_type: "close.recovered".into(),
+                    schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
+                    causation_id: None,
+                    cascade_depth: 0,
+                    payload: serde_json::json!({}),
+                }),
+            )
+            .await
+            .expect("a failed close must reactivate event publication");
+    }
+
+    #[tokio::test]
+    async fn delete_waits_for_custom_event_delivery_before_removing_storage() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let store_port: Arc<dyn SessionStore> = store.clone();
+        let manager = Arc::new(SessionManager::new(
+            Arc::clone(&store_port),
+            test_runtime_services(),
+            vec![],
+        ));
+        let handler = Arc::new(BlockingCustomEventHandler::new());
+        let runner = extension_runner_with_extensions(
+            Duration::from_secs(1),
+            None,
+            vec![Arc::new(BlockingCustomEventExtension(Arc::clone(&handler)))],
+        )
+        .await
+        .unwrap();
+        manager.bind_custom_event_runner(Arc::clone(&runner));
+
+        let session_id = manager.create(".").await.unwrap().id().clone();
+        let event = store
+            .append_event(DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::CustomEvent(CustomEventData {
+                    extension_id: "producer".into(),
+                    event_type: "job.completed".into(),
+                    schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
+                    causation_id: None,
+                    cascade_depth: 0,
+                    payload: serde_json::json!({"jobId": "blocked"}),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(runner.observe_custom_event(
+            Arc::new(Event::from(event)),
+            manager.custom_event_session(&session_id),
+        ));
+        handler.wait_until_entered().await;
+
+        let deleting_manager = Arc::clone(&manager);
+        let deleting_session_id = session_id.clone();
+        let delete =
+            tokio::spawn(async move { deleting_manager.delete(&deleting_session_id).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!delete.is_finished());
+        assert!(store.latest_cursor(&session_id).await.is_ok());
+
+        handler.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), delete)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store.latest_cursor(&session_id).await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_custom_events_includes_nested_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(filesystem_session_repository(temp.path().join("projects")));
+        let store_port: Arc<dyn SessionStore> = store.clone();
+        let services = test_runtime_services();
+        let root = create_root_session(Arc::clone(&store_port), Arc::clone(&services)).await;
+        let child = root
+            .spawn_child(SpawnChildParams {
+                working_dir: ".".into(),
+                model_id: "mock-model".into(),
+                agent_name: "worker".into(),
+                task: "replay nested custom events".into(),
+                extra_system_prompt: None,
+                tool_selection: None,
+                source_extension: Some("test-extension".into()),
+                tool_call_id: Some(ToolCallId::new("nested-replay")),
+            })
+            .await
+            .unwrap();
+        for session in [&root, &child] {
+            session
+                .emit_durable(
+                    None,
+                    DurableEventPayload::CustomEvent(CustomEventData {
+                        extension_id: "producer".into(),
+                        event_type: "job.completed".into(),
+                        schema_version: 1,
+                        audience: astrcode_core::event::CustomEventAudience::Session,
+                        causation_id: None,
+                        cascade_depth: 0,
+                        payload: serde_json::json!({}),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let manager = SessionManager::new(Arc::clone(&store_port), services, vec![]);
+        let handler = Arc::new(BlockingCustomEventHandler::new());
+        handler.release.add_permits(2);
+        let runner = extension_runner_with_extensions(
+            Duration::from_secs(1),
+            None,
+            vec![Arc::new(BlockingCustomEventExtension(Arc::clone(&handler)))],
+        )
+        .await
+        .unwrap();
+
+        manager.replay_custom_events(&runner).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_until_entered_count(2))
+            .await
+            .unwrap();
+        let mut entered = handler.entered_sessions.lock().clone();
+        entered.sort();
+        let mut expected = vec![root.id().clone(), child.id().clone()];
+        expected.sort();
+        assert_eq!(entered, expected);
+    }
+
+    #[tokio::test]
+    async fn operation_admission_retries_exact_uncertain_sync_once_before_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(filesystem_session_repository(temp.path().join("projects")));
+        let store_port: Arc<dyn SessionStore> = store.clone();
+        let manager = Arc::new(SessionManager::new(
+            Arc::clone(&store_port),
+            test_runtime_services(),
+            vec![],
+        ));
+        let session_id = manager.create("/workspace").await.unwrap().id().clone();
+        fail_next_durable_sync(&store, &session_id).await.unwrap();
+        let error = store
+            .append_events_and_sync(vec![DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::UserMessage {
+                    message_id: astrcode_core::types::new_message_id(),
+                    text: "pending".into(),
+                    attachments: Vec::new(),
+                    accepted_seq: None,
+                },
+            )])
+            .await
+            .unwrap_err();
+        let pending_seq = error.uncertain_through_seq().unwrap();
+        let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+            Arc::clone(&manager),
+        ));
+        let scheduler = crate::turn_scheduler::TurnScheduler::new(
+            Arc::clone(&manager),
+            Arc::new(crate::turn_registry::TurnRegistry::new()),
+            child_sessions,
+        );
+        let mut published = manager
+            .event_bus()
+            .subscribe_conversation_events(&session_id);
+
+        fail_next_durable_sync(&store, &session_id).await.unwrap();
+        assert!(matches!(
+            scheduler.begin_session_operation(&session_id).await,
+            Err(crate::turn_scheduler::TurnScheduleError::SessionManager(
+                SessionManagerError::Session(SessionError::EventPublish(
+                    astrcode_session::SessionEventPublishError::Storage(error)
+                ))
+            )) if error.uncertain_through_seq() == Some(pending_seq)
+        ));
+        assert_eq!(
+            store
+                .session_read_model(&session_id)
+                .await
+                .unwrap()
+                .stats
+                .last_seq,
+            pending_seq - 1
+        );
+        assert!(published.try_recv().is_err());
+
+        assert!(scheduler.begin_session_operation(&session_id).await.is_ok());
+        let event = published.recv().await.unwrap();
+        assert_eq!(event.seq, Some(pending_seq));
+        assert!(matches!(
+            event.payload,
+            astrcode_core::event::EventPayload::Durable(DurableEventPayload::UserMessage { .. })
+        ));
+        assert!(scheduler.begin_session_operation(&session_id).await.is_ok());
+        assert!(published.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1898,7 +2436,7 @@ mod tests {
         fork_hooks.release_with_failure();
         fork_manager.owned_tasks.close_and_wait().await;
         assert_eq!(fork_store.list_sessions().await.unwrap(), vec![source_id]);
-        assert!(fork_hooks.observed(ExtensionEvent::SessionShutdown, &fork_id));
+        assert!(fork_hooks.observed(LifecycleEvent::SessionShutdown, &fork_id));
 
         let child_store = Arc::new(FailingAppendStore::default());
         let child_store_port: Arc<dyn SessionStore> = child_store.clone();
@@ -1923,7 +2461,7 @@ mod tests {
                         extra_system_prompt: None,
                         tool_selection: None,
                         source_extension: None,
-                        tool_call_id: ToolCallId::new("call-aborted-child"),
+                        tool_call_id: Some(ToolCallId::new("call-aborted-child")),
                     })
                     .await
             })
@@ -1941,7 +2479,7 @@ mod tests {
         child_manager.owned_tasks.close_and_wait().await;
         assert_eq!(child_store.list_sessions().await.unwrap(), vec![parent_id]);
         assert!(parent.read_model().await.unwrap().agent_sessions.is_empty());
-        assert!(child_hooks.observed(ExtensionEvent::SessionShutdown, &child_id));
+        assert!(child_hooks.observed(LifecycleEvent::SessionShutdown, &child_id));
     }
 
     #[tokio::test]
@@ -1986,7 +2524,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!root_hooks.observed(ExtensionEvent::SessionResume, &root_id));
+        assert!(!root_hooks.observed(LifecycleEvent::SessionResume, &root_id));
         assert_eq!(
             root_store.list_sessions().await.unwrap(),
             vec![root_id.clone()]
@@ -2005,7 +2543,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!root_hooks.observed(ExtensionEvent::SessionResume, &root_id));
+        assert!(!root_hooks.observed(LifecycleEvent::SessionResume, &root_id));
 
         let fork_store = Arc::new(FailingAppendStore::default());
         let fork_store_port: Arc<dyn SessionStore> = fork_store.clone();
@@ -2053,7 +2591,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!fork_hooks.observed(ExtensionEvent::SessionResume, &fork_id));
+        assert!(!fork_hooks.observed(LifecycleEvent::SessionResume, &fork_id));
 
         let child_store = Arc::new(FailingAppendStore::default());
         let child_store_port: Arc<dyn SessionStore> = child_store.clone();
@@ -2078,7 +2616,7 @@ mod tests {
                     extra_system_prompt: None,
                     tool_selection: None,
                     source_extension: None,
-                    tool_call_id: ToolCallId::new("call-blocked-child"),
+                    tool_call_id: Some(ToolCallId::new("call-blocked-child")),
                 })
                 .await
         });
@@ -2110,7 +2648,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!child_hooks.observed(ExtensionEvent::SessionResume, &child_id));
+        assert!(!child_hooks.observed(LifecycleEvent::SessionResume, &child_id));
         assert!(parent.read_model().await.unwrap().agent_sessions.is_empty());
     }
 }

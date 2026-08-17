@@ -7,7 +7,7 @@ import type {
 } from '../../services/types'
 import { decodePendingAskUserQuestion } from '../../services/protocol'
 import type { AppState } from '../types'
-import { mergeAgentSession, resolvePhase, upsertBlock } from './blockHelpers'
+import { applyAgentSessionUpdate, upsertBlock } from './blockHelpers'
 import {
   applyCoalescedDeltas,
   coalesceDeltas,
@@ -20,9 +20,9 @@ type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 export type ConversationRenderState = Pick<
   AppState,
   | 'blocks'
+  | 'transientBlockOwners'
   | 'control'
   | 'cursor'
-  | 'phase'
   | 'compactSubmitting'
   | 'agentSessions'
   | 'statusItems'
@@ -32,6 +32,7 @@ export type ConversationRenderState = Pick<
   | 'pendingAskUserRefreshInFlight'
   | 'askUserEventRevision'
   | 'transientHint'
+  | 'timelineDetachedFromLatest'
 >
 
 type ConversationRenderPatch = Partial<ConversationRenderState>
@@ -83,8 +84,6 @@ function sameControlState(
     left.phase === right.phase &&
     left.canSubmitPrompt === right.canSubmitPrompt &&
     left.canRequestCompact === right.canRequestCompact &&
-    left.compactPending === right.compactPending &&
-    left.compacting === right.compacting &&
     left.activeTurnId === right.activeTurnId &&
     left.retryStatus?.status === right.retryStatus?.status &&
     left.retryStatus?.attempt === right.retryStatus?.attempt &&
@@ -141,8 +140,9 @@ export function reduceConversationDeltas(
   cursor?: string | null
 ): ConversationRenderPatch {
   let blocks = current.blocks
+  const initialTransientBlockOwners = current.transientBlockOwners ?? {}
+  let transientBlockOwners = initialTransientBlockOwners
   let control = current.control
-  let phase = current.phase
   let agentSessions = current.agentSessions
   let statusItems = current.statusItems
   let statusItemRevisions = current.statusItemRevisions
@@ -151,6 +151,7 @@ export function reduceConversationDeltas(
   let askUserEventRevision = current.askUserEventRevision
   let transientHint = current.transientHint
   let pendingBlockDeltas: BlockDelta[] = []
+  const updateVisibleBlocks = !current.timelineDetachedFromLatest
 
   const flushBlockDeltas = () => {
     if (pendingBlockDeltas.length === 0) return
@@ -158,9 +159,15 @@ export function reduceConversationDeltas(
     pendingBlockDeltas = []
   }
 
+  const promoteTransientBlock = (blockId: string) => {
+    if (transientBlockOwners[blockId] === undefined) return
+    transientBlockOwners = { ...transientBlockOwners }
+    delete transientBlockOwners[blockId]
+  }
+
   for (const coalesced of coalesceDeltas(deltas)) {
     if (coalesced.kind !== 'other') {
-      pendingBlockDeltas.push(coalesced)
+      if (updateVisibleBlocks) pendingBlockDeltas.push(coalesced)
       continue
     }
 
@@ -168,19 +175,49 @@ export function reduceConversationDeltas(
     const delta = coalesced.delta
     switch (delta.kind) {
       case 'appendBlock': {
+        if (!updateVisibleBlocks) break
         const baseBlocks =
           delta.block.kind === 'compactSummary'
             ? blocks.filter((block) => block.kind !== 'compactSummary')
             : blocks
         blocks = upsertBlock(baseBlocks, delta.block)
+        promoteTransientBlock(delta.block.id)
+        break
+      }
+
+      case 'appendTransientBlock': {
+        if (!updateVisibleBlocks) break
+        blocks = upsertBlock(blocks, delta.block)
+        if (transientBlockOwners[delta.block.id] !== delta.turnId) {
+          transientBlockOwners = {
+            ...transientBlockOwners,
+            [delta.block.id]: delta.turnId,
+          }
+        }
+        break
+      }
+
+      case 'clearTransientBlocks': {
+        if (!updateVisibleBlocks) break
+        const ownedIds = Object.entries(transientBlockOwners)
+          .filter(([, turnId]) => turnId === delta.turnId)
+          .map(([blockId]) => blockId)
+        if (ownedIds.length === 0) break
+        const owned = new Set(ownedIds)
+        blocks = blocks.filter((block) => !owned.has(block.id))
+        transientBlockOwners = { ...transientBlockOwners }
+        for (const blockId of ownedIds) delete transientBlockOwners[blockId]
         break
       }
 
       case 'finalizeBlock':
+        if (!updateVisibleBlocks) break
         blocks = upsertBlock(blocks, delta.block)
+        promoteTransientBlock(delta.block.id)
         break
 
       case 'resetBlock':
+        if (!updateVisibleBlocks) break
         blocks = blocks.map((block) => {
           if (block.id !== delta.blockId || block.kind !== 'assistant') {
             return block
@@ -195,25 +232,28 @@ export function reduceConversationDeltas(
         if (!sameControlState(control, delta.control)) {
           control = delta.control
         }
-        phase = resolvePhase(delta.control, current.compactSubmitting)
         break
       }
 
       case 'agentSessionUpdated': {
-        const incoming = delta.agentSession
+        const update = delta.agentSession
         const index = agentSessions.findIndex(
-          (session) => session.childSessionId === incoming.childSessionId
+          (session) => session.childSessionId === update.childSessionId
         )
         if (index === -1) {
-          agentSessions = [...agentSessions, incoming]
+          const nextSession = applyAgentSessionUpdate(undefined, update)
+          if (!nextSession) break
+          agentSessions = [...agentSessions, nextSession]
           break
         }
 
-        const merged = mergeAgentSession(agentSessions[index], incoming)
-        if (sameAgentSession(agentSessions[index], merged)) break
+        const current = agentSessions[index]
+        const nextSession = applyAgentSessionUpdate(current, update)
+        if (!nextSession) break
+        if (sameAgentSession(current, nextSession)) break
 
         const next = [...agentSessions]
-        next[index] = merged
+        next[index] = nextSession
         agentSessions = next
         break
       }
@@ -252,7 +292,7 @@ export function reduceConversationDeltas(
         transientHint = '扩展已更新'
         break
 
-      case 'extensionEvent': {
+      case 'customEvent': {
         if (delta.extensionId !== 'astrcode-ask-user') break
         if (delta.eventType === 'ask_user.pending') {
           try {
@@ -316,6 +356,7 @@ export function reduceConversationDeltas(
       }
 
       case 'toolApprovalRequested':
+        if (!updateVisibleBlocks) break
         blocks = updateToolCall(blocks, delta.approval.callId, (block) => ({
           ...block,
           approval: delta.approval,
@@ -323,6 +364,7 @@ export function reduceConversationDeltas(
         break
 
       case 'toolApprovalResolved':
+        if (!updateVisibleBlocks) break
         blocks = updateToolCall(blocks, delta.callId, (block) => {
           const next = { ...block }
           delete next.approval
@@ -347,8 +389,10 @@ export function reduceConversationDeltas(
 
   const patch: ConversationRenderPatch = {}
   if (blocks !== current.blocks) patch.blocks = blocks
+  if (transientBlockOwners !== initialTransientBlockOwners) {
+    patch.transientBlockOwners = transientBlockOwners
+  }
   if (control !== current.control) patch.control = control
-  if (phase !== current.phase) patch.phase = phase
   if (agentSessions !== current.agentSessions) {
     patch.agentSessions = agentSessions
   }

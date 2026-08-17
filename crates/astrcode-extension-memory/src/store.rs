@@ -1,13 +1,13 @@
 //! MemoryStore — MEMORY.md / contexts/ 文件读写。
 //!
-//! - **用户记忆**：`~/.astrcode/memory/`（`user_pref`，跨项目共享）
-//! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/` （`project_ctx` /
-//!   `decision` / `general`、contexts/、pipeline 状态）
+//! - **用户记忆**：runtime 归属的 extension data 根目录（`user_pref`，跨项目共享）
+//! - **项目记忆**：同一根目录下的 `projects/<key>/`（`project_ctx` / `decision` /
+//!   `general`、contexts/、pipeline 状态）
 
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::SystemTime,
 };
 
@@ -77,6 +77,16 @@ fn category_to_header(scope: MemoryStoreScope, category: &str) -> &'static str {
         } else {
             "## General"
         })
+}
+
+fn empty_memory_content(scope: MemoryStoreScope) -> String {
+    let mut content = String::from(HEADER);
+    for &(_, header) in scope.sections() {
+        content.push('\n');
+        content.push_str(header);
+        content.push('\n');
+    }
+    content
 }
 
 fn header_to_category(scope: MemoryStoreScope, header: &str) -> Option<&'static str> {
@@ -272,11 +282,8 @@ impl MemoryStore {
         hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())
     }
 
-    fn new_user() -> std::io::Result<Self> {
-        Self::new(
-            hostpaths::astrcode_dir().join("memory"),
-            MemoryStoreScope::User,
-        )
+    fn new_user(root: &Path) -> std::io::Result<Self> {
+        Self::new(root.to_path_buf(), MemoryStoreScope::User)
     }
 
     fn new(dir: PathBuf, scope: MemoryStoreScope) -> std::io::Result<Self> {
@@ -293,12 +300,8 @@ impl MemoryStore {
         Ok(store)
     }
 
-    fn new_project(project_key: &str) -> std::io::Result<Self> {
-        let dir = hostpaths::astrcode_dir()
-            .join("projects")
-            .join(project_key)
-            .join("extension_data")
-            .join("astrcode.memory");
+    fn new_project(root: &Path, project_key: &str) -> std::io::Result<Self> {
+        let dir = root.join("projects").join(project_key);
         Self::new(dir, MemoryStoreScope::Project)
     }
 
@@ -316,18 +319,8 @@ impl MemoryStore {
 
     /// 初始化 MEMORY.md，写入 header + 空 sections。
     fn init_memory_file(&self) -> std::io::Result<()> {
-        let content = self.empty_memory_content();
+        let content = empty_memory_content(self.scope);
         hostpaths::write_file_atomic(&self.memory_path(), &content)
-    }
-
-    fn empty_memory_content(&self) -> String {
-        let mut out = String::from(HEADER);
-        for &(_, header) in self.scope.sections() {
-            out.push('\n');
-            out.push_str(header);
-            out.push('\n');
-        }
-        out
     }
 
     // ─── Read ──────────────────────────────────────────────────────
@@ -352,10 +345,10 @@ impl MemoryStore {
     /// 返回 MEMORY.md 中 `user_pref` 类别的前 `limit` 条。
     fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
         let mtime = self.memory_file_mtime()?;
-        if let Some(cache) = self.preference_lines_cache.lock().as_ref() {
-            if cache.memory_mtime == mtime {
-                return Ok(cache.lines.iter().take(limit).cloned().collect());
-            }
+        if let Some(cache) = self.preference_lines_cache.lock().as_ref()
+            && cache.memory_mtime == mtime
+        {
+            return Ok(cache.lines.iter().take(limit).cloned().collect());
         }
 
         let parsed = self.read_parsed()?;
@@ -653,15 +646,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn list_processed(&self) -> std::io::Result<BTreeMap<String, String>> {
-        let content = match std::fs::read_to_string(self.processed_path()) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeMap::new());
-            },
-            Err(error) => return Err(error),
-        };
-        serde_json::from_str(&content)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        Ok(hostpaths::read_json_state(&self.processed_path())?.unwrap_or_default())
     }
 
     /// Pipeline 写入 contexts/ 文件 + 更新 processed_sessions.json。
@@ -682,14 +667,11 @@ impl MemoryStore {
         }
 
         // 更新 processed_sessions.json
-        let path = self.processed_path();
         let mut existing = self.list_processed()?;
         for entry in processed {
             existing.insert(entry.session_id.clone(), entry.updated_at.clone());
         }
-        let json = serde_json::to_string_pretty(&existing)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        hostpaths::write_file_atomic(&path, &json)?;
+        hostpaths::write_json_state(&self.processed_path(), &existing)?;
 
         Ok(())
     }
@@ -802,6 +784,7 @@ type StoreSlot = Arc<Mutex<Option<Arc<MemoryStore>>>>;
 /// 管理用户级 + 项目级 MemoryStore。
 #[derive(Clone, Default)]
 pub(crate) struct MemoryStorePool {
+    root: Arc<OnceLock<PathBuf>>,
     stores: Arc<Mutex<BTreeMap<StoreKey, StoreSlot>>>,
     project_aliases: Arc<Mutex<BTreeMap<String, Arc<MemoryStore>>>>,
 }
@@ -809,6 +792,26 @@ pub(crate) struct MemoryStorePool {
 impl MemoryStorePool {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_root(&self, root: PathBuf) -> std::io::Result<()> {
+        match self.root.set(root) {
+            Ok(()) => Ok(()),
+            Err(root) if self.root.get() == Some(&root) => Ok(()),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "memory store root is already configured",
+            )),
+        }
+    }
+
+    fn root(&self) -> std::io::Result<&Path> {
+        self.root.get().map(PathBuf::as_path).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "memory store root is not configured",
+            )
+        })
     }
 
     fn get_or_create(
@@ -833,10 +836,11 @@ impl MemoryStorePool {
     }
 
     fn user_store(&self) -> std::io::Result<Arc<MemoryStore>> {
-        self.get_or_create(StoreKey::User, MemoryStore::new_user)
+        let root = self.root()?;
+        self.get_or_create(StoreKey::User, || MemoryStore::new_user(root))
     }
 
-    /// 用户记忆（`~/.astrcode/memory/`）+ 当前项目记忆。
+    /// 用户记忆 + 当前项目记忆。
     pub(crate) fn get_scoped(
         &self,
         working_dir: &str,
@@ -848,8 +852,9 @@ impl MemoryStorePool {
 
         let project_key =
             astrcode_extension_sdk::types::project_key_from_path(Path::new(working_dir));
+        let root = self.root()?;
         let project = self.get_or_create(StoreKey::Project(project_key.clone()), || {
-            MemoryStore::new_project(&project_key)
+            MemoryStore::new_project(root, &project_key)
         })?;
         self.project_aliases
             .lock()
@@ -868,7 +873,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        MemoryStore, MemoryStorePool, MemoryStoreScope, StoreKey, truncate_to_char_boundary,
+        MEMORY_FILE, MemoryStore, MemoryStorePool, MemoryStoreScope, StoreKey,
+        truncate_to_char_boundary,
     };
 
     #[test]
@@ -892,6 +898,27 @@ mod tests {
     fn store_pool_initializes_each_key_once() {
         let temp = TempDir::new().unwrap();
         let pool = MemoryStorePool::new();
+        assert_eq!(
+            pool.get_scoped("/workspace").err().unwrap().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        let attributed_root = temp.path().join("extension_data/astrcode.memory");
+        pool.set_root(attributed_root.clone()).unwrap();
+        pool.set_root(attributed_root.clone()).unwrap();
+        assert_eq!(
+            pool.set_root(temp.path().join("other")).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+
+        let scoped = pool.get_scoped("/workspace").unwrap();
+        assert_eq!(scoped.user.memory_path(), attributed_root.join(MEMORY_FILE));
+        assert!(
+            scoped
+                .project
+                .memory_path()
+                .starts_with(attributed_root.join("projects"))
+        );
+
         let initializations = Arc::new(AtomicUsize::new(0));
         let start = Arc::new(Barrier::new(2));
 

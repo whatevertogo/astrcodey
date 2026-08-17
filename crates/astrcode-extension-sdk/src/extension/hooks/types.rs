@@ -4,21 +4,11 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use astrcode_core::event::EventSendError;
 use serde::{Deserialize, Serialize};
 
-// ─── Hook mode ─────────────────────────────────────────────────────────
-
-/// 钩子订阅的执行模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookMode {
-    /// 同步执行，可以阻止操作。
-    Blocking,
-    /// 异步执行（即发即弃），不能阻止操作。
-    NonBlocking,
-    /// 执行但结果仅供参考。
-    Advisory,
-}
+use crate::WireErrorCode;
+pub use crate::wire::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 
 // ─── Tool hook target ──────────────────────────────────────────────────
 
@@ -51,6 +41,14 @@ impl ToolHookTarget {
 #[derive(Clone)]
 pub struct ToolHookRegistration<H: ?Sized> {
     pub mode: HookMode,
+    pub priority: i32,
+    pub target: ToolHookTarget,
+    pub handler: Arc<H>,
+}
+
+/// 一个同步工具参数变换或准入处理器的注册声明。
+#[derive(Clone)]
+pub struct ToolUseRegistration<H: ?Sized> {
     pub priority: i32,
     pub target: ToolHookTarget,
     pub handler: Arc<H>,
@@ -94,16 +92,26 @@ impl PromptContributions {
     }
 }
 
-/// 插件在 PreCompact hook 中提供的 compact 摘要指令。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Extension-owned context that must remain visible after a transcript rewrite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompactRetainedContext {
+    File { path: String, content: String },
+    Note { title: String, body: String },
+}
+
+/// Contributions collected before compacting a transcript snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactContributions {
-    #[serde(default)]
     pub instructions: Vec<String>,
+    pub retained_context: Vec<CompactRetainedContext>,
 }
 
 impl CompactContributions {
     pub fn merge(&mut self, other: CompactContributions) {
         self.instructions.extend(other.instructions);
+        self.retained_context.extend(other.retained_context);
     }
 }
 
@@ -117,12 +125,52 @@ pub enum ProviderEvent {
     AfterResponse,
 }
 
-/// Compact hook 触发时机。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactEvent {
-    PreCompact,
-    PostCompact,
+/// Host identity for one concrete provider request attempt.
+///
+/// A retry after context compaction receives a new identity. Extensions must use this value only
+/// to correlate a prepared contribution with its eventual durable-success acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderRequestId(String);
+
+impl ProviderRequestId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProviderRequestId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Extension-owned identity for the exact pending state represented by a provider contribution.
+///
+/// The identity must change whenever that pending state is replaced. The host returns it only
+/// after the corresponding provider request and assistant durable facts have committed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderContributionId(String);
+
+impl ProviderContributionId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProviderContributionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
 }
 
 // ─── Extension error ───────────────────────────────────────────────────
@@ -130,10 +178,28 @@ pub enum CompactEvent {
 /// 扩展操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
+    #[error(transparent)]
+    Config(#[from] crate::extension::ExtensionConfigError),
+    #[error(transparent)]
+    Path(#[from] crate::extension::ExtensionPathError),
+    #[error(transparent)]
+    Host(#[from] crate::host::HostError),
+    #[error(transparent)]
+    EventSend(#[from] EventSendError),
+    #[error("invalid extension input `{code}`: {message}")]
+    InvalidInput {
+        code: String,
+        message: String,
+        hint: Option<String>,
+    },
     #[error("Extension not found: {0}")]
     NotFound(String),
     #[error("Hook timed out after {0}ms")]
     Timeout(u64),
+    #[error("operation cancelled")]
+    Cancelled,
+    #[error("extension {extension_id} is draining")]
+    Draining { extension_id: String },
     #[error("blocked by hook: {reason}")]
     Blocked { reason: String },
     #[error("extension {extension_id} registered {hook} without declaring {capability:?}")]
@@ -148,7 +214,7 @@ pub enum ExtensionError {
     )]
     InvalidLifecycleMode {
         extension_id: String,
-        event: crate::extension::ExtensionEvent,
+        event: crate::extension::LifecycleEvent,
     },
     #[error(
         "extension {extension_id} tool `{tool_name}` conflicts with extension \
@@ -168,55 +234,18 @@ pub enum ExtensionError {
     Internal(String),
 }
 
+impl ExtensionError {
+    /// 构造 [`InvalidInput`](Self::InvalidInput) 错误，wire code 固定为 `invalid_input`。
+    pub fn invalid_input(message: impl Into<String>, hint: impl Into<Option<String>>) -> Self {
+        Self::InvalidInput {
+            code: WireErrorCode::InvalidInput.as_str().into(),
+            message: message.into(),
+            hint: hint.into(),
+        }
+    }
+}
+
 // ─── ContinueAfterStop limit ───────────────────────────────────────────
-
-/// 单个 `ContinueAfterStop` hook 在同一个 turn 内可请求的续跑上限。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "i64", into = "i64")]
-pub enum ContinueAfterStopLimit {
-    Limited { max_per_turn: u32 },
-    Unlimited,
-}
-
-impl ContinueAfterStopLimit {
-    pub const fn limited(max_per_turn: u32) -> Self {
-        Self::Limited { max_per_turn }
-    }
-
-    pub const fn unlimited() -> Self {
-        Self::Unlimited
-    }
-
-    pub const fn allows(self, continuations_this_turn: u32) -> bool {
-        match self {
-            Self::Limited { max_per_turn } => continuations_this_turn < max_per_turn,
-            Self::Unlimited => true,
-        }
-    }
-}
-
-impl TryFrom<i64> for ContinueAfterStopLimit {
-    type Error = String;
-
-    fn try_from(max_per_turn: i64) -> Result<Self, Self::Error> {
-        match max_per_turn {
-            -1 => Ok(Self::Unlimited),
-            value if (0..=i64::from(u32::MAX)).contains(&value) => Ok(Self::limited(value as u32)),
-            _ => {
-                Err("continue_after_stop max_per_turn must be -1 or a non-negative integer".into())
-            },
-        }
-    }
-}
-
-impl From<ContinueAfterStopLimit> for i64 {
-    fn from(budget: ContinueAfterStopLimit) -> Self {
-        match budget {
-            ContinueAfterStopLimit::Limited { max_per_turn } => i64::from(max_per_turn),
-            ContinueAfterStopLimit::Unlimited => -1,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinueAfterStopOptions {

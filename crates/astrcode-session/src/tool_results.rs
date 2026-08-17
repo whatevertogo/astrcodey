@@ -1,23 +1,13 @@
 //! Tool result budgeting and LLM-facing persisted-result summaries.
 
-use astrcode_core::tool::ToolResult;
+use astrcode_core::tool::{ToolResult, read_image::ReadToolInlinePayload};
 use astrcode_storage::ToolResultArtifactRef;
 
-/// 默认允许内联到 LLM history 的工具结果字节数。
-pub(crate) const DEFAULT_TOOL_RESULT_INLINE_LIMIT: usize = 50_000;
-
-/// shell 类工具输出更容易爆量，采用更低的默认阈值。
-pub(crate) const SHELL_TOOL_RESULT_INLINE_LIMIT: usize = 30_000;
-
-/// 搜索工具结果通常可重新分页查询，采用更低的默认阈值。
-pub(crate) const GREP_TOOL_RESULT_INLINE_LIMIT: usize = 20_000;
-
-/// read 工具输出由 maxChars 自行截断；再持久化到 tool-results 后让模型用 read
-/// 读回会形成循环（Claude Code 对 Read 使用 Infinity 阈值同理），故永不自动持久化。
-pub(crate) const READ_TOOL_RESULT_INLINE_LIMIT: Option<usize> = None;
-
-/// 同一轮工具结果进入 LLM history 的总预算。
-pub(crate) const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 200_000;
+/// 单个工具结果允许直接进入 LLM history 的最大字节数。
+///
+/// 该限制属于 Session 的统一上下文预算，而非某个工具的参数。扩展无需各自暴露
+/// `maxOutputTokens` 一类调优字段；所有工具在同一提交边界获得相同的落盘与预览语义。
+pub(crate) const TOOL_RESULT_INLINE_LIMIT_BYTES: usize = 30_000;
 
 /// 摘要中保留的预览字符数（与 Claude Code PREVIEW_SIZE_BYTES ≈ 2000 对齐）。
 pub(crate) const TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
@@ -31,28 +21,10 @@ pub(crate) struct ToolResultPreview {
     pub has_more: bool,
 }
 
-/// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
-///
-/// 按工具名硬编码阈值是刻意的产品策略：不同工具的输出特征差异显著
-/// （shell 易爆量、grep 可重新分页查询、read 由 maxChars 截断且读回会形成
-/// 循环），因此阈值跟随工具名而非统一参数；新增高流量工具时应在此显式评估。
-pub(crate) fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
-    match tool_name {
-        "read" => READ_TOOL_RESULT_INLINE_LIMIT,
-        "shell" => Some(SHELL_TOOL_RESULT_INLINE_LIMIT),
-        "grep" => Some(GREP_TOOL_RESULT_INLINE_LIMIT),
-        _ => Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT),
-    }
-}
-
 /// 是否可以把结果自动替换为持久化 artifact 摘要。
-///
-/// read 自身的结果不自动持久化；是否已持久化由 session 私有提交状态判断。
-pub(crate) fn should_auto_persist_tool_result(tool_name: &str, result: &ToolResult) -> bool {
-    let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
-        return false;
-    };
-    result.content.len() > inline_limit
+pub(crate) fn should_auto_persist_tool_result(result: &ToolResult) -> bool {
+    result.content.len() > TOOL_RESULT_INLINE_LIMIT_BYTES
+        && (result.is_error || ReadToolInlinePayload::parse_image(&result.content).is_none())
 }
 
 /// 为大工具结果生成摘要预览。
@@ -71,24 +43,17 @@ pub(crate) fn persisted_tool_result_summary(
     preview: &ToolResultPreview,
 ) -> String {
     let more = if preview.has_more {
-        "\n\nMore output is available in the saved file."
+        "\n\nMore output is available in the saved artifact."
     } else {
         ""
     };
-    match reference.path.as_deref() {
-        Some(path) => format!(
-            "Tool result was persisted because it is large ({} bytes).\nFull output saved to: \
-             {path}\nUse read with path {:?}, charOffset, and maxChars to paginate through the \
-             saved file. Do not expect the full content inline — increase charOffset on each read \
-             until hasMore is false.\n\nPreview:\n{}{}",
-            reference.bytes, path, preview.content, more
-        ),
-        None => format!(
-            "Tool result was persisted because it is large ({} bytes), but this storage backend \
-             did not expose a readable path.\n\nPreview:\n{}{}",
-            reference.bytes, preview.content, more
-        ),
-    }
+    format!(
+        "Tool result was persisted because it is large ({} bytes).\nArtifact ID: {}\nUse \
+         read_tool_result with artifactId {:?}, byteOffset, and maxBytes to paginate through the \
+         saved result. Do not expect the full content inline — increase byteOffset on each read \
+         until hasMore is false.\n\nPreview:\n{}{}",
+        reference.bytes, reference.artifact_id, reference.artifact_id, preview.content, more
+    )
 }
 
 #[cfg(test)]
@@ -96,52 +61,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_inline_limits_match_high_volume_tools() {
-        assert_eq!(
-            tool_result_inline_limit("read"),
-            READ_TOOL_RESULT_INLINE_LIMIT
+    fn tool_inline_limit_is_tool_agnostic() {
+        let below = ToolResult::success("x".repeat(TOOL_RESULT_INLINE_LIMIT_BYTES));
+        let above = ToolResult::success("x".repeat(TOOL_RESULT_INLINE_LIMIT_BYTES + 1));
+        let maximum_artifact_page = ToolResult::success(
+            "x".repeat(astrcode_extension_sdk::host::HOST_TOOL_RESULT_MAX_BYTES),
         );
-        assert_eq!(
-            tool_result_inline_limit("shell"),
-            Some(SHELL_TOOL_RESULT_INLINE_LIMIT)
-        );
-        assert_eq!(
-            tool_result_inline_limit("grep"),
-            Some(GREP_TOOL_RESULT_INLINE_LIMIT)
-        );
-        assert_eq!(
-            tool_result_inline_limit("unknown"),
-            Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT)
-        );
+        assert!(!should_auto_persist_tool_result(&below));
+        assert!(should_auto_persist_tool_result(&above));
+        assert!(!should_auto_persist_tool_result(&maximum_artifact_page));
     }
 
     #[test]
-    fn auto_persist_eligibility_ignores_legacy_metadata_control_keys() {
-        let large_content = "a".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+    fn auto_persist_eligibility_ignores_tool_identity_and_metadata_but_preserves_images() {
+        let large_content = "a".repeat(TOOL_RESULT_INLINE_LIMIT_BYTES + 1);
         let cases = [
-            ("eligible", "example", Default::default(), true),
-            ("read result", "read", Default::default(), false),
+            ("plain result", Default::default()),
             (
-                "legacy persisted key",
-                "example",
-                std::collections::BTreeMap::from([(
-                    ["persistedTool", "Result"].concat(),
-                    serde_json::json!(true),
-                )]),
-                true,
-            ),
-            (
-                "legacy artifact source",
-                "example",
-                std::collections::BTreeMap::from([(
-                    "source".into(),
-                    serde_json::json!("toolResultArtifact"),
-                )]),
-                true,
+                "arbitrary metadata",
+                std::collections::BTreeMap::from([("custom".into(), serde_json::json!(true))]),
             ),
         ];
 
-        for (name, tool_name, metadata, expected) in cases {
+        for (name, metadata) in cases {
             let result = ToolResult {
                 content: large_content.clone(),
                 is_error: false,
@@ -149,12 +91,15 @@ mod tests {
                 metadata,
                 duration_ms: None,
             };
-            assert_eq!(
-                should_auto_persist_tool_result(tool_name, &result),
-                expected,
-                "{name}"
-            );
+            assert!(should_auto_persist_tool_result(&result), "{name}");
         }
+
+        let image = ReadToolInlinePayload::image("image/png", large_content)
+            .to_content_string()
+            .unwrap();
+        assert!(!should_auto_persist_tool_result(&ToolResult::success(
+            image
+        )));
     }
 
     #[test]
@@ -166,11 +111,11 @@ mod tests {
     }
 
     #[test]
-    fn summary_names_read_file_path() {
-        let path = "/sessions/session-1/tool-results/shell-call-1.txt";
+    fn summary_names_explicit_artifact_reader() {
+        let artifact_id = "shell-call-1.txt";
         let reference = ToolResultArtifactRef {
             bytes: 2048,
-            path: Some(path.to_string()),
+            artifact_id: artifact_id.into(),
         };
         let preview = ToolResultPreview {
             content: "first lines".into(),
@@ -179,8 +124,8 @@ mod tests {
 
         let summary = persisted_tool_result_summary(&reference, &preview);
 
-        assert!(summary.contains("read"));
-        assert!(summary.contains(path));
+        assert!(summary.contains("read_tool_result"));
+        assert!(summary.contains(artifact_id));
         assert!(summary.contains("Preview"));
         assert!(summary.contains("first lines"));
         assert!(summary.contains("More output"));

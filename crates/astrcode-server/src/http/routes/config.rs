@@ -23,11 +23,11 @@ use axum::{
 
 use super::{
     super::{HttpState, bad_request_response, internal_error_response},
-    ConfigRequestError, notify_extensions_config_changed, reload_extension_registry, update_config,
+    ConfigRequestError, update_config,
 };
 use crate::{
     bootstrap::{self, BootstrapOptions},
-    config_manager::ConfigUpdateError,
+    config_manager::{ConfigUpdateError, PreparedConfigError},
 };
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
@@ -250,6 +250,7 @@ pub(in crate::http) async fn remove_provider_preset(
 pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Response {
     let reload_opts = BootstrapOptions {
         working_dir: Some(state.app.runtime().startup_working_dir().clone()),
+        transport_profile: state.app.runtime().transport_profile().clone(),
         ..BootstrapOptions::default()
     };
     let config = match bootstrap::load_merged_config(
@@ -268,7 +269,7 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     let active_small_profile = config.active_small_profile.clone();
     let active_small_model = config.active_small_model.clone();
 
-    let apply_result: Result<(), ConfigUpdateError<ConfigRequestError>> = state
+    let apply_result: Result<(), PreparedConfigError> = state
         .app
         .runtime()
         .config_manager()
@@ -276,20 +277,25 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
         .await;
     if let Err(error) = apply_result {
         return match error {
-            ConfigUpdateError::Mutation(error) => bad_request_response(error.code, error.message),
+            // 本路径无 mutation 闭包，`Mutation` 不可构造；`Infallible` 穷尽兜底。
+            ConfigUpdateError::Mutation(infallible) => match infallible {},
             ConfigUpdateError::Resolve(error) => bad_request_response(
                 "invalid_config",
                 format!("Reloaded config is invalid: {error}"),
             ),
             ConfigUpdateError::Provider(error) => bad_request_response("invalid_provider", error),
+            ConfigUpdateError::ExtensionValidation(error) => {
+                bad_request_response("invalid_extension_config", error)
+            },
+            ConfigUpdateError::ExtensionCandidate(error) => {
+                internal_error_response("extension_candidate_failed", error)
+            },
             ConfigUpdateError::Store(error) => internal_error_response("reload_failed", error),
+            ConfigUpdateError::Transaction(error) => {
+                internal_error_response("config_publication_failed", error)
+            },
         };
     }
-    // 通知扩展配置已变更（针对已运行扩展的配置热更新）
-    notify_extensions_config_changed(&state).await;
-    // 重载扩展（处理启用/禁用状态变化）
-    let _ = reload_extension_registry(&state).await;
-
     Json(ConfigReloadResponseDto {
         active_profile,
         active_model,
@@ -303,12 +309,7 @@ pub(in crate::http) async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
-    let Ok(approval_mode) = ApprovalMode::try_from(request.approval_mode) else {
-        return bad_request_response(
-            "invalid_approval_mode",
-            "Invalid approvalMode; expected \"manual\" or \"yolo\"",
-        );
-    };
+    let approval_mode = ApprovalMode::from(request.approval_mode);
 
     let update_result = update_config(&state, |candidate| {
         candidate.active_profile = request.active_profile;
@@ -429,20 +430,17 @@ fn apply_model_options_update(
                 if matches!(
                     cap.wire_mapping,
                     ThinkingWireMapping::AnthropicBudget | ThinkingWireMapping::AnthropicAdaptive
-                ) {
-                    if let Some(budget) = new_thinking.budget_tokens {
-                        if let Some(max_tokens) = model.max_tokens {
-                            if budget >= max_tokens {
-                                return Err(ConfigRequestError::new(
-                                    "invalid_budget_tokens",
-                                    format!(
-                                        "budget_tokens ({budget}) must be less than model \
-                                         max_tokens ({max_tokens})"
-                                    ),
-                                ));
-                            }
-                        }
-                    }
+                ) && let Some(budget) = new_thinking.budget_tokens
+                    && let Some(max_tokens) = model.max_tokens
+                    && budget >= max_tokens
+                {
+                    return Err(ConfigRequestError::new(
+                        "invalid_budget_tokens",
+                        format!(
+                            "budget_tokens ({budget}) must be less than model max_tokens \
+                             ({max_tokens})"
+                        ),
+                    ));
                 }
             },
         }

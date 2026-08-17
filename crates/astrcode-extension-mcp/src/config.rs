@@ -57,7 +57,7 @@ struct RawMcpServerConfig {
     env: BTreeMap<String, String>,
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default, alias = "type")]
+    #[serde(default)]
     r#type: Option<String>,
     url: Option<String>,
     #[serde(default)]
@@ -270,8 +270,8 @@ fn resolve_cwd(
     working_dir: &str,
     diagnostics: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    let cwd = match raw_cwd {
-        Some(cwd) if cwd.trim().is_empty() => return None,
+    match raw_cwd {
+        Some(cwd) if cwd.trim().is_empty() => None,
         Some(cwd) => {
             let resolved = hostpaths::resolve_path(base_dir, Path::new(&cwd));
             if matches!(scope, ConfigScope::Project)
@@ -287,8 +287,7 @@ fn resolve_cwd(
             Some(resolved)
         },
         None => None,
-    };
-    cwd
+    }
 }
 
 #[cfg(test)]

@@ -109,7 +109,8 @@ impl TurnRegistry {
     }
 
     /// 仅当活跃 turn 的底层 task 已结束时移除，返回其 turn_id。
-    pub fn remove_if_finished(&self, session_id: &SessionId) -> Option<TurnId> {
+    #[cfg(test)]
+    fn remove_if_finished(&self, session_id: &SessionId) -> Option<TurnId> {
         let mut entries = self.entries.lock();
         if !entries.get(session_id).is_some_and(|entry| {
             matches!(
@@ -145,7 +146,8 @@ impl TurnRegistry {
     }
 
     /// 强制 kill 并移除活跃 turn，返回 turn_id 和 session 用于兜底写终态事件。
-    pub fn force_kill_and_remove(
+    #[cfg(test)]
+    fn force_kill_and_remove(
         &self,
         session_id: &SessionId,
         expected_turn_id: &TurnId,
@@ -155,35 +157,6 @@ impl TurnRegistry {
             &entry.turn_id == expected_turn_id
                 && matches!(entry.state, TurnEntryState::Running { .. })
         }) {
-            return None;
-        }
-        let entry = entries.remove(session_id)?;
-        let TurnEntryState::Running {
-            shutdown_handle,
-            session,
-        } = entry.state
-        else {
-            return None;
-        };
-        drop(entries);
-        shutdown_handle.force_kill();
-        Some((entry.turn_id, session))
-    }
-
-    pub fn force_kill_and_remove_if_running(
-        &self,
-        session_id: &SessionId,
-        expected_turn_id: &TurnId,
-    ) -> Option<(TurnId, Arc<Session>)> {
-        let mut entries = self.entries.lock();
-        let entry = entries.get(session_id)?;
-        let TurnEntryState::Running {
-            shutdown_handle, ..
-        } = &entry.state
-        else {
-            return None;
-        };
-        if &entry.turn_id != expected_turn_id || shutdown_handle.is_finished() {
             return None;
         }
         let entry = entries.remove(session_id)?;
@@ -246,7 +219,8 @@ impl TurnRegistry {
     }
 
     /// 测试和强制清理用：强制 kill 当前活跃 turn，不校验 turn_id。
-    pub fn force_kill_current(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
+    #[cfg(test)]
+    fn force_kill_current(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
         let turn_id = self.active_turn_id(session_id)?;
         self.force_kill_and_remove(session_id, &turn_id)
     }
@@ -321,8 +295,7 @@ mod tests {
         config::{
             EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
         },
-        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        tool::ToolDefinition,
+        llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     };
     use astrcode_extensions::runner::ExtensionRunner;
     use astrcode_session::SessionCreateParams;
@@ -335,10 +308,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for NeverLlm {
-        async fn generate(
+        async fn generate_request(
             &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
+            _request: astrcode_core::llm::LlmRequest,
         ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
             std::future::pending().await
         }
@@ -354,9 +326,6 @@ mod tests {
     fn test_runtime_services() -> Arc<astrcode_session::SessionRuntimeServices> {
         let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm);
         let extension_runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
-        let context_assembler = Arc::new(
-            astrcode_context::context_assembler::LlmContextAssembler::new(Default::default()),
-        );
         let effective = EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),
@@ -410,8 +379,6 @@ mod tests {
             llm,
             effective,
             extension_runner,
-            context_assembler,
-            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         )
     }
 

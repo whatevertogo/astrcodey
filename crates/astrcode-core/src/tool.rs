@@ -1,7 +1,7 @@
 //! 工具 trait 及关联类型。
 //!
 //! 工具是 Agent 与外部世界交互的主要方式。
-//! 扩展可以在内置工具集之外注册额外的工具。
+//! 所有工具都由扩展注册；core 只定义共同领域契约。
 //!
 //! 本模块定义了：
 //! - [`Tool`] trait：所有工具（内置和扩展注册）的核心接口
@@ -13,31 +13,27 @@
 //! 本模块不含具体工具实现与调度逻辑（注册表、并行调度、权限门禁位于
 //! `astrcode-session` / 各工具 crate）。
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::SessionId;
+use crate::types::{SessionId, TurnId};
 
 pub mod access;
 pub mod read_image;
 pub mod selection;
 
-use access::ResourceAccess;
-pub use selection::SessionToolSelection;
+use access::{ResourceLease, ToolPlan};
+pub use selection::{EmptyToolNameError, SessionToolSelection, validated_tool_names};
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOrigin {
-    /// First-party core tools required by the coding runtime.
-    Builtin,
-    /// First-party tools shipped with the server but not fundamental to the tool trait.
+    /// First-party tools shipped as bundled extensions.
     Bundled,
     /// Tools contributed by user or project extensions.
     Extension,
-    /// Tools registered by a future SDK surface.
-    Sdk,
 }
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
@@ -56,9 +52,33 @@ pub struct ToolDefinition {
     pub strict: bool,
     /// 工具来源。来源只影响诊断、策略和优先级，不创建额外执行路径。
     pub origin: ToolOrigin,
-    /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
+}
+
+/// 宿主执行工具时采用的静态策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolExecutionPolicy {
+    /// 该工具能否与同一批次中的其它工具并行执行。
+    pub mode: ExecutionMode,
+    /// `execute` 阶段的有效超时；`None` 表示宿主不额外限制执行时长。
+    pub timeout: Option<Duration>,
+}
+
+impl ToolExecutionPolicy {
+    pub const PARALLEL: Self = Self {
+        mode: ExecutionMode::Parallel,
+        timeout: None,
+    };
+
+    pub const SEQUENTIAL: Self = Self {
+        mode: ExecutionMode::Sequential,
+        timeout: None,
+    };
+}
+
+impl Default for ToolExecutionPolicy {
+    fn default() -> Self {
+        Self::SEQUENTIAL
+    }
 }
 
 /// 工具提示词元数据，**仅服务于 system prompt 中的"详细工具指引"段落**。
@@ -79,9 +99,9 @@ pub struct ToolDefinition {
 ///
 /// # 不要
 ///
-/// - 不要往 builtin（filesystem/system/planning 标签）工具的 `caveats` 里写约束 —— 它**不会**进
-///   system prompt。把这类信息写到 `ToolDefinition.description` 或 参数 schema 的 description 里。
-/// - 如果 builtin 工具确实需要 system prompt 级别的策略指引，扩展
+/// - 不要往普通 filesystem/system/planning 工具的 `caveats` 里写约束 —— 它**不会**进 system
+///   prompt。把这类信息写到 `ToolDefinition.description` 或 参数 schema 的 description 里。
+/// - 如果普通工具确实需要 system prompt 级别的策略指引，扩展
 ///   [`Self::should_render_detailed_guide`]，而不是新增字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolPromptMetadata {
@@ -192,19 +212,21 @@ pub struct ToolResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolResultArtifactSlice {
-    pub path: String,
+    pub artifact_id: String,
     pub bytes: usize,
-    pub char_offset: usize,
-    pub returned_chars: usize,
-    pub next_char_offset: Option<usize>,
+    pub byte_offset: usize,
+    pub returned_bytes: usize,
+    pub next_byte_offset: Option<usize>,
     pub has_more: bool,
     pub content: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolResultArtifactError {
-    #[error("invalid tool result artifact path: {0}")]
-    InvalidPath(String),
+    #[error("invalid tool result artifact id: {0}")]
+    InvalidId(String),
+    #[error("invalid tool result artifact read request: {0}")]
+    InvalidRequest(String),
     #[error("tool result artifact not found: {0}")]
     NotFound(String),
     #[error("tool result artifact reading is unsupported: {0}")]
@@ -215,12 +237,12 @@ pub enum ToolResultArtifactError {
 
 #[async_trait::async_trait]
 pub trait ToolResultArtifactReader: Send + Sync {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError>;
 }
 
@@ -277,6 +299,58 @@ impl ToolResult {
     pub fn with_duration_ms(mut self, duration_ms: Option<u64>) -> Self {
         self.duration_ms = duration_ms;
         self
+    }
+
+    /// 声明本次结果的呈现 intent，供 UI 选择对应的内置渲染。
+    ///
+    /// 只写入 [`PRESENTATION_METADATA_KEY`] 元数据；metadata 不进 LLM prompt，
+    /// 运行时不得据此改变控制流。
+    pub fn with_presentation(mut self, presentation: ToolPresentation) -> Self {
+        self.metadata.insert(
+            PRESENTATION_METADATA_KEY.to_owned(),
+            serde_json::Value::String(presentation.as_str().to_owned()),
+        );
+        self
+    }
+
+    /// 读取结果声明的呈现 intent；未声明或值无法识别时返回 `None`。
+    pub fn presentation(&self) -> Option<ToolPresentation> {
+        serde_json::from_value(self.metadata.get(PRESENTATION_METADATA_KEY)?.clone()).ok()
+    }
+}
+
+/// `ToolResult.metadata` 中呈现 intent 的键。前端/TUI 按此键拾取 intent。
+pub const PRESENTATION_METADATA_KEY: &str = "presentation";
+
+/// 工具结果的呈现 intent。
+///
+/// 每个变体对应 UI 的一种内置渲染（与前端/TUI 注册表中的渲染种类一一对应），
+/// 序列化为 snake_case 字符串。未知字符串由消费方按未声明处理，保证向前兼容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPresentation {
+    /// 默认通用渲染（与不声明 intent 等价）。
+    Generic,
+    /// 终端/命令输出风格渲染。
+    Terminal,
+    /// 文件变更/diff 风格渲染。
+    Diff,
+    /// 搜索结果风格渲染。
+    Search,
+    /// 文件读取风格渲染。
+    Read,
+}
+
+impl ToolPresentation {
+    /// wire 字符串值，与 serde 的 snake_case 表示一致（由测试保证）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Terminal => "terminal",
+            Self::Diff => "diff",
+            Self::Search => "search",
+            Self::Read => "read",
+        }
     }
 }
 
@@ -426,6 +500,30 @@ pub trait SessionOperations: Send + Sync {
         content: String,
     ) -> Result<SessionDeliveryOutcome, SessionApiError>;
 
+    /// 目标 session 运行中时将输入排入 FIFO 队列（当前 turn 结束后自动开新 turn），
+    /// idle 时直接开新 turn。
+    async fn queue_or_start(
+        &self,
+        _access: SessionAccess<'_>,
+        _content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "queue_or_start is not supported by this host".into(),
+        ))
+    }
+
+    /// 仅向目标 session 的活跃 turn 注入一条 UserMessage（下一 step 边界吸收）；
+    /// 无活跃 turn 时返回 [`SessionApiError::NoActiveTurn`]，不排队也不开新 turn。
+    async fn defer_context(
+        &self,
+        _access: SessionAccess<'_>,
+        _content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "defer_context is not supported by this host".into(),
+        ))
+    }
+
     /// 中断目标会话的活跃 turn，并提交新的用户输入。
     async fn interrupt_and_submit(
         &self,
@@ -438,7 +536,7 @@ pub trait SessionOperations: Send + Sync {
     }
 
     /// 取消目标会话的活跃 turn。
-    async fn cancel_turn(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+    async fn cancel_turn(&self, _access: SessionAccess<'_>) -> Result<bool, SessionApiError> {
         Err(SessionApiError::Unsupported(
             "cancel_turn is not supported by this host".into(),
         ))
@@ -537,8 +635,6 @@ pub struct CreateRootSessionRequest {
 pub struct CreateSessionRequest {
     /// 子会话显示名称。
     pub name: String,
-    /// 工作目录。`None` 表示继承父 session。
-    pub working_dir: Option<String>,
     /// 额外系统提示词。
     pub system_prompt: Option<String>,
     /// 模型偏好。`None` 表示继承父 session。
@@ -549,8 +645,8 @@ pub struct CreateSessionRequest {
     pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。
     pub ephemeral: bool,
-    /// 触发创建子 session 的工具调用 ID，写入 AgentSessionSpawned 供 TUI 路由。
-    pub tool_call_id: String,
+    /// 触发创建子 session 的工具调用 ID。
+    pub tool_call_id: Option<String>,
 }
 
 /// 创建成功后返回的句柄。
@@ -744,6 +840,8 @@ pub enum SessionApiError {
     PermissionDenied(String),
     #[error("session busy: {0}")]
     SessionBusy(String),
+    #[error("no active turn in session: {0}")]
+    NoActiveTurn(String),
     #[error("max depth exceeded: current={current}, max={max}")]
     MaxDepthExceeded { current: usize, max: usize },
     #[error("unsupported session operation: {0}")]
@@ -829,9 +927,11 @@ pub struct ToolFileServices {
     pub observation_store: Option<Arc<dyn FileObservationStore>>,
 }
 
-/// 宿主侧服务：artifact 读取与 FFI 工具目录。
+/// 宿主侧服务：turn 模型绑定、artifact 读取与 FFI 工具目录。
 #[derive(Clone, Default)]
 pub struct ToolHostServices {
+    /// 拥有此工具调用的 turn 固定的 provider generation。
+    pub llm_providers: Option<crate::llm::LlmProviderBindings>,
     /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
     pub result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
@@ -856,11 +956,56 @@ pub struct ToolCapabilities {
 #[derive(Clone)]
 pub struct ToolCallScope {
     pub session_id: SessionId,
+    /// 当前工具调用所属 turn；会话外调用不存在该事实。
+    pub turn_id: Option<TurnId>,
     pub working_dir: String,
     /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
     pub tool_call_id: Option<String>,
     /// 当前回合事件发送器，用于工具发出非持久化进度事件。
     pub event_tx: Option<crate::event::EventSender>,
+}
+
+/// Host-internal facts available while planning one tool invocation.
+///
+/// This context deliberately excludes executable capabilities and event channels. Adapters may
+/// project it into an author-facing planning context, but planning cannot perform Host I/O.
+#[derive(Clone, Debug)]
+pub struct ToolPlanningContext {
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub working_dir: String,
+    pub tool_call_id: Option<String>,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl ToolPlanningContext {
+    pub fn new(
+        session_id: SessionId,
+        working_dir: impl Into<String>,
+        tool_call_id: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            turn_id: None,
+            working_dir: working_dir.into(),
+            tool_call_id,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn with_turn_id(mut self, turn_id: TurnId) -> Self {
+        self.turn_id = Some(turn_id);
+        self
+    }
+
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancellation
+    }
 }
 
 /// 每次工具调用时传递的上下文。
@@ -872,6 +1017,8 @@ pub struct ToolCallScope {
 pub struct ToolExecutionContext {
     pub scope: ToolCallScope,
     pub capabilities: ToolCapabilities,
+    resource_lease: Option<ResourceLease>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl ToolExecutionContext {
@@ -885,12 +1032,46 @@ impl ToolExecutionContext {
         Self {
             scope: ToolCallScope {
                 session_id,
+                turn_id: None,
                 working_dir: working_dir.into(),
                 tool_call_id,
                 event_tx,
             },
             capabilities,
+            resource_lease: None,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Attach the resource lease approved for this exact tool invocation.
+    pub fn with_resource_lease(mut self, resource_lease: ResourceLease) -> Self {
+        self.resource_lease = Some(resource_lease);
+        self
+    }
+
+    pub fn resource_lease(&self) -> Option<&ResourceLease> {
+        self.resource_lease.as_ref()
+    }
+
+    /// Attach the turn cancellation signal that owns this tool call.
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    /// Attach the strongly typed turn that owns this tool invocation.
+    pub fn with_turn_id(mut self, turn_id: TurnId) -> Self {
+        self.scope.turn_id = Some(turn_id);
+        self
+    }
+
+    pub fn turn_id(&self) -> Option<&TurnId> {
+        self.scope.turn_id.as_ref()
+    }
+
+    /// Cancellation of the turn or request that owns this tool invocation.
+    pub fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancellation
     }
 }
 
@@ -908,6 +1089,7 @@ impl std::fmt::Debug for ToolCallScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolCallScope")
             .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
             .field("working_dir", &self.working_dir)
             .field("tool_call_id", &self.tool_call_id)
             .field("event_tx", &self.event_tx.as_ref().map(|_| "<event_tx>"))
@@ -920,6 +1102,8 @@ impl std::fmt::Debug for ToolExecutionContext {
         f.debug_struct("ToolExecutionContext")
             .field("scope", &self.scope)
             .field("capabilities", &self.capabilities)
+            .field("resource_lease", &self.resource_lease)
+            .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
     }
 }
@@ -958,6 +1142,7 @@ impl std::fmt::Debug for ToolFileServices {
 impl std::fmt::Debug for ToolHostServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolHostServices")
+            .field("llm_providers", &self.llm_providers)
             .field(
                 "available_tools",
                 &self.available_tools.as_ref().map(|t| t.len()),
@@ -980,21 +1165,17 @@ pub trait Tool: Send + Sync {
     /// 返回工具的定义，用于 LLM 函数调用。
     fn definition(&self) -> ToolDefinition;
 
-    /// 返回工具的执行模式偏好。
-    fn execution_mode(&self) -> ExecutionMode {
-        self.definition().execution_mode
+    /// 返回工具的宿主执行策略。
+    fn execution_policy(&self) -> ToolExecutionPolicy {
+        ToolExecutionPolicy::default()
     }
 
-    /// 声明本次调用将访问的资源，供权限策略判断。
-    ///
-    /// 默认保守返回 [`ResourceAccess::All`]。内置工具应基于参数动态解析路径。
-    fn resource_accesses(
+    /// Plan the resources required by the final, immutable tool arguments.
+    async fn plan(
         &self,
-        _arguments: &serde_json::Value,
-        _working_dir: &Path,
-    ) -> Result<Vec<ResourceAccess>, ToolError> {
-        Ok(vec![ResourceAccess::all()])
-    }
+        arguments: &serde_json::Value,
+        ctx: &ToolPlanningContext,
+    ) -> Result<ToolPlan, ToolError>;
 
     /// 返回工具的结构化提示词元数据。
     ///
@@ -1011,10 +1192,47 @@ pub trait Tool: Send + Sync {
 
     /// 使用给定参数和调用上下文执行工具。
     ///
-    /// 内置工具通常只使用自己声明过的窄能力。
+    /// 工具通常只使用自己声明过的窄能力。
     async fn execute(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentation_as_str_matches_serde_wire_values() {
+        for presentation in [
+            ToolPresentation::Generic,
+            ToolPresentation::Terminal,
+            ToolPresentation::Diff,
+            ToolPresentation::Search,
+            ToolPresentation::Read,
+        ] {
+            let wire = serde_json::to_value(presentation).unwrap();
+            assert_eq!(wire, serde_json::json!(presentation.as_str()));
+        }
+    }
+
+    #[test]
+    fn presentation_intent_roundtrips_through_metadata() {
+        let result = ToolResult::success("ok").with_presentation(ToolPresentation::Terminal);
+        assert_eq!(result.presentation(), Some(ToolPresentation::Terminal));
+        assert_eq!(
+            result.metadata[PRESENTATION_METADATA_KEY],
+            serde_json::json!("terminal")
+        );
+
+        assert_eq!(ToolResult::success("ok").presentation(), None);
+
+        let unknown = ToolResult::success("ok").with_metadata(tool_metadata([(
+            PRESENTATION_METADATA_KEY,
+            serde_json::json!("future_intent"),
+        )]));
+        assert_eq!(unknown.presentation(), None);
+    }
 }

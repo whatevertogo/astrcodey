@@ -4,43 +4,53 @@ use std::{future::Future, sync::Arc};
 
 use astrcode_core::{
     compaction::CompactStrategy,
-    event::Phase,
     llm::{LlmContent, LlmMessage},
     types::SessionId,
 };
 use astrcode_extension_sdk::{
+    host::HostOperation,
     s5r::ErrorPayload,
-    session_inspect::{
-        SessionInspectAgentSession, SessionInspectCompaction, SessionInspectContent,
-        SessionInspectListItem, SessionInspectListOutput, SessionInspectMessage,
-        SessionInspectPendingApproval, SessionInspectProviderMessagesOutput,
-        SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSequencedMessage,
-        SessionInspectSnapshot, SessionInspectSnapshotOutput,
+    session::tool_selection_to_dto,
+    wire::{
+        WireErrorCode,
+        session_inspect::{
+            SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
+            SessionInspectContent, SessionInspectListItem, SessionInspectListOutput,
+            SessionInspectMessage, SessionInspectPendingApproval,
+            SessionInspectProviderMessagesOutput, SessionInspectReadModel,
+            SessionInspectReadModelOutput, SessionInspectSequencedMessage, SessionInspectSnapshot,
+            SessionInspectSnapshotOutput,
+        },
     },
 };
 use astrcode_session_projection::{
     AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
 };
 use astrcode_storage::{SessionReader, StorageError};
-use serde::Serialize;
-use serde_json::Value;
 
-use super::HOST_INVOKE_TIMEOUT;
+use super::{
+    HOST_INVOKE_TIMEOUT,
+    session::{message_origin_dto, phase_output, storage_error},
+};
 
-pub(super) async fn list(reader: Arc<dyn SessionReader>) -> Result<Value, ErrorPayload> {
-    let summaries = storage_call("session.inspect.list", reader.list_session_summaries()).await?;
-    to_value(SessionInspectListOutput {
+pub(super) async fn list(
+    operation: HostOperation,
+    reader: Arc<dyn SessionReader>,
+) -> Result<SessionInspectListOutput, ErrorPayload> {
+    let summaries =
+        storage_call(operation.wire_name(), reader.list_all_session_summaries()).await?;
+    Ok(SessionInspectListOutput {
         sessions: summaries.into_iter().map(list_item).collect(),
     })
 }
 
 pub(super) async fn snapshot(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
-    input: Value,
-) -> Result<Value, ErrorPayload> {
-    let session_id = session_id(&input)?;
+    session_id: SessionId,
+) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.snapshot",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
@@ -51,20 +61,20 @@ pub(super) async fn snapshot(
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     pending_tool_call_ids.sort();
-    to_value(SessionInspectSnapshotOutput {
+    Ok(SessionInspectSnapshotOutput {
         snapshot: SessionInspectSnapshot {
             session_id: model.identity.session_id.to_string(),
             cursor: model.cursor(),
             working_dir: model.identity.working_dir.clone(),
             model_id: model.identity.model_id.clone(),
-            phase: phase_name(model.execution.phase).into(),
+            phase: phase_output(model.execution.phase),
             parent_session_id: model
                 .identity
                 .parent
                 .as_ref()
                 .map(|parent| parent.session_id.to_string()),
             source_extension: model.identity.source_extension.clone(),
-            message_count: model.transcript.messages.len(),
+            message_count: model.model_context.messages.len(),
             pending_tool_call_ids,
             agent_session_count: model.agent_sessions.len(),
         },
@@ -72,39 +82,39 @@ pub(super) async fn snapshot(
 }
 
 pub(super) async fn read_model(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
-    input: Value,
-) -> Result<Value, ErrorPayload> {
-    let session_id = session_id(&input)?;
+    session_id: SessionId,
+) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.read_model",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
-    to_value(SessionInspectReadModelOutput {
+    Ok(SessionInspectReadModelOutput {
         read_model: read_model_dto((*model).clone()),
     })
 }
 
 pub(super) async fn provider_messages(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
-    input: Value,
-) -> Result<Value, ErrorPayload> {
-    let session_id = session_id(&input)?;
+    session_id: SessionId,
+) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.provider_messages",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
     let messages = astrcode_core::llm::provider_visible_messages(
         model
-            .transcript
+            .model_context
             .messages
             .iter()
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     );
-    to_value(SessionInspectProviderMessagesOutput {
+    Ok(SessionInspectProviderMessagesOutput {
         messages: messages.into_iter().map(message_dto).collect(),
     })
 }
@@ -115,17 +125,8 @@ where
 {
     tokio::time::timeout(HOST_INVOKE_TIMEOUT, future)
         .await
-        .map_err(|_| ErrorPayload::new("timeout", format!("{operation} timed out")))?
-        .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
-}
-
-fn session_id(input: &Value) -> Result<SessionId, ErrorPayload> {
-    input
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(SessionId::new)
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "session_id must be a string"))
+        .map_err(|_| ErrorPayload::new(WireErrorCode::Timeout, format!("{operation} timed out")))?
+        .map_err(storage_error)
 }
 
 fn list_item(summary: SessionSummary) -> SessionInspectListItem {
@@ -137,7 +138,7 @@ fn list_item(summary: SessionSummary) -> SessionInspectListItem {
         source_extension: summary.source_extension,
         created_at: summary.created_at,
         updated_at: summary.updated_at,
-        phase: phase_name(summary.phase).into(),
+        phase: phase_output(summary.phase),
         latest_cursor: summary.latest_cursor,
         first_user_message: summary.first_user_message,
     }
@@ -154,18 +155,18 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
     let identity = model.identity;
     let stats = model.stats;
     let prompt = model.system_prompt;
-    let transcript = model.transcript;
+    let model_context = model.model_context;
     let execution = model.execution;
     SessionInspectReadModel {
         session_id: identity.session_id.to_string(),
-        messages: transcript
+        messages: model_context
             .messages
             .into_iter()
             .map(sequenced_message_dto)
             .collect(),
         working_dir: identity.working_dir,
         model_id: identity.model_id,
-        phase: phase_name(execution.phase).into(),
+        phase: phase_output(execution.phase),
         system_prompt: Some(prompt.text),
         extra_system_prompt: prompt.extra,
         system_prompt_fingerprint: Some(prompt.fingerprint),
@@ -186,14 +187,14 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
         created_at: stats.created_at.to_rfc3339(),
         updated_at: stats.updated_at.to_rfc3339(),
         parent_session_id: identity.parent.map(|parent| parent.session_id.to_string()),
-        tool_selection: Some(identity.tool_selection.into()),
+        tool_selection: Some(tool_selection_to_dto(identity.tool_selection)),
         source_extension: identity.source_extension,
         agent_sessions: model
             .agent_sessions
             .into_iter()
             .map(agent_session_dto)
             .collect(),
-        compactions: model
+        compactions: model_context
             .compactions
             .into_iter()
             .map(|boundary| {
@@ -217,9 +218,9 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
 
 fn sequenced_message_dto(message: SequencedLlmMessage) -> SessionInspectSequencedMessage {
     SessionInspectSequencedMessage {
-        message: message_dto(message.message),
+        message: message_dto(Arc::unwrap_or_clone(message.message)),
         updated_seq: message.updated_seq,
-        source: message.source,
+        origin: message.origin.map(message_origin_dto),
     }
 }
 
@@ -269,20 +270,17 @@ fn content_dto(content: LlmContent) -> SessionInspectContent {
 fn agent_session_dto(agent: AgentSessionLinkView) -> SessionInspectAgentSession {
     SessionInspectAgentSession {
         child_session_id: agent.child_session_id.to_string(),
-        tool_call_id: Some(agent.tool_call_id.to_string()),
+        tool_call_id: agent.tool_call_id.map(|id| id.to_string()),
         agent_name: agent.agent_name,
         task: agent.task,
         status: match agent.status {
-            AgentSessionStatus::Running => "running",
-            AgentSessionStatus::Completed => "completed",
-            AgentSessionStatus::Failed => "failed",
-        }
-        .into(),
+            AgentSessionStatus::Running => SessionInspectAgentStatusDto::Running,
+            AgentSessionStatus::Completed => SessionInspectAgentStatusDto::Completed,
+            AgentSessionStatus::Failed => SessionInspectAgentStatusDto::Failed,
+        },
         final_session_id: agent.final_session_id.map(|id| id.to_string()),
         summary: agent.summary,
         error: agent.error,
-        phase: None,
-        current_tool: None,
     }
 }
 
@@ -294,34 +292,14 @@ fn compact_strategy(strategy: CompactStrategy) -> (&'static str, Option<usize>) 
     }
 }
 
-pub(super) fn phase_name(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Idle => "idle",
-        Phase::Thinking => "thinking",
-        Phase::Streaming => "streaming",
-        Phase::CallingTool => "calling_tool",
-        Phase::Compacting => "compacting",
-        Phase::Error => "error",
-    }
-}
-
-fn to_value(value: impl Serialize) -> Result<Value, ErrorPayload> {
-    serde_json::to_value(value).map_err(|error| {
-        ErrorPayload::new(
-            "serialization_failed",
-            format!("failed to serialize session inspect response: {error}"),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
         event::{
-            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
-            SystemPromptSource,
+            DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase, SessionStarted,
+            StoredEvent, SystemPromptSource,
         },
-        llm::LlmMessage,
+        llm::{LlmMessage, TranscriptMessageOrigin},
         tool::SessionToolSelection,
     };
     use astrcode_session_projection::replay;
@@ -355,10 +333,10 @@ mod tests {
         )
         .unwrap();
         model.execution.phase = Phase::CallingTool;
-        model.transcript.messages.push(SequencedLlmMessage {
-            message: LlmMessage::user("hello"),
+        model.model_context.messages.push(SequencedLlmMessage {
+            message: Arc::new(LlmMessage::tool("probe", "call-1", "failed", true)),
             updated_seq: 2,
-            source: None,
+            origin: Some(TranscriptMessageOrigin::ToolCallFailed),
         });
 
         let value = serde_json::to_value(SessionInspectReadModelOutput {
@@ -366,11 +344,55 @@ mod tests {
         })
         .expect("serialize mapped model");
 
-        assert_eq!(value["readModel"]["sessionId"], "session-1");
-        assert_eq!(value["readModel"]["phase"], "calling_tool");
+        assert_eq!(value["read_model"]["session_id"], "session-1");
+        assert_eq!(value["read_model"]["phase"], "calling_tool");
         assert_eq!(
-            value["readModel"]["messages"][0]["message"]["content"][0]["type"],
-            "text"
+            value["read_model"]["messages"][0]["message"]["content"][0]["type"],
+            "tool_result"
         );
+        assert_eq!(
+            value["read_model"]["messages"][0]["origin"],
+            "tool_call_failed"
+        );
+    }
+
+    #[test]
+    fn agent_session_mapping_uses_closed_statuses_without_placeholder_fields() {
+        let cases = [
+            (
+                AgentSessionStatus::Running,
+                SessionInspectAgentStatusDto::Running,
+                "running",
+            ),
+            (
+                AgentSessionStatus::Completed,
+                SessionInspectAgentStatusDto::Completed,
+                "completed",
+            ),
+            (
+                AgentSessionStatus::Failed,
+                SessionInspectAgentStatusDto::Failed,
+                "failed",
+            ),
+        ];
+
+        for (status, expected_status, expected_wire) in cases {
+            let dto = agent_session_dto(AgentSessionLinkView {
+                child_session_id: SessionId::new(format!("child-{expected_wire}")),
+                tool_call_id: None,
+                agent_name: "reviewer".into(),
+                task: "review".into(),
+                status,
+                final_session_id: None,
+                summary: None,
+                error: None,
+            });
+            assert_eq!(dto.status, expected_status);
+
+            let value = serde_json::to_value(dto).expect("serialize agent session");
+            assert_eq!(value["status"], expected_wire);
+            assert!(value.get("phase").is_none());
+            assert!(value.get("currentTool").is_none());
+        }
     }
 }

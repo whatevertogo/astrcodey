@@ -2,12 +2,21 @@
 
 use std::sync::Arc;
 
-use astrcode_core::llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole};
-use astrcode_extension_sdk::s5r::ErrorPayload;
-use serde_json::{Value, json};
+use astrcode_core::llm::{LlmError, LlmEvent, LlmProvider, LlmProviderBindings, LlmRequest};
+use astrcode_extension_sdk::{
+    host::{
+        HostLlmChatOutput, HostLlmChatRequest, HostOperation,
+        internal::{HostOperationGroup, llm_messages_from_wire},
+    },
+    s5r::ErrorPayload,
+    wire::{ModelEventStream, WireErrorCode, protocol::ModelStreamEvent},
+};
+use futures_util::StreamExt;
+use serde_json::Value;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{HOST_INVOKE_TIMEOUT, block_on_async, capability::LlmCapability};
+use super::{HOST_INVOKE_TIMEOUT, invalid_group_operation, serialize_wire_response};
 
 pub(super) struct LlmGroup {
     main: Option<Arc<dyn LlmProvider>>,
@@ -22,155 +31,301 @@ impl LlmGroup {
         Self { main, small }
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
-        capability: LlmCapability,
-        input: &Value,
+        operation: HostOperation,
+        input: Value,
+        bindings: Option<&LlmProviderBindings>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(capability, input, false, cancel_token)
+        let (provider, model_label) = self.provider_for(operation, bindings)?;
+        invoke_llm_chat(&provider, model_label, input, cancel_token).await
     }
 
-    pub(super) fn invoke_stream(
+    pub(super) async fn invoke_event_stream(
         &self,
-        capability: LlmCapability,
-        input: &Value,
+        operation: HostOperation,
+        input: Value,
+        bindings: Option<&LlmProviderBindings>,
         cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(capability, input, true, cancel_token)
+    ) -> Result<ModelEventStream, ErrorPayload> {
+        let (provider, model_label) = self.provider_for(operation, bindings)?;
+        let request = parse_llm_request(input, model_label)?;
+        let receiver = super::run_until_deadline(
+            async {
+                provider
+                    .generate_request(request)
+                    .await
+                    .map_err(llm_error_payload)
+            },
+            Instant::now() + HOST_INVOKE_TIMEOUT,
+            cancel_token,
+            || {
+                ErrorPayload::new(
+                    WireErrorCode::Timeout,
+                    format!("{model_label}.chat timed out"),
+                )
+            },
+            || ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"),
+        )
+        .await?;
+        let model = model_label.to_owned();
+        let events = futures_util::stream::unfold(
+            (receiver, String::new(), 0u32, false),
+            move |(mut receiver, mut content, mut retry_attempt, terminal)| {
+                let model = model.clone();
+                async move {
+                    if terminal {
+                        return None;
+                    }
+                    let Some(event) = receiver.recv().await else {
+                        return Some((
+                            ModelStreamEvent::Failed {
+                                error: ErrorPayload::new(
+                                    WireErrorCode::StreamClosed,
+                                    "model provider closed before a terminal event",
+                                ),
+                            },
+                            (receiver, content, retry_attempt, true),
+                        ));
+                    };
+                    let (event, terminal) = match event {
+                        LlmEvent::Retrying {
+                            attempt, delay_ms, ..
+                        } => {
+                            retry_attempt = attempt;
+                            (ModelStreamEvent::Retrying { attempt, delay_ms }, false)
+                        },
+                        LlmEvent::RetryRecovered => (
+                            ModelStreamEvent::Recovered {
+                                attempt: retry_attempt,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ContentDelta { delta } => {
+                            content.push_str(&delta);
+                            (ModelStreamEvent::ContentDelta { content: delta }, false)
+                        },
+                        LlmEvent::ThinkingDelta { delta } => {
+                            (ModelStreamEvent::ThinkingDelta { content: delta }, false)
+                        },
+                        LlmEvent::ToolCallStart {
+                            call_id,
+                            name,
+                            arguments,
+                        } => (
+                            ModelStreamEvent::ToolCallStart {
+                                tool_call_id: call_id,
+                                name,
+                                arguments,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ToolCallDelta { call_id, delta } => (
+                            ModelStreamEvent::ToolCallDelta {
+                                tool_call_id: call_id,
+                                delta,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ToolCallCompleted { call_id } => (
+                            ModelStreamEvent::ToolCallCompleted {
+                                tool_call_id: call_id,
+                            },
+                            false,
+                        ),
+                        LlmEvent::Usage { usage } => (
+                            ModelStreamEvent::Usage {
+                                input_tokens: usage.input_tokens.unwrap_or(0),
+                                output_tokens: usage.output_tokens.unwrap_or(0),
+                            },
+                            false,
+                        ),
+                        LlmEvent::Done { finish_reason } => (
+                            ModelStreamEvent::Completed {
+                                output: serde_json::json!({
+                                    "content": content.clone(),
+                                    "model": model,
+                                    "finish_reason": finish_reason,
+                                }),
+                            },
+                            true,
+                        ),
+                        LlmEvent::Error { message } => (
+                            ModelStreamEvent::Failed {
+                                error: ErrorPayload::new(WireErrorCode::LlmStreamError, message),
+                            },
+                            true,
+                        ),
+                    };
+                    Some((event, (receiver, content, retry_attempt, terminal)))
+                }
+            },
+        );
+        Ok(Box::pin(
+            futures_util::stream::once(async { ModelStreamEvent::Started }).chain(events),
+        ))
     }
 
-    fn invoke_with_mode(
+    fn provider_for(
         &self,
-        capability: LlmCapability,
-        input: &Value,
-        collect_chunks: bool,
-        cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
-        match capability {
-            LlmCapability::MainChat => {
-                let provider = self.main.as_ref().ok_or_else(|| {
-                    ErrorPayload::new("backend_unavailable", "main_llm not configured")
-                })?;
-                invoke_llm_chat(provider, "main_llm", input, collect_chunks, cancel_token)
-            },
-            LlmCapability::SmallChat => {
-                let provider = self.small.as_ref().ok_or_else(|| {
-                    ErrorPayload::new("backend_unavailable", "small_llm not configured")
-                })?;
-                invoke_llm_chat(provider, "small_llm", input, collect_chunks, cancel_token)
-            },
-        }
+        operation: HostOperation,
+        bindings: Option<&LlmProviderBindings>,
+    ) -> Result<(Arc<dyn LlmProvider>, &'static str), ErrorPayload> {
+        let (provider, model_label) = match operation {
+            HostOperation::LlmMainChat => (
+                bindings
+                    .map(LlmProviderBindings::main)
+                    .or(self.main.as_ref()),
+                "main_llm",
+            ),
+            HostOperation::LlmSmallChat => (
+                bindings
+                    .map(LlmProviderBindings::small)
+                    .or(self.small.as_ref()),
+                "small_llm",
+            ),
+            _ => return Err(invalid_group_operation(operation, HostOperationGroup::Llm)),
+        };
+        let provider = provider.ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::BackendUnavailable,
+                format!("{model_label} not configured"),
+            )
+        })?;
+        Ok((Arc::clone(provider), model_label))
+    }
+
+    pub(super) fn has_main(&self, bindings: Option<&LlmProviderBindings>) -> bool {
+        bindings.is_some() || self.main.is_some()
+    }
+
+    pub(super) fn has_small(&self, bindings: Option<&LlmProviderBindings>) -> bool {
+        bindings.is_some() || self.small.is_some()
     }
 }
 
-fn invoke_llm_chat(
+async fn invoke_llm_chat(
     provider: &Arc<dyn LlmProvider>,
     model_label: &'static str,
-    input: &Value,
-    collect_chunks: bool,
+    input: Value,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Value, ErrorPayload> {
-    let messages = input["messages"]
-        .as_array()
-        .map(|messages| {
-            messages
-                .iter()
-                .filter_map(|message| {
-                    let role = match message["role"].as_str()? {
-                        "user" => LlmRole::User,
-                        "assistant" => LlmRole::Assistant,
-                        "system" => LlmRole::System,
-                        _ => LlmRole::User,
-                    };
-                    let content = message["content"].as_str().unwrap_or("").to_string();
-                    Some(LlmMessage {
-                        role,
-                        content: vec![LlmContent::Text { text: content }],
-                        name: None,
-                        reasoning_content: None,
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let request = parse_llm_request(input, model_label)?;
 
-    if messages.is_empty() {
+    super::run_until_deadline(
+        run_host_llm_chat(&**provider, model_label, request),
+        Instant::now() + HOST_INVOKE_TIMEOUT,
+        cancel_token,
+        || {
+            ErrorPayload::new(
+                WireErrorCode::Timeout,
+                format!("{model_label}.chat timed out"),
+            )
+        },
+        || ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"),
+    )
+    .await
+}
+
+fn parse_llm_request(input: Value, model_label: &'static str) -> Result<LlmRequest, ErrorPayload> {
+    let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("invalid {model_label}.chat request: {error}"),
+        )
+    })?;
+
+    if request.messages.is_empty() {
         return Err(ErrorPayload::new(
-            "invalid_input",
-            "messages array is empty or missing",
+            WireErrorCode::InvalidInput,
+            "messages must contain at least one typed LLM message",
         ));
     }
-
-    let cancel = cancel_token.cloned();
-    let provider = Arc::clone(provider);
-    let label = model_label.to_string();
-    block_on_async(async move {
-        tokio::time::timeout(
-            HOST_INVOKE_TIMEOUT,
-            run_host_llm_chat(
-                &*provider,
-                &label,
-                messages,
-                collect_chunks,
-                cancel.as_ref(),
-            ),
-        )
-        .await
-        .map_err(|_| ErrorPayload::new("timeout", format!("{label}.chat timed out")))?
-    })?
+    if request.max_output_tokens == Some(0) {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            "maxOutputTokens must be greater than zero",
+        ));
+    }
+    Ok(LlmRequest {
+        messages: llm_messages_from_wire(request.messages)
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
+        tools: vec![],
+        max_output_tokens: request.max_output_tokens,
+    })
 }
 
 async fn run_host_llm_chat(
     provider: &dyn LlmProvider,
     model_label: &str,
-    messages: Vec<LlmMessage>,
-    collect_chunks: bool,
-    cancel_token: Option<&CancellationToken>,
+    request: LlmRequest,
 ) -> Result<Value, ErrorPayload> {
     let mut rx = provider
-        .generate(messages, vec![])
+        .generate_request(request)
         .await
-        .map_err(|error| ErrorPayload::new("llm_error", error.to_string()))?;
+        .map_err(llm_error_payload)?;
 
     let mut text = String::new();
-    let mut chunks = Vec::new();
-    loop {
-        let event = if let Some(token) = cancel_token {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => {
-                    return Err(ErrorPayload::new("cancelled", "invoke cancelled"));
-                }
-                event = rx.recv() => event,
-            }
-        } else {
-            rx.recv().await
-        };
-        let Some(event) = event else {
-            break;
-        };
+    while let Some(event) = rx.recv().await {
         match event {
             LlmEvent::ContentDelta { delta } => {
-                if collect_chunks {
-                    chunks.push(json!({ "delta": delta }));
-                }
                 text.push_str(&delta);
             },
             LlmEvent::Done { .. } => break,
             LlmEvent::Error { message } => {
-                return Err(ErrorPayload::new("llm_error", message));
+                let mut payload = ErrorPayload::new(WireErrorCode::LlmStreamError, message);
+                payload.details = Some(serde_json::json!({ "kind": "stream_error" }));
+                return Err(payload);
             },
             _ => {},
         }
     }
-    if collect_chunks {
-        Ok(json!({
-            "content": text,
-            "model": model_label,
-            "chunks": chunks
-        }))
-    } else {
-        Ok(json!({ "content": text, "model": model_label }))
+    serialize_wire_response(
+        HostLlmChatOutput {
+            content: text,
+            model: model_label.to_owned(),
+        },
+        model_label,
+    )
+}
+
+fn llm_error_payload(error: LlmError) -> ErrorPayload {
+    let details = serde_json::to_value(&error).ok();
+    let mut payload = super::wire_payload(error);
+    payload.details = details;
+    payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_errors_keep_stable_codes_retryability_and_details() {
+        let rate_limited = llm_error_payload(LlmError::RateLimited {
+            status: 429,
+            retry_after_ms: Some(250),
+            message: "slow down".into(),
+        });
+        assert_eq!(rate_limited.code_enum(), Some(WireErrorCode::RateLimited));
+        assert!(rate_limited.retryable);
+        assert_eq!(
+            rate_limited.details.as_ref().unwrap()["retry_after_ms"],
+            250
+        );
+
+        let cancelled = llm_error_payload(LlmError::Interrupted);
+        assert_eq!(cancelled.code_enum(), Some(WireErrorCode::Cancelled));
+        assert!(!cancelled.retryable);
+        assert_eq!(cancelled.details.as_ref().unwrap()["kind"], "interrupted");
+
+        let unsupported = llm_error_payload(LlmError::Unsupported {
+            message: "counting".into(),
+        });
+        assert_eq!(unsupported.code_enum(), Some(WireErrorCode::Unsupported));
+        assert!(!unsupported.retryable);
     }
 }

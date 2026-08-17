@@ -1,27 +1,8 @@
 import type {
   AgentSessionLink,
-  AgentSessionStatus,
+  AgentSessionUpdate,
   ConversationBlock,
-  ConversationControlState,
-  Phase,
 } from '../../services/types'
-
-export function phaseFromControl(
-  control: ConversationControlState | null
-): Phase {
-  return control?.phase ?? 'idle'
-}
-
-/** 合并本地 compact 提交态与后端 control.compacting，避免 snapshot 刷新冲掉压缩中 UI。 */
-export function resolvePhase(
-  control: ConversationControlState | null,
-  compactSubmitting: boolean
-): Phase {
-  if (compactSubmitting || control?.compacting) {
-    return 'compacting'
-  }
-  return phaseFromControl(control)
-}
 
 export function mergeBlock(
   current: ConversationBlock,
@@ -65,41 +46,52 @@ export function upsertBlock(
   return next
 }
 
-function isTerminalAgentStatus(
-  status: AgentSessionStatus | undefined
-): boolean {
-  return status === 'completed' || status === 'failed'
-}
-
-export function mergeAgentSession(
-  current: AgentSessionLink,
-  incoming: AgentSessionLink
-): AgentSessionLink {
-  const status =
-    incoming.status ??
-    (isTerminalAgentStatus(current.status) ? current.status : 'running')
-  const running = status === 'running'
-  const phaseProvided = incoming.phase !== undefined
-  const currentTool = running
-    ? phaseProvided
-      ? incoming.currentTool
-      : (incoming.currentTool ?? current.currentTool)
-    : undefined
-
-  return {
-    ...current,
-    ...incoming,
-    status,
-    agentName: incoming.agentName?.trim()
-      ? incoming.agentName
-      : current.agentName,
-    task: incoming.task?.trim() ? incoming.task : current.task,
-    toolCallId: incoming.toolCallId ?? current.toolCallId,
-    finalSessionId: incoming.finalSessionId ?? current.finalSessionId,
-    summary: incoming.summary ?? current.summary,
-    error: incoming.error ?? current.error,
-    phase: running ? (incoming.phase ?? current.phase) : undefined,
-    currentTool,
+export function applyAgentSessionUpdate(
+  current: AgentSessionLink | undefined,
+  update: AgentSessionUpdate
+): AgentSessionLink | undefined {
+  switch (update.kind) {
+    case 'spawned':
+      return {
+        childSessionId: update.childSessionId,
+        toolCallId: update.toolCallId,
+        agentName: update.agentName,
+        task: update.task,
+        status: 'running',
+        phase: 'thinking',
+      }
+    case 'completed':
+      return current
+        ? {
+            ...current,
+            status: 'completed',
+            finalSessionId: update.finalSessionId,
+            summary: update.summary,
+            error: undefined,
+            phase: undefined,
+            currentTool: undefined,
+          }
+        : undefined
+    case 'failed':
+      return current
+        ? {
+            ...current,
+            status: 'failed',
+            finalSessionId: update.finalSessionId,
+            summary: undefined,
+            error: update.error,
+            phase: undefined,
+            currentTool: undefined,
+          }
+        : undefined
+    case 'progress':
+      return current?.status === 'running'
+        ? {
+            ...current,
+            phase: update.phase,
+            currentTool: update.currentTool,
+          }
+        : current
   }
 }
 

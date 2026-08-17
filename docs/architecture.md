@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 26 个 crate + Tauri 桌面壳（共 27 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，由 `crates/` 下 28 个 crate 与 Tauri 桌面壳组成（共 29 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，SessionReadModel 是投影，Agent 是无状态运行时。**
 
@@ -19,8 +19,8 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 - `Session` 是持久事实的应用句柄；EventLog 才是唯一事实来源
 - 持久层：`SessionEventJournal` 负责 durable 写入，storage 持有 EventLog 的唯一
   `SessionReadModel` 实例
-- 瞬态层：`SessionRuntimeState` 持有有序 publisher、file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
-- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `SessionRuntimeRegistry` 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
+- 瞬态层：`SessionRuntimeState` 持有有序 `SessionEventSink`、file observation store、审批状态和工具快照缓存；工具表由每个 Turn 显式持有不可变快照
+- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`；`SessionEventSink` 将已排序事件交给 server 注入的 observer
 - 不需要"保存 session"——事件已经写回了
 
 ### Agent — 无状态运行时
@@ -37,7 +37,7 @@ Session 持久化、projection 所有权、文件 lease 以及读写应用端口
 
 ```
 Session::emit_durable / Session::emit_live
-  → SessionEventPublisher（同一 session 的 bounded FIFO）
+  → SessionEventSink（同一 session 的 bounded FIFO）
     → durable: SessionEventJournal → projection → fan-out
     → live: 跳过 storage/projection → fan-out
     → ServerEventBus forwarder（attach 后订阅）
@@ -134,22 +134,35 @@ Compact 是一个**严格的 XML contract**：
 - 输出有 token 上限（`COMPACT_OUTPUT_TOKEN_CAP`）
 - 解析器容忍外层 markdown fence、大小写不敏感的 XML tag，但不容忍结构缺失
 
-### 闭环式 LLM 调用
+### 同步 LLM 调用
 
-Compact 通过 `make_compact_request_fn` 从 `LlmProvider` 构造请求闭包：
+`astrcode-session::compaction::pipeline` 是 manual、auto、reactive 三个入口共用的唯一
+同步状态机：
 
-- 闭包调用 `llm.generate(messages, vec![])`（不传工具），收集流式文本输出并返回
+- pipeline 通过闭包调用 `LlmProvider::generate_request`（不传工具），收集流式文本输出
 - 闭包传入 `compact_messages_with_fallback`，`LlmContextAssembler` 不持有 provider 引用，保持模型切换时的无状态设计
 - compact prompt 禁止工具调用，如果模型尝试调用工具则解析失败，触发 contract repair 重试
 
-### 双路径 + 熔断 + 安全持久化
+### 三入口 + 熔断 + 安全持久化
 
-- 自动压缩和手动压缩统一走 `compact_messages_with_fallback`：先尝试 LLM 生成结构化摘要，失败时降级到确定性模板
-- LLM 调用通过闭包注入（`make_compact_request_fn`），`LlmContextAssembler` 不持有 provider 引用
-- 确定性 fallback 仅在 LLM 完全不可用时触发，作为最后保障
+- manual、auto 和 reactive 统一走同一个 pipeline：先发 `PreCompact`，随后重读
+  `SessionReadModel` 并冻结 `ContextSnapshot`
+- LLM 失败时降级到确定性模板；fallback 成功仍是一次成功 compact
+- provider、流收集或 contract repair 失败时使用确定性 fallback；明确的 skip 条件不伪装成成功
 - **压缩熔断器**（`CompactCircuitBreaker`）：LLM 连续失败达到阈值后，在冷却期内跳过自动压缩
 - **可选预测性压缩**：根据 turn token 增长估算，在超出窗口前提前 compact
-- **CAS 持久化**：`persist_compact_result` 使用 compare-and-swap；并发写入冲突时安全失败，不污染事件日志
+- **前缀校验**：`TranscriptRewritten` 携带冻结时的 `source_seq + source_fingerprint`；
+  projection 在 append 前重算前缀指纹，冲突时拒绝事件，同时保留 source seq 后的并发 tail
+- **durable 边界**：rewrite 在同一 session lane 内按 append → fsync → projection/observer
+  publish 提交；模糊 fsync 失败保留 sticky `DurabilityUncertain` 并阻断后续
+  mutation。下一次 operation admission 只用该错误携带的 exact seq 尝试一次恢复；
+  reopen 与 cold read 必须在任何 replay/restore 前固定文件长度并真实 fsync EventLog；
+  scan 只读该 confirmed prefix，失败时不暴露 projection 或 summary。
+  `PostCompact` 和成功响应只发生在本次调用观察到确认之后；checkpoint 只是
+  best-effort 加速器
+
+`CompactStrategy` 是调用链唯一传递的策略事实，trigger 与 manual 的
+`keep_recent_turns` 均由它派生。turn id 只来自 hook call context，不再沿多个函数重复转手。
 
 ### Post-compact 上下文恢复
 
@@ -196,7 +209,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 分层工具而非全 bash
 
-8 个内置工具（read / write / edit / patch / glob / grep / shell / terminal）：
+Coding Extension 注册 8 个第一方工具（read / read_tool_result / write / edit / patch / glob / grep / shell）：
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
@@ -205,6 +218,9 @@ Identity → System → Task Guidelines → Communication → Environment
 ### 工具管线
 
 - `ToolPipeline` 管理完整的 预处理 → 执行 → 提交 流程
+- 参数先由全部 `ToolInputTransform` 按固定顺序折叠，再统一 normalize；全部 `PreToolUse` handler
+  只在同一份 canonical arguments 上做 Allow/Ask/Block 准入。Ask 聚合，任一 Block 终止；planner、
+  permission 与 executor 随后共享这份参数
 - 并行执行用 `JoinSet` 做水位控制（MAX_PARALLEL_TOOL_CALLS = 5），一个任务完成立即补位
 - LLM 输出的 JSON 参数解析失败时尝试修复（`parse_and_repair_json`），容错弱模型的格式问题
 - 工具结果有**全局消息预算**：总字符数超限时按大小降序优先持久化最大的结果
@@ -232,7 +248,9 @@ Identity → System → Task Guidelines → Communication → Environment
 
 扩展订阅 agent 生命周期事件；控制型 hook 可以拦截或修改操作，通知型 hook 只观察：
 
-- `PreToolUse` / `PostToolUse` — 检查、修改或阻止工具执行
+- `ToolInputTransform` — 在规范化前按确定顺序变换工具参数
+- `PreToolUse` — 在最终参数上聚合 Ask / Block 准入决策
+- `PostToolUse` — 检查、修改或阻止工具结果
 - `BeforeProviderRequest` / `AfterProviderResponse` — 修改消息或阻止 LLM 调用
 - `PreCompact` / `PostCompact` — 注入 compact 指令
 - `PromptBuild` — 贡献 system prompt 片段
@@ -240,7 +258,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 三种钩子模式
 
-- **Blocking**：同步执行，可返回 Block / ModifiedInput / ModifiedResult
+- **Blocking**：同步执行，可返回所属 hook 明确定义的控制结果
 - **NonBlocking**：即发即弃，使用快照上下文，不阻塞主流程
 - **Advisory**：结果仅记录日志，不强制执行
 
@@ -270,7 +288,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode / Goal / Memory / Channels / Web Tools）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode / Goal / Memory / Channels / Web Tools）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 typed `InitializeManifest` 中声明所需宿主能力。
 
 ---
 
@@ -328,7 +346,7 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 
 ### Extension-First 架构
 
-核心只保留必须通用的能力（agent loop、hooks、context compaction、built-in tools）。其他能力（skills、MCP、自定义工具、模式切换）通过扩展接入。Mode 系统从内置逻辑迁移到插件即是这一架构的验证。
+核心只保留必须通用的机制（agent loop、hooks、context compaction、权限与资源 lease）。所有工具，包括第一方 coding 工具，都通过扩展接入；Host 只提供受能力与 lease 约束的 workspace/process 等基础能力。Mode 系统和 coding 工具都验证了这一边界。
 
 ### 工具-First 而非 extension-First
 

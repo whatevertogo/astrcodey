@@ -16,18 +16,18 @@ pub(super) const REQUIRED_SUMMARY_SECTIONS: [&str; 9] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedCompactOutput {
+pub(super) struct ParsedCompactOutput {
     /// 已去掉外层 `<summary>` 标签的摘要正文。
-    pub summary: String,
+    pub(super) summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactParseError {
+pub(super) struct CompactParseError {
     detail: String,
 }
 
 impl CompactParseError {
-    pub(crate) fn new(detail: impl Into<String>) -> Self {
+    pub(super) fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
         }
@@ -46,7 +46,9 @@ impl std::error::Error for CompactParseError {}
 ///
 /// 为了容忍模型偶尔包一层 markdown fence，这里会先剥掉最外层 fence，
 /// 但不会接受缺失 `<summary>` 或缺少九段标题的输出。
-pub fn parse_compact_output(content: &str) -> Result<ParsedCompactOutput, CompactParseError> {
+pub(super) fn parse_compact_output(
+    content: &str,
+) -> Result<ParsedCompactOutput, CompactParseError> {
     let normalized = strip_outer_markdown_code_fence(content);
     let summary = extract_xml_block(&normalized, "summary")?
         .ok_or_else(|| CompactParseError::new("compact response missing <summary> block"))?;
@@ -70,7 +72,7 @@ pub fn parse_compact_output(content: &str) -> Result<ParsedCompactOutput, Compac
 ///
 /// 这是 assembler 的宽容路径：用于格式化已有 summary 或 deterministic fallback，
 /// 不用于 provider-backed compact 的严格 contract 判断。
-pub(crate) fn extract_summary_for_context(content: &str) -> String {
+pub(super) fn extract_summary_for_context(content: &str) -> String {
     let normalized = strip_outer_markdown_code_fence(content);
     if let Ok(Some(summary)) = extract_xml_block(&normalized, "summary") {
         return summary;

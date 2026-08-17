@@ -6,4 +6,4 @@ import type { ExtensionSourceDto } from "./ExtensionSourceDto";
 /**
  * GET /api/extensions 响应中的单个扩展状态。
  */
-export type ExtensionStateDto = { extensionId: string, enabled: boolean, loaded: boolean, source: ExtensionSourceDto, declaration?: ExtensionDeclarationDto | null, diagnostics?: ExtensionDiagnosticsDto | null, };
+export type ExtensionStateDto = { extensionId: string, enabled: boolean, loaded: boolean, source: ExtensionSourceDto, declaration?: ExtensionDeclarationDto, diagnostics?: ExtensionDiagnosticsDto, };

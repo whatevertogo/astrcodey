@@ -4,8 +4,11 @@
 //! AstrCode's internal messages/tools into the exact JSON contracts required by Chat Completions
 //! and Responses.
 
+use std::sync::Arc;
+
 use astrcode_core::{
     config::OpenAiApiMode,
+    event::stable_hash_hex,
     llm::{
         LlmMessage, LlmRole, PromptCacheRetention,
         thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
@@ -15,7 +18,7 @@ use astrcode_core::{
 
 use super::serialization::{
     chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
-    responses_tools_json, stable_hash_hex, system_text, tools_to_json,
+    responses_tools_json, system_text, tools_to_json,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -64,7 +67,7 @@ pub(crate) fn input_tokens_endpoint(base_url: &str) -> String {
 
 pub(crate) fn build_request_body(
     config: OpenAiRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     match config.api_mode {
@@ -75,7 +78,7 @@ pub(crate) fn build_request_body(
 
 pub(crate) fn build_input_token_count_body(
     config: OpenAiRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     let config = OpenAiRequestConfig {
@@ -94,10 +97,11 @@ pub(crate) fn build_input_token_count_body(
 
 fn build_chat_request_body(
     config: OpenAiRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
-    let messages_json: Vec<serde_json::Value> = messages.iter().map(chat_message_to_json).collect();
+    let messages_json: Vec<serde_json::Value> =
+        messages.iter().map(|m| chat_message_to_json(m)).collect();
 
     let mut body = serde_json::json!({
         "model": config.model_id,
@@ -146,14 +150,14 @@ fn apply_common_chat_thinking(config: OpenAiRequestConfig<'_>, body: &mut serde_
 /// 避免正式请求与 count_tokens 各自重复计算系统提示；count_tokens 路径也因此完全不触碰缓存键。
 fn build_responses_body(
     config: OpenAiRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
     system: &str,
 ) -> serde_json::Value {
     let input: Vec<serde_json::Value> = messages
         .iter()
         .filter(|m| !matches!(m.role, LlmRole::System))
-        .flat_map(responses_input_items)
+        .flat_map(|m| responses_input_items(m))
         .collect();
 
     let mut body = serde_json::json!({
@@ -173,7 +177,7 @@ fn build_responses_body(
 
 fn build_responses_request_body(
     config: OpenAiRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     let system = system_text(messages);
@@ -274,6 +278,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -287,13 +298,7 @@ mod tests {
                 effort: Some("high".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert_eq!(body["reasoning"]["effort"], "high");
@@ -329,6 +334,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -342,13 +354,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert!(
@@ -361,6 +367,13 @@ mod tests {
     fn responses_thinking_omitted_when_no_effort_even_if_enabled() {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
         };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
@@ -375,13 +388,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert!(
@@ -394,6 +401,13 @@ mod tests {
     fn chat_emits_thinking_enabled_for_deepseek_when_capability_maps() {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec![]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
         };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
@@ -408,13 +422,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec![]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -429,6 +437,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec![]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -442,13 +457,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec![]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "disabled");
@@ -488,6 +497,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -501,13 +517,7 @@ mod tests {
                 effort: Some("low".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -518,7 +528,7 @@ mod tests {
     fn prompt_cache_key_pinned_for_chat_and_responses() {
         use astrcode_core::{
             llm::{LlmMessage, thinking::ThinkingConfig},
-            tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+            tool::{ToolDefinition, ToolOrigin},
         };
         let thinking = ThinkingConfig {
             enabled: false,
@@ -530,10 +540,12 @@ mod tests {
             description: "read a file".into(),
             parameters: serde_json::json!({"type":"object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Parallel,
+            origin: ToolOrigin::Bundled,
         };
-        let messages = [LlmMessage::system("sys"), LlmMessage::user("hi")];
+        let messages = [
+            Arc::new(LlmMessage::system("sys")),
+            Arc::new(LlmMessage::user("hi")),
+        ];
 
         let responses_body = build_responses_request_body(
             OpenAiRequestConfig {

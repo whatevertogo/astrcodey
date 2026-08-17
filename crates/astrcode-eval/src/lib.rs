@@ -35,8 +35,6 @@ pub struct EvalConfig {
     pub keep_workdir: bool,
     /// 服务地址（若已有运行中的 server 则指定，否则从 run.json 读取）。
     pub server_addr: Option<String>,
-    /// Auth token（与 server_addr 配合使用）。
-    pub auth_token: Option<String>,
     /// 每完成一个 case 后追加一行的 JSONL checkpoint 路径。
     pub checkpoint_path: Option<PathBuf>,
     /// 从已有 checkpoint 恢复，跳过已经完成的 case。
@@ -110,7 +108,6 @@ impl Default for EvalConfig {
             tags_filter: None,
             keep_workdir: false,
             server_addr: None,
-            auth_token: None,
             checkpoint_path: None,
             resume_checkpoint: false,
             storage_root: None,

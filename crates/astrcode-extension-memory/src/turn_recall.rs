@@ -1,25 +1,27 @@
 //! Project memory: recall at turn end, deliver on the next turn's first LLM request.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, HookResult, LifecycleContext, LifecycleHandler,
-        ProviderContext, ProviderHandler, ProviderResult,
+        ExchangeSummary, ExtensionCall, ExtensionError, ExtensionPaths, HookResult,
+        LifecycleContext, LifecycleHandler, PreparedProviderContribution, PreparedProviderEffect,
+        ProviderContext, ProviderContributionHandler, ProviderContributionId,
+        ProviderSettlementContext,
     },
     llm::LlmMessage,
 };
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 
 use crate::{config::MemoryConfig, prompts, store::MemoryStorePool};
 
 /// 用户偏好的 per-session 只读快照。
 ///
-/// `MemoryExtension` 是全局共享单例（runner 在 bootstrap 时创建一次，所有
-/// session 复用同一实例），所以这里按 `session_id` 隔离缓存。一个 session
-/// 首次加载后，整个 session 生命期内只返回同一份内容——`memory_save` 写入
-/// 新偏好不影响它，system prompt 指纹保持稳定，KV cache 不被破坏。只有下一
-/// 个 session 的 SessionStart 才重新加载最新值。
+/// 同一扩展 generation 内的所有 session 复用一个 `MemoryExtension` 实例，所以这里按
+/// `session_id` 隔离缓存。一个 session 首次加载后，在该 generation 内只返回同一份内容：
+/// `memory_save` 写入新偏好不影响它，system prompt 指纹保持稳定，KV cache 不被破坏。
+/// 下一个 session 或热重载后的新 generation 才会加载最新值。
 ///
 /// 缓存随活跃 session 增长，在 `stop()`（扩展卸载）时整体清空。进程重启后
 /// 内存清零，resume 的 session 会重新加载。
@@ -65,34 +67,79 @@ impl SessionPrefsCache {
     }
 }
 
-/// Project memories ranked at [`ExtensionEvent::TurnEnd`], consumed on next
-/// `BeforeProviderRequest`.
-#[derive(Default)]
-pub(crate) struct ProjectRecallBuffer {
-    pending: Mutex<std::collections::HashMap<String, Vec<String>>>,
+const PROJECT_RECALL_DIR: &str = "project-recall";
+const PROJECT_RECALL_STATE_FILE: &str = "state.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PendingProjectRecall {
+    id: String,
+    lines: Vec<String>,
 }
 
-impl ProjectRecallBuffer {
-    pub(crate) fn store(&self, session_id: &str, lines: Vec<String>) {
-        if lines.is_empty() {
-            self.pending.lock().remove(session_id);
-        } else {
-            self.pending.lock().insert(session_id.to_string(), lines);
-        }
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProjectRecallState {
+    pending: Option<PendingProjectRecall>,
+}
+
+struct ProjectRecallStore {
+    root: PathBuf,
+}
+
+impl ProjectRecallStore {
+    fn from_paths(paths: &ExtensionPaths) -> Result<Self, ExtensionError> {
+        let root = paths.require_session_data_dir()?.join(PROJECT_RECALL_DIR);
+        Ok(Self { root })
     }
 
-    pub(crate) fn take(&self, session_id: &str) -> Option<Vec<String>> {
-        self.pending.lock().remove(session_id)
+    fn replace(&self, lines: Vec<String>) -> Result<(), ExtensionError> {
+        let state = ProjectRecallState {
+            pending: (!lines.is_empty()).then(|| PendingProjectRecall {
+                id: uuid::Uuid::new_v4().to_string(),
+                lines,
+            }),
+        };
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(PROJECT_RECALL_STATE_FILE),
+            &state,
+        )
+        .map_err(|error| ExtensionError::Internal(format!("save project recall: {error}")))
     }
 
-    pub(crate) fn reset(&self) {
-        self.pending.lock().clear();
+    fn pending(&self) -> Result<Option<PendingProjectRecall>, ExtensionError> {
+        let state = astrcode_extension_sdk::hostpaths::read_json_state(
+            &self.root.join(PROJECT_RECALL_STATE_FILE),
+        )
+        .map_err(|error| ExtensionError::Internal(format!("read project recall: {error}")))?;
+        Ok(state.and_then(|state: ProjectRecallState| state.pending))
+    }
+
+    fn acknowledge(&self, contribution_id: &str) -> Result<(), ExtensionError> {
+        let path = self.root.join(PROJECT_RECALL_STATE_FILE);
+        astrcode_extension_sdk::hostpaths::update_json_state(
+            &path,
+            |state: Option<ProjectRecallState>| {
+                let Some(mut state) = state else {
+                    return Ok((None, ()));
+                };
+                if state
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.id != contribution_id)
+                {
+                    return Ok((None, ()));
+                }
+                state.pending = None;
+                Ok((Some(state), ()))
+            },
+        )
+        .map_err(|error| ExtensionError::Internal(format!("ack project recall: {error}")))
     }
 }
 
 pub(crate) struct MemoryProjectRecallTurnEndHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub buffer: Arc<ProjectRecallBuffer>,
     pub config: Arc<RwLock<MemoryConfig>>,
 }
 
@@ -103,19 +150,17 @@ impl LifecycleHandler for MemoryProjectRecallTurnEndHandler {
         if !cfg.inject_project_memories_per_turn {
             return Ok(HookResult::Allow);
         }
-        let Some(exchange) = ctx.last_exchange else {
+        let Some(exchange) = ctx.last_exchange() else {
             return Ok(HookResult::Allow);
         };
 
-        let query = recall_query_from_exchange(&exchange);
+        let query = recall_query_from_exchange(exchange);
         if query.chars().count() < cfg.min_recall_query_chars {
             return Ok(HookResult::Allow);
         }
 
         let store_pool = self.store_pool.clone();
-        let working_dir = ctx.working_dir.clone();
-        let buffer = self.buffer.clone();
-        let session_id = ctx.session_id.clone();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
 
         let lines = tokio::task::spawn_blocking(move || {
             recall_project_lines(
@@ -131,32 +176,38 @@ impl LifecycleHandler for MemoryProjectRecallTurnEndHandler {
         .map_err(|e| ExtensionError::Internal(e.to_string()))?
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        buffer.store(&session_id, lines);
+        ProjectRecallStore::from_paths(ctx.paths())?.replace(lines)?;
         Ok(HookResult::Allow)
     }
 }
 
 /// Delivers project memories prepared at the previous turn's end (does not rank here).
 pub(crate) struct MemoryProjectRecallDeliveryProvider {
-    pub buffer: Arc<ProjectRecallBuffer>,
     pub config: Arc<RwLock<MemoryConfig>>,
 }
 
 #[async_trait::async_trait]
-impl ProviderHandler for MemoryProjectRecallDeliveryProvider {
-    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+impl ProviderContributionHandler for MemoryProjectRecallDeliveryProvider {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
         if !self.config.read().inject_project_memories_per_turn {
-            return Ok(ProviderResult::Allow);
+            return Ok(None);
         }
-        let Some(lines) = self.buffer.take(&ctx.session_id) else {
-            return Ok(ProviderResult::Allow);
+        let Some(pending) = ProjectRecallStore::from_paths(ctx.paths())?.pending()? else {
+            return Ok(None);
         };
-        if lines.is_empty() {
-            return Ok(ProviderResult::Allow);
-        }
-        Ok(ProviderResult::AppendMessages {
-            messages: vec![LlmMessage::user(prompts::project_memory_injection(&lines))],
-        })
+        Ok(Some(PreparedProviderContribution::new(
+            ProviderContributionId::new(pending.id),
+            PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(
+                prompts::project_memory_injection(&pending.lines),
+            )]),
+        )))
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        ProjectRecallStore::from_paths(ctx.paths())?.acknowledge(ctx.contribution_id().as_str())
     }
 }
 
@@ -170,7 +221,7 @@ fn recall_query_from_exchange(exchange: &ExchangeSummary) -> String {
     }
 }
 
-pub(crate) fn recall_project_lines(
+fn recall_project_lines(
     pool: &MemoryStorePool,
     working_dir: &str,
     query: &str,
@@ -212,11 +263,24 @@ mod tests {
     use crate::index::{MemoryIndex, MemorySource};
 
     #[test]
-    fn project_recall_buffer_take_is_one_shot() {
-        let buf = ProjectRecallBuffer::default();
-        buf.store("s1", vec!["line".to_string()]);
-        assert_eq!(buf.take("s1").unwrap().len(), 1);
-        assert!(buf.take("s1").is_none());
+    fn project_recall_survives_reload_and_acknowledges_exact_revision() {
+        let root = TempDir::new().unwrap();
+        let store = ProjectRecallStore {
+            root: root.path().to_path_buf(),
+        };
+        store.replace(vec!["first".into()]).unwrap();
+        let first = store.pending().unwrap().unwrap();
+
+        let reloaded = ProjectRecallStore {
+            root: root.path().to_path_buf(),
+        };
+        assert_eq!(reloaded.pending().unwrap().unwrap(), first);
+        reloaded.replace(vec!["newer".into()]).unwrap();
+        let newer = reloaded.pending().unwrap().unwrap();
+        reloaded.acknowledge(&first.id).unwrap();
+        assert_eq!(reloaded.pending().unwrap().as_ref(), Some(&newer));
+        reloaded.acknowledge(&newer.id).unwrap();
+        assert!(reloaded.pending().unwrap().is_none());
     }
 
     #[test]

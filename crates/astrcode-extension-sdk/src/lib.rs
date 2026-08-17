@@ -10,65 +10,37 @@ pub mod frontmatter;
 pub mod hostpaths;
 pub mod shell;
 
-/// Typed access to the host's single restricted outbound-network service.
-pub mod network {
-    pub use crate::extension::{
-        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
-        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
-    };
-}
-
-pub mod trusted {
-    pub use crate::authoring_runtime::ExtensionHostServices;
-}
-
 pub mod config {
     pub use astrcode_core::config::ModelSelection;
 }
 
 pub mod llm {
     pub use astrcode_core::llm::{
-        LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage, ModelLimits,
-        collect_stream_text,
+        LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRequest, LlmRole, LlmTokenUsage,
+        ModelLimits, collect_stream_text,
     };
 }
 
 pub mod event {
-    pub use astrcode_core::event::{Event, EventPayload, EventSendError, EventSender};
+    pub use astrcode_core::event::{
+        Event, EventDeliveryReceipt, EventPayload, EventSendError, EventSender,
+    };
 }
-
-pub mod session_query;
 
 pub mod tool {
     pub use astrcode_core::tool::{
-        CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, LlmModelIds, SessionAccess,
-        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
-        SessionLifecycleState, SessionOperations, SessionReactivation, SessionState, SessionStatus,
-        SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities, ToolDefinition,
-        ToolError, ToolExecutionContext, ToolExecutionResult, ToolFileServices, ToolHostServices,
-        ToolModelAccess, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-        ToolSessionControl, ToolSessionPaths, tool_metadata,
+        ExecutionMode, ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolOrigin,
+        ToolPresentation, ToolPromptMetadata, ToolPromptTag, ToolResult,
+        access::{FileOperation, HostResource, ResourceAccess, ToolPlan},
+        read_image::ReadToolInlinePayload,
+        tool_metadata,
     };
 
-    pub use crate::extension::ExtensionToolContext;
+    pub use crate::extension::{ToolContext, ToolPlanContext};
 }
 
 pub mod types {
-    pub use astrcode_core::types::{SessionId, project_key_from_path};
-}
-
-/// Protocol types needed by extensions.
-pub mod protocol {
-    use serde::{Deserialize, Serialize};
-
-    /// S5R JSON-RPC 边界使用的错误对象。
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct JsonRpcError {
-        pub code: i32,
-        pub message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub data: Option<serde_json::Value>,
-    }
+    pub use astrcode_core::types::{SessionId, ToolCallId, project_key_from_path};
 }
 
 /// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
@@ -76,98 +48,98 @@ pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
 
-mod authoring_runtime;
 pub mod builder;
+pub mod host;
 pub mod manifest;
-pub mod runtime;
+pub mod model_stream;
 pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
-pub mod session_inspect;
-pub mod worker;
+pub mod transport;
+pub mod wire;
 
-/// Namespaced persistence locations for session-scoped extension data.
-pub mod state {
-    use std::path::{Path, PathBuf};
+pub use wire::WireErrorCode;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
-    /// Returns the only directory an extension should use for session-local state.
-    pub fn session_data_dir(session_base: &Path, extension_id: &str) -> PathBuf {
-        session_base.join("extension_data").join(extension_id)
-    }
-}
-
-/// 进程内（bundled）扩展：实现 [`extension::Extension`] trait，使用 [`builder::handler_fn`]。
+/// In-process bundled extension authoring surface.
 pub mod prelude {
     pub use crate::{
-        builder::{continue_after_stop_handler_fn, handler_fn, tool},
-        extension::{
-            CommandContext, CommandHandler, CompactContext, CompactContributions, CompactEvent,
-            CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
-            ContinueAfterStopLimit, ContinueAfterStopOptions, ContinueAfterStopResult, Extension,
-            ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx,
-            ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
-            ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-            HookMode, HookResult, LifecycleContext, LifecycleHandler, PostToolUseContext,
-            PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
-            PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
-            ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar,
-            SlashCommand, StatusItemUpdatePayload, StopReason, ToolHandler,
-            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        builder::{
+            CustomEventDeclarationBuilder, ExtensionHttpRouteBuilder, ExtensionManifestBuilder,
+            ExtensionToolDefinition, KeybindingBuilder, SlashCommandBuilder, StatusItemBuilder,
+            command, command_handler, continue_after_stop_handler_fn, custom_event, http_handler,
+            http_route, keybinding, manifest, status_item, tool, tool_handler, tool_handler_args,
         },
-        manifest::validate_manifest,
-        s5r::effects::HandlerResult,
-        session::SessionToolSelectionDto,
-        session_inspect::{
-            SessionHistorySnapshotOutput, SessionInspectListItem, SessionInspectListOutput,
-            SessionInspectProviderMessagesOutput, SessionInspectReadModel,
-            SessionInspectReadModelOutput, SessionInspectSnapshot, SessionInspectSnapshotOutput,
+        event::EventDeliveryReceipt,
+        extension::{
+            CommandAvailability, CommandCompletionContext, CommandContext, CommandDiscovery,
+            CommandDiscoveryContext, CommandDiscoveryHandler, CommandExecution, CommandHandler,
+            CompactContributions, CompactEvent, CompactRetainedContext, ContinueAfterStopContext,
+            ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
+            ContinueAfterStopResult, CustomEventContext, CustomEventDelivery,
+            CustomEventDisposition, CustomEventEmitError, CustomEventEmitter, CustomEventHandler,
+            CustomEventSubscription, DiscoveredCommand, DiscoveredTool, Extension, ExtensionCall,
+            ExtensionCallContext, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
+            ExtensionConfigError, ExtensionError, ExtensionHttpDispatchRequest,
+            ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+            ExtensionHttpRoute, ExtensionManifest, ExtensionPathError, ExtensionPaths,
+            ExtensionStartContext, ExtensionTaskError, ExtensionTasks, HookMode, HookResult,
+            HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostCompactContext,
+            PostCompactHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+            PreCompactContext, PreCompactHandler, PreCompactResult, PreToolUseContext,
+            PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
+            PreparedProviderEffect, PromptBuildContext, PromptBuildHandler, PromptContributions,
+            ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderEvent,
+            ProviderHandler, ProviderRequestId, ProviderResult, ProviderSettlementContext,
+            Registrar, SessionCommandIntent, SessionCommandKind, SlashCommand,
+            StatusItemUpdatePayload, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+            ToolDiscoveryHandler, ToolHandler, ToolInputTransformHandler, ToolInputTransformResult,
+            ToolPlanContext, TransportFeature, UserMessageEnvelopeContext,
+            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        },
+        host::{
+            ExtensionHost, ExtensionHttpClient, HostConfigureSessionToolsOutput,
+            HostConfigureSessionToolsRequest, HostError, HostLlmChatOutput, HostLlmChatRequest,
+            HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy,
+            HostNetworkRequest, HostNetworkResponse, HostProcessHandleOutput,
+            HostProcessInputAction, HostProcessInputRequest, HostProcessListOutput,
+            HostProcessOutput, HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest,
+            HostProcessStartRequest, HostProcessState, HostProcessStatusOutput,
+            HostProcessTargetRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+            HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+            HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
+            HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+            HostToolResultReadOutput, HostToolResultReadRequest, HostWorkspaceEditOutput,
+            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+            HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry, HostWorkspaceGrepMode,
+            HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+            HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+            HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceWriteOutput,
+            HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
+            SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+            ToolResultClient, WorkspaceClient, llm_chat_request,
+        },
+        llm::LlmMessage,
+        model_stream::{ModelStream, ModelStreamEvent},
+        session::{
+            HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
+            HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
+            HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
+            HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+            SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto,
         },
         tool::{
-            ExecutionMode, ExtensionToolContext, ToolCallScope, ToolCapabilities, ToolDefinition,
-            ToolResult,
+            ExecutionMode, HostResource, ReadToolInlinePayload, ResourceAccess, ToolDefinition,
+            ToolExecutionResult, ToolPlan, ToolPromptMetadata, ToolResult,
         },
-        worker::{
-            HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
-            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
-            HostSessionExecutionView, HostSessionInputRequest, HostSessionReactivateOutput,
-            HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-            HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-            HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-            HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-            HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
-            HostWorkspaceWriteRequest, HttpHandlerFn, Worker, WorkerCallContext, tool_text,
-        },
-    };
-}
-
-/// s5r 子进程磁盘扩展：[`Worker`]、handler 辅助函数、[`HostClient`]。
-pub mod worker_prelude {
-    pub use crate::{
-        builder::tool,
-        s5r::{
-            ErrorPayload,
-            effects::{CallContinuation, HandlerResult},
-        },
-        session::SessionToolSelectionDto,
-        session_inspect::{
-            SessionHistorySnapshotOutput, SessionInspectListItem, SessionInspectListOutput,
-            SessionInspectProviderMessagesOutput, SessionInspectReadModel,
-            SessionInspectReadModelOutput, SessionInspectSnapshot, SessionInspectSnapshotOutput,
-        },
-        worker::{
-            HostApi, HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
-            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
-            HostSessionExecutionView, HostSessionInputRequest, HostSessionReactivateOutput,
-            HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-            HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-            HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-            HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-            HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
-            HostWorkspaceWriteRequest, HttpHandlerFn, Worker, WorkerCallContext, command_handler,
-            handler_err, hook_handler, hook_handler_args, http_handler, inject_host_api,
-            parse_hook_input, parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
+        types::{SessionId, ToolCallId},
+        wire::session_inspect::{
+            HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectContent,
+            SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
+            SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
+            SessionInspectSnapshotOutput,
         },
     };
 }

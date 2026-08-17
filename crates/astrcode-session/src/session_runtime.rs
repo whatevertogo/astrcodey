@@ -1,9 +1,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
+    config::ContextSettings,
+    event::{
+        DurableEvent, EventDeliveryReceipt, EventPayload, EventPublisher, EventSendError,
+        EventSender, LiveEvent,
+    },
     permission::ApprovalDecision,
     tool::FileObservationStore,
-    types::{SessionId, ToolCallId},
+    types::{SessionId, ToolCallId, TurnId},
 };
 use astrcode_storage::SessionStore;
 use parking_lot::Mutex;
@@ -11,11 +16,83 @@ use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    compaction::CompactCircuitBreaker,
     permission::ApprovalHistoryStore,
-    session_event_sink::{SessionEventObserver, SessionEventSink},
-    session_tools::SessionToolCache,
+    session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink},
     tool_exec::InMemoryFileObservationStore,
 };
+
+struct SessionScopedEventPublisher {
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    store: Arc<dyn SessionStore>,
+    event_sink: Arc<SessionEventSink>,
+}
+
+#[async_trait::async_trait]
+impl EventPublisher for SessionScopedEventPublisher {
+    fn try_send(&self, payload: EventPayload) -> Result<(), EventSendError> {
+        match payload {
+            EventPayload::Live(payload) => self
+                .event_sink
+                .publish_live(LiveEvent::new(
+                    self.session_id.clone(),
+                    self.turn_id.clone(),
+                    payload,
+                ))
+                .map_err(map_event_publish_error),
+            // durable-in-try_send 与 turn 路径（`crate::turn_publish` 的
+            // `TurnEventPublisher`，入队由 ingress worker 持久化）语义不同：session
+            // 路径没有自己的 worker，直接拒绝；durable 须走 `send_confirmed`。
+            EventPayload::Durable(_) => Err(EventSendError::PublishFailed(
+                "durable custom events require async emit".into(),
+            )),
+        }
+    }
+
+    async fn send_confirmed(
+        &self,
+        payload: EventPayload,
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
+        match payload {
+            EventPayload::Durable(payload) => {
+                let stored = self
+                    .event_sink
+                    .append(
+                        self.store.clone(),
+                        DurableEvent::new(self.session_id.clone(), self.turn_id.clone(), payload),
+                    )
+                    .await
+                    .map_err(map_event_publish_error)?;
+                Ok(EventDeliveryReceipt::Persisted {
+                    event_id: stored.id.clone(),
+                    seq: stored.seq,
+                })
+            },
+            EventPayload::Live(payload) => {
+                // 与 `session.rs` 的 `emit_live_required` 平行：`LivePublished`
+                // 只表示事件已进入有序 lane，observer 派发是异步的。
+                let event = LiveEvent::new(self.session_id.clone(), self.turn_id.clone(), payload);
+                let event_id = event.id.clone();
+                self.event_sink
+                    .publish_live_required(self.store.clone(), event)
+                    .await
+                    .map_err(map_event_publish_error)?;
+                Ok(EventDeliveryReceipt::LivePublished { event_id })
+            },
+        }
+    }
+}
+
+// 与 `turn_publish.rs` ingress worker 的错误映射互指：这里的源错误
+// `SessionEventPublishError` 带 Closed 变体故可区分；turn 路径的 `TurnError`
+// 无此信息，统一折叠为 `PublishFailed`，两处不宜强行收敛。
+fn map_event_publish_error(error: SessionEventPublishError) -> EventSendError {
+    match error {
+        SessionEventPublishError::Closed => EventSendError::Closed,
+        error => EventSendError::PublishFailed(error.to_string()),
+    }
+}
 
 pub struct PendingApprovalRegistration<'a> {
     runtime: &'a ApprovalRuntime,
@@ -43,12 +120,6 @@ pub enum ToolApprovalResolveError {
     NotPending { call_id: ToolCallId },
     #[error("approval receiver dropped for call_id {call_id}")]
     ReceiverDropped { call_id: ToolCallId },
-}
-
-/// 执行工具所需的进程内资源。
-struct ToolResources {
-    file_observation_store: Arc<dyn FileObservationStore>,
-    registry_snapshots: SessionToolCache,
 }
 
 struct PendingApproval {
@@ -132,13 +203,14 @@ impl ApprovalRuntime {
 /// 单个 session 在当前进程内持有的瞬态状态。
 ///
 /// 持久化事实仍以 [`SessionStore`] 为准；同一 sid 的并存 [`crate::Session`] 通过
-/// [`crate::SessionResourceStore`] 共享这里的工具缓存、审批状态和事件排序 lane。
+/// [`crate::SessionResourceStore`] 共享这里的文件观察、审批状态和事件排序 lane。
 pub struct SessionRuntimeState {
     session_id: SessionId,
     store: Arc<dyn SessionStore>,
     event_sink: Arc<SessionEventSink>,
-    tools: ToolResources,
+    file_observation_store: Arc<dyn FileObservationStore>,
     approvals: ApprovalRuntime,
+    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     creation: Mutex<SessionCreationState>,
     lifecycle_initialized: OnceCell<()>,
 }
@@ -239,30 +311,54 @@ impl SessionRuntimeState {
         store: Arc<dyn SessionStore>,
         event_sink: Arc<SessionEventSink>,
     ) -> Self {
+        let context = ContextSettings::default();
         Self {
             session_id,
             store,
             event_sink,
-            tools: ToolResources {
-                file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
-                registry_snapshots: SessionToolCache::new(),
-            },
+            file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
             approvals: ApprovalRuntime::new(),
+            compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
+                context.compact_circuit_breaker_threshold,
+                Duration::from_secs(context.compact_circuit_breaker_cooldown_secs),
+            )),
             creation: Mutex::new(SessionCreationState::Ready),
             lifecycle_initialized: OnceCell::new(),
         }
     }
 
     pub fn file_observation_store(&self) -> Arc<dyn FileObservationStore> {
-        Arc::clone(&self.tools.file_observation_store)
-    }
-
-    pub(crate) fn tool_registry_cache(&self) -> &SessionToolCache {
-        &self.tools.registry_snapshots
+        Arc::clone(&self.file_observation_store)
     }
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    /// Builds a session-scoped event ingress for runtime-owned asynchronous consumers.
+    pub fn event_sender(&self, turn_id: Option<TurnId>) -> EventSender {
+        Self::event_sender_from_parts(
+            self.session_id.clone(),
+            Arc::clone(&self.store),
+            Arc::clone(&self.event_sink),
+            turn_id,
+        )
+    }
+
+    /// Builds event ingress without allocating a complete per-session runtime.
+    #[doc(hidden)]
+    pub fn event_sender_from_parts(
+        session_id: SessionId,
+        store: Arc<dyn SessionStore>,
+        event_sink: Arc<SessionEventSink>,
+        turn_id: Option<TurnId>,
+    ) -> EventSender {
+        EventSender::from_publisher(Arc::new(SessionScopedEventPublisher {
+            session_id,
+            turn_id,
+            store,
+            event_sink,
+        }))
     }
 
     pub(crate) fn store(&self) -> &Arc<dyn SessionStore> {
@@ -279,6 +375,10 @@ impl SessionRuntimeState {
 
     pub fn approval_history(&self) -> Arc<ApprovalHistoryStore> {
         Arc::clone(&self.approvals.history)
+    }
+
+    pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
+        &self.compact_circuit_breaker
     }
 
     /// Blocks [`Self::wait_for_creation`] until the returned guard commits or fails.

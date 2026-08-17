@@ -10,7 +10,7 @@ interface UserMessageProps {
 function UserMessage({ block }: UserMessageProps) {
   const imageSources = useMemo(
     () =>
-      (block.attachments ?? [])
+      block.attachments
         .filter((attachment) => attachment.mediaType.startsWith('image/'))
         .map(
           (attachment) =>

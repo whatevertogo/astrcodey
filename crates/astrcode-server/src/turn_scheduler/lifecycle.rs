@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::{DurableEventPayload, Phase},
-    types::{SessionId, TurnId, new_message_id},
+    types::{SessionId, TurnId},
     user_input::UserInput,
 };
 use astrcode_session::{
@@ -11,7 +11,6 @@ use astrcode_session::{
     payload::{TURN_FINISH_INTERRUPTED, agent_run_completed_payload, turn_completed_payload},
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel};
-use astrcode_storage::StorageError;
 
 #[cfg(any(test, feature = "testing"))]
 use super::CompletedRecycleOutcome;
@@ -72,27 +71,30 @@ impl FrozenSessionTree {
 
 impl TurnScheduler {
     /// 中止活跃 turn（含级联子 session）。
-    pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+    pub async fn abort(&self, session_id: &SessionId) -> Result<bool, TurnScheduleError> {
         let operation = self.begin_session_operation(session_id).await?;
         operation.wait_for_starts().await;
-        self.abort_in_operation(session_id).await?;
+        let had_active = self.registry.has_active(session_id);
+        let cancelled_descendant = self.abort_in_operation(session_id).await?;
         let next = self.reserve_next_pending(&operation).await?;
         drop(operation);
         if let Some((reserved, entry)) = next {
             self.start_reserved_pending_detached(reserved, entry, "abort-queue-drain")
                 .await?;
         }
-        Ok(())
+        Ok(had_active || cancelled_descendant)
     }
 
     pub(crate) async fn abort_in_operation(
         &self,
         session_id: &SessionId,
-    ) -> Result<(), TurnScheduleError> {
-        self.child_sessions
+    ) -> Result<bool, TurnScheduleError> {
+        let cancelled_descendant = self
+            .child_sessions
             .cascade_abort_children(self, session_id)
             .await?;
-        self.abort_current_in_operation(session_id).await
+        self.abort_current_in_operation(session_id).await?;
+        Ok(cancelled_descendant)
     }
 
     pub(crate) async fn abort_current_in_operation(
@@ -119,10 +121,10 @@ impl TurnScheduler {
                     break;
                 }
                 let active_turn = self.registry.active_turn_id(session_id);
-                if active_turn != shutdown_turn {
-                    if let Some(turn_id) = self.registry.request_shutdown(session_id) {
-                        shutdown_turn = Some(turn_id);
-                    }
+                if active_turn != shutdown_turn
+                    && let Some(turn_id) = self.registry.request_shutdown(session_id)
+                {
+                    shutdown_turn = Some(turn_id);
                 }
                 tokio::time::sleep(Duration::from_millis(ABORT_WAIT_POLL_MS)).await;
             }
@@ -170,7 +172,8 @@ impl TurnScheduler {
     }
 
     /// completion 已产出但 task 可能尚未退出；只按 turn identity 非破坏性移除。
-    pub async fn release_completed_execution(
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn release_completed_execution(
         &self,
         session_id: &SessionId,
         turn_id: &TurnId,
@@ -370,8 +373,9 @@ impl TurnScheduler {
             tree.nodes[next_node].closure.wait_for_starts().await;
             let model = match self.session_manager.read_model(&session_id).await {
                 Ok(model) => model,
-                Err(SessionManagerError::Storage(StorageError::NotFound(_)))
-                    if tree.nodes[next_node].parent_session_id.is_some() =>
+                Err(error)
+                    if error.is_not_found()
+                        && tree.nodes[next_node].parent_session_id.is_some() =>
                 {
                     tree.nodes[next_node].exists = false;
                     next_node += 1;
@@ -423,7 +427,7 @@ impl TurnScheduler {
         }
         let parent_model = match self.session_manager.read_model(parent_session_id).await {
             Ok(model) => model,
-            Err(SessionManagerError::Storage(StorageError::NotFound(_))) => return Ok(()),
+            Err(error) if error.is_not_found() => return Ok(()),
             Err(error) => return Err(error.into()),
         };
         if parent_model.agent_sessions.iter().any(|link| {
@@ -516,18 +520,16 @@ impl TurnScheduler {
                 for (parent_session_id, child_session_id) in &tree.running_children {
                     if child_session_id == &node.session_id
                         && !tree.visited.contains(parent_session_id)
-                    {
-                        if let Err(relation_error) = self
+                        && let Err(relation_error) = self
                             .child_sessions
                             .record_child_deleted(parent_session_id, child_session_id)
                             .await
-                        {
-                            return Err(TurnScheduleError::DeleteRelationUpdateFailed {
-                                session_id: child_session_id.clone(),
-                                parent_session_id: parent_session_id.clone(),
-                                relation_error: relation_error.to_string(),
-                            });
-                        }
+                    {
+                        return Err(TurnScheduleError::DeleteRelationUpdateFailed {
+                            session_id: child_session_id.clone(),
+                            parent_session_id: parent_session_id.clone(),
+                            relation_error: relation_error.to_string(),
+                        });
                     }
                 }
             }
@@ -590,6 +592,8 @@ impl TurnScheduler {
         Ok(())
     }
 
+    /// Mid-turn 注入只落 `UserInputAccepted`(归属活跃 turn),不写 transcript;
+    /// 由该 turn 在 step 边界吸收为 `UserMessage`(见 `astrcode_session::steer`)。
     pub(super) async fn inject_internal(
         &self,
         turn_id: &TurnId,
@@ -599,12 +603,7 @@ impl TurnScheduler {
         session
             .emit_durable(
                 Some(turn_id),
-                DurableEventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: input.text,
-                    attachments: input.attachments,
-                    accepted_seq: None,
-                },
+                DurableEventPayload::UserInputAccepted { input },
             )
             .await
             .map_err(TurnScheduleError::EventEmit)?;
@@ -612,7 +611,24 @@ impl TurnScheduler {
     }
 
     pub async fn repair_stale(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+        let admission = self.admit_owned()?;
         let operation = self.begin_session_operation(session_id).await?;
+        if let Some(started) = self.resume_stale_execution(&operation).await? {
+            let turn_id = started.turn_id.clone();
+            drop(operation);
+            self.watch_owned_turn(
+                admission,
+                session_id.clone(),
+                turn_id,
+                started.handle,
+                super::CompletionWatch {
+                    source: "stale-resume",
+                    completion_tx: None,
+                    output_tx: None,
+                },
+            );
+            return Ok(());
+        }
         self.repair_stale_locked(session_id).await?;
         let next = self.reserve_next_pending(&operation).await?;
         drop(operation);
@@ -621,6 +637,80 @@ impl TurnScheduler {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn resume_stale_execution(
+        &self,
+        operation: &SessionOperationGuard,
+    ) -> Result<Option<super::StartedExecution>, TurnScheduleError> {
+        let session_id = operation.session_id();
+        if self.registry.has_active(session_id) {
+            return Ok(None);
+        }
+        let session = self.session_manager.open(session_id.clone()).await?;
+        let state = session
+            .read_model()
+            .await
+            .map_err(TurnScheduleError::Session)?;
+        if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
+            return Ok(None);
+        }
+        let (Some(turn_id), Some(step)) = (
+            state.execution.unsettled_turn_id.clone(),
+            state.execution.active_step.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+
+        if let Some(finish_reason) = &step.finish_reason {
+            finalize_turn(
+                &session,
+                &turn_id,
+                &TurnFinalization {
+                    finish_reason: finish_reason.clone(),
+                    pending_error: None,
+                    aborted: false,
+                    terminal_persisted: false,
+                },
+            )
+            .await
+            .map_err(TurnScheduleError::EventEmit)?;
+            self.session_manager
+                .sync_durable_events_required(session_id)
+                .await?;
+            return Ok(None);
+        }
+
+        emit_interrupted_tool_results(
+            &session,
+            &state,
+            Some(&turn_id),
+            InterruptedToolOutcome::Failed,
+        )
+        .await
+        .map_err(TurnScheduleError::EventEmit)?;
+        self.session_manager
+            .sync_durable_events_required(session_id)
+            .await?;
+
+        let reservation = self
+            .registry
+            .reserve(session_id.clone(), turn_id.clone())
+            .ok_or(TurnScheduleError::TurnAlreadyRunning)?;
+        let _start_lease = operation.start_lease();
+        tracing::info!(
+            %session_id,
+            %turn_id,
+            step_index = if step.completed { step.step_index.saturating_add(1) } else { step.step_index },
+            next_attempt = if step.completed { 1 } else { step.attempt.saturating_add(1) },
+            "resuming stale turn from durable step"
+        );
+        let handle = session.resume(turn_id.clone()).await?;
+        if !reservation.activate(handle.shutdown_handle(), Arc::new(session)) {
+            handle.force_kill();
+            return Err(TurnScheduleError::TurnAlreadyRunning);
+        }
+        Ok(Some(super::StartedExecution { turn_id, handle }))
     }
 
     async fn repair_stale_locked(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
@@ -673,6 +763,7 @@ impl TurnScheduler {
 
     pub(crate) fn needs_stale_repair(state: &SessionReadModel) -> bool {
         !matches!(state.execution.phase, Phase::Idle | Phase::Error)
+            || state.execution.active_step.is_some()
             || !state.tool_calls_needing_interruption().is_empty()
             || state
                 .agent_sessions

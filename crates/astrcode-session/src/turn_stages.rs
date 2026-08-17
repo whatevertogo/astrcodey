@@ -1,11 +1,12 @@
 //! Turn pipeline stage state shared by the turn runner.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
-    tool::{ToolDefinition, ToolResult},
+    llm::{LlmContent, LlmMessage, LlmRole, provider_visible_shared_messages},
+    tool::ToolDefinition,
 };
+use astrcode_session_projection::ActiveStepView;
 
 use crate::{
     deferred_tools::{ToolSnapshot, activate_deferred_tools, provider_visible_tools},
@@ -20,7 +21,6 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct TurnTranscript {
     output_text: String,
-    tool_results: Vec<ToolResult>,
     latest_provider_response: Option<LlmMessage>,
 }
 
@@ -90,10 +90,6 @@ impl TurnTranscript {
         self.latest_provider_response = None;
     }
 
-    pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
-        self.tool_results.push(result);
-    }
-
     pub(crate) fn append_final_text(&mut self, text: &str) {
         self.output_text.push_str(text);
     }
@@ -106,21 +102,18 @@ impl TurnTranscript {
         self.output_text = text;
     }
 
-    pub(crate) fn take_output_parts(&mut self) -> (String, Vec<ToolResult>) {
-        (
-            std::mem::take(&mut self.output_text),
-            std::mem::take(&mut self.tool_results),
-        )
+    pub(crate) fn take_output_text(&mut self) -> String {
+        std::mem::take(&mut self.output_text)
     }
 
     pub(crate) fn provider_response_messages(
         &self,
-        mut request_messages: Vec<LlmMessage>,
-    ) -> Vec<LlmMessage> {
+        mut request_messages: Vec<Arc<LlmMessage>>,
+    ) -> Vec<Arc<LlmMessage>> {
         if let Some(message) = &self.latest_provider_response {
-            request_messages.push(message.clone());
+            request_messages.push(Arc::new(message.clone()));
         }
-        provider_visible_messages(request_messages)
+        provider_visible_shared_messages(request_messages)
     }
 }
 
@@ -129,16 +122,24 @@ pub(crate) struct TurnState {
     transcript: TurnTranscript,
     reactive_compact_used: bool,
     continue_after_stop_count: u32,
-    /// 已并入 LLM 上下文的非合成 user 消息数（用于 steer flush 检测）。
-    synced_user_message_count: usize,
+    /// 最近一个 step 的 provider `input_tokens` 与连续相同计数(frozen 视图检测)。
+    last_step_input_tokens: Option<u64>,
+    same_input_tokens_streak: u32,
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
+    /// `visible_tools` 定义序列化估算;可见集变更时重算。
+    tools_token_estimate: usize,
     tool_deduplicator: ToolCallDeduplicator,
+    next_step_index: u32,
+    resumed_attempt: Option<u32>,
 }
 
 impl TurnState {
-    pub(crate) fn new(all_tools: Vec<crate::tool_registry::DefinitionWithPromptMetadata>) -> Self {
+    pub(crate) fn new(
+        all_tools: Vec<crate::tool_registry::DefinitionWithPromptMetadata>,
+        active_step: Option<&ActiveStepView>,
+    ) -> Self {
         let all_tools = all_tools
             .into_iter()
             .map(|tool| ToolSnapshot {
@@ -148,23 +149,43 @@ impl TurnState {
             .collect::<Vec<_>>();
         let active_deferred_tools = HashSet::new();
         let visible_tools = provider_visible_tools(&all_tools, &active_deferred_tools);
+        let tools_token_estimate =
+            astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+                &ToolSnapshot::definitions(&visible_tools),
+            );
 
         Self {
             transcript: TurnTranscript::default(),
             reactive_compact_used: false,
             continue_after_stop_count: 0,
-            synced_user_message_count: 0,
+            last_step_input_tokens: None,
+            same_input_tokens_streak: 0,
             active_deferred_tools,
             all_tools,
             visible_tools,
+            tools_token_estimate,
             tool_deduplicator: ToolCallDeduplicator::new(),
+            next_step_index: active_step.map_or(0, |step| {
+                if step.completed {
+                    step.step_index.saturating_add(1)
+                } else {
+                    step.step_index
+                }
+            }),
+            resumed_attempt: active_step
+                .filter(|step| !step.completed)
+                .map(|step| step.attempt.saturating_add(1)),
         }
     }
 
     /// 每个 agent step 开始时调用：清空同 step 去重状态并重置 provider 响应快照。
-    pub(crate) fn begin_step(&mut self) {
+    pub(crate) fn begin_step(&mut self) -> (u32, u32) {
         self.transcript.reset_latest_provider_response();
         self.tool_deduplicator.begin_step();
+        let step_index = self.next_step_index;
+        let attempt = self.resumed_attempt.take().unwrap_or(1);
+        self.next_step_index = self.next_step_index.saturating_add(1);
+        (step_index, attempt)
     }
 
     pub(crate) fn tool_deduplicator(&self) -> &ToolCallDeduplicator {
@@ -183,16 +204,15 @@ impl TurnState {
         self.continue_after_stop_count = self.continue_after_stop_count.saturating_add(1);
     }
 
-    pub(crate) fn synced_user_message_count(&self) -> usize {
-        self.synced_user_message_count
-    }
-
-    pub(crate) fn set_synced_user_message_count(&mut self, count: usize) {
-        self.synced_user_message_count = count;
-    }
-
-    pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
-        self.transcript.record_tool_result(result);
+    /// 记录本 step 的 provider `input_tokens`,返回连续相同计数(含本次)。
+    pub(crate) fn record_step_input_tokens(&mut self, input_tokens: u64) -> u32 {
+        if self.last_step_input_tokens == Some(input_tokens) {
+            self.same_input_tokens_streak = self.same_input_tokens_streak.saturating_add(1);
+        } else {
+            self.last_step_input_tokens = Some(input_tokens);
+            self.same_input_tokens_streak = 1;
+        }
+        self.same_input_tokens_streak
     }
 
     pub(crate) fn append_final_text(&mut self, text: &str) {
@@ -224,8 +244,8 @@ impl TurnState {
 
     pub(crate) fn provider_response_messages(
         &self,
-        request_messages: Vec<LlmMessage>,
-    ) -> Vec<LlmMessage> {
+        request_messages: Vec<Arc<LlmMessage>>,
+    ) -> Vec<Arc<LlmMessage>> {
         self.transcript.provider_response_messages(request_messages)
     }
 
@@ -237,8 +257,8 @@ impl TurnState {
         self.reactive_compact_used = true;
     }
 
-    pub(crate) fn take_output_parts(&mut self) -> (String, Vec<ToolResult>) {
-        self.transcript.take_output_parts()
+    pub(crate) fn take_output_text(&mut self) -> String {
+        self.transcript.take_output_text()
     }
 
     pub(crate) fn all_tool_snapshots(&self) -> &[ToolSnapshot] {
@@ -247,6 +267,13 @@ impl TurnState {
 
     pub(crate) fn visible_tools(&self) -> Vec<ToolDefinition> {
         ToolSnapshot::definitions(&self.visible_tools)
+    }
+
+    /// 当前可见工具集的定义 token 估算,随可见集变更重算。
+    ///
+    /// 逐工具 schema 序列化是估算里最贵的部分;可见集在一个 step 内不变。
+    pub(crate) fn tools_token_estimate(&self) -> usize {
+        self.tools_token_estimate
     }
 
     pub(crate) fn active_deferred_tools(&self) -> &HashSet<String> {
@@ -262,14 +289,21 @@ impl TurnState {
         if changed {
             self.visible_tools =
                 provider_visible_tools(&self.all_tools, &self.active_deferred_tools);
+            self.tools_token_estimate =
+                astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+                    &ToolSnapshot::definitions(&self.visible_tools),
+                );
         }
     }
 }
 
 pub(crate) struct PreparedProviderRequest {
-    pub(crate) llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
-    pub(crate) messages: Vec<astrcode_core::llm::LlmMessage>,
+    pub(crate) llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+    pub(crate) request_id: astrcode_extension_sdk::extension::ProviderRequestId,
+    pub(crate) messages: Vec<Arc<astrcode_core::llm::LlmMessage>>,
     pub(crate) max_output_tokens: usize,
+    pub(crate) acknowledgements:
+        astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
 
 #[cfg(test)]

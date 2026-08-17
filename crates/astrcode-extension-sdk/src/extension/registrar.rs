@@ -1,17 +1,29 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommandDiscoveryHandler, CommandHandler, CompactEvent, CompactHandler,
-    ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
-    ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionHttpHandler,
-    ExtensionHttpRoute, ExtensionHttpRouteRegistration, HookMode, LifecycleHandler,
-    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
-    SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
-    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
+    CommandDiscoveryHandler, CommandExecution, CommandHandler, ContinueAfterStopHandler,
+    ContinueAfterStopOptions, ContinueAfterStopRegistration, CustomEventDeclaration,
+    CustomEventHandler, CustomEventSubscription, ExtensionCapability, ExtensionHttpAccess,
+    ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest,
+    HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES, PostCompactHandler,
+    PostToolUseHandler, PreCompactHandler, PreToolUseHandler, PromptBuildHandler,
+    ProviderContributionHandler, ProviderEvent, ProviderHandler, SlashCommand,
+    ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    ToolInputTransformHandler, ToolUseRegistration, UserMessageEnvelopeHandler,
+    UserMessageEnvelopeRegistration,
+    registration_validation::{
+        canonical_registration_name, extension_http_route_patterns_conflict,
+        has_duplicate_registration_name, lifecycle_event_allows_blocking,
+        normalize_custom_event_subscription, validate_custom_event_subscription,
+        validate_extension_http_route,
+    },
 };
-use crate::tool::{ToolDefinition, ToolPromptMetadata};
+use crate::{
+    builder::ExtensionToolDefinition,
+    tool::{ToolDefinition, ToolExecutionPolicy, ToolPromptMetadata},
+};
 
 // ─── Registrar ───────────────────────────────────────────────────
 
@@ -27,23 +39,82 @@ use crate::tool::{ToolDefinition, ToolPromptMetadata};
 ///    阻止外部把它当成长寿数据持有。
 #[derive(Default)]
 pub struct Registrar {
-    tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)>,
+    registrations: ExtensionRegistrations,
+}
+
+/// Immutable declaration and handler aggregate produced by [`Registrar::finish`].
+///
+/// Runtime indexes must be derived from this value instead of maintaining registration-family
+/// vectors alongside it.
+#[derive(Default)]
+pub struct ExtensionRegistrations {
+    tools: Vec<ToolRegistration>,
     tool_discovery: Vec<Arc<dyn ToolDiscoveryHandler>>,
-    tool_metadata: HashMap<String, ToolPromptMetadata>,
     commands: Vec<(SlashCommand, Arc<dyn CommandHandler>)>,
     command_discovery: Vec<Arc<dyn CommandDiscoveryHandler>>,
     http_routes: Vec<ExtensionHttpRouteRegistration>,
     keybindings: Vec<Keybinding>,
     status_items: Vec<StatusItem>,
-    pre_tool_use: Vec<ToolHookRegistration<dyn PreToolUseHandler>>,
+    tool_input_transform: Vec<ToolUseRegistration<dyn ToolInputTransformHandler>>,
+    pre_tool_use: Vec<ToolUseRegistration<dyn PreToolUseHandler>>,
     post_tool_use: Vec<ToolHookRegistration<dyn PostToolUseHandler>>,
     provider: Vec<(ProviderEvent, HookMode, i32, Arc<dyn ProviderHandler>)>,
+    provider_contributions: Vec<(i32, Arc<dyn ProviderContributionHandler>)>,
     prompt_build: Vec<(i32, Arc<dyn PromptBuildHandler>)>,
-    compact: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)>,
+    pre_compact: Vec<(i32, Arc<dyn PreCompactHandler>)>,
+    post_compact: Vec<(i32, Arc<dyn PostCompactHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
     user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
-    lifecycle: Vec<(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
-    extension_event_decls: Vec<ExtensionEventDecl>,
+    lifecycle: Vec<(LifecycleEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
+    custom_event_declarations: Vec<CustomEventDeclaration>,
+    custom_event_subscriptions: Vec<CustomEventRegistration>,
+}
+
+#[derive(Clone)]
+pub struct CustomEventRegistration {
+    subscription: CustomEventSubscription,
+    priority: i32,
+    handler: Arc<dyn CustomEventHandler>,
+}
+
+impl CustomEventRegistration {
+    pub fn subscription(&self) -> &CustomEventSubscription {
+        &self.subscription
+    }
+
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    pub fn handler(&self) -> &Arc<dyn CustomEventHandler> {
+        &self.handler
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolRegistration {
+    definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
+    prompt: ToolPromptMetadata,
+    handler: Arc<dyn ToolHandler>,
+}
+
+impl ToolRegistration {
+    pub fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    pub fn prompt(&self) -> &ToolPromptMetadata {
+        &self.prompt
+    }
+
+    pub fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
+    }
+
+    pub fn handler(&self) -> &Arc<dyn ToolHandler> {
+        &self.handler
+    }
 }
 
 impl Registrar {
@@ -51,24 +122,32 @@ impl Registrar {
         Self::default()
     }
 
-    pub fn tool(&mut self, def: ToolDefinition, handler: Arc<dyn ToolHandler>) {
-        self.tools.push((def, handler));
+    pub fn tool(
+        &mut self,
+        definition: impl Into<ExtensionToolDefinition>,
+        handler: Arc<dyn ToolHandler>,
+    ) {
+        let (mut definition, execution_policy, prompt) = definition.into().into_parts();
+        canonical_registration_name(&mut definition.name);
+        self.registrations.tools.push(ToolRegistration {
+            definition,
+            execution_policy,
+            prompt,
+            handler,
+        });
     }
 
     pub fn tool_discovery(&mut self, handler: Arc<dyn ToolDiscoveryHandler>) {
-        self.tool_discovery.push(handler);
+        self.registrations.tool_discovery.push(handler);
     }
 
-    pub fn tool_metadata(&mut self, meta: HashMap<String, ToolPromptMetadata>) {
-        self.tool_metadata.extend(meta);
-    }
-
-    pub fn command(&mut self, cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
-        self.commands.push((cmd, handler));
+    pub fn command(&mut self, mut cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
+        canonical_registration_name(&mut cmd.name);
+        self.registrations.commands.push((cmd, handler));
     }
 
     pub fn command_discovery(&mut self, handler: Arc<dyn CommandDiscoveryHandler>) {
-        self.command_discovery.push(handler);
+        self.registrations.command_discovery.push(handler);
     }
 
     pub fn http_route(
@@ -76,36 +155,79 @@ impl Registrar {
         route: ExtensionHttpRoute,
         handler: Arc<dyn ExtensionHttpHandler>,
     ) {
-        self.http_routes
+        self.registrations
+            .http_routes
             .push(ExtensionHttpRouteRegistration { route, handler });
     }
 
-    pub fn keybinding(&mut self, binding: Keybinding) {
-        self.keybindings.push(binding);
+    pub fn keybinding(&mut self, mut binding: Keybinding) {
+        canonical_registration_name(&mut binding.key);
+        canonical_registration_name(&mut binding.command);
+        self.registrations.keybindings.push(binding);
     }
 
-    pub fn status_item(&mut self, item: StatusItem) {
-        self.status_items.push(item);
+    pub fn status_item(&mut self, mut item: StatusItem) {
+        canonical_registration_name(&mut item.id);
+        self.registrations.status_items.push(item);
     }
 
-    pub fn on_pre_tool_use(
+    pub fn declare_custom_event(&mut self, mut declaration: CustomEventDeclaration) {
+        canonical_registration_name(&mut declaration.event_type);
+        self.registrations
+            .custom_event_declarations
+            .push(declaration);
+    }
+
+    pub fn on_custom_event(
         &mut self,
-        mode: HookMode,
+        mut subscription: CustomEventSubscription,
         priority: i32,
-        handler: Arc<dyn PreToolUseHandler>,
+        handler: Arc<dyn CustomEventHandler>,
     ) {
-        self.on_pre_tool_use_for(ToolHookTarget::All, mode, priority, handler);
+        normalize_custom_event_subscription(&mut subscription);
+        self.registrations
+            .custom_event_subscriptions
+            .push(CustomEventRegistration {
+                subscription,
+                priority,
+                handler,
+            });
+    }
+
+    pub fn on_tool_input_transform(
+        &mut self,
+        priority: i32,
+        handler: Arc<dyn ToolInputTransformHandler>,
+    ) {
+        self.on_tool_input_transform_for(ToolHookTarget::All, priority, handler);
+    }
+
+    pub fn on_tool_input_transform_for(
+        &mut self,
+        target: ToolHookTarget,
+        priority: i32,
+        handler: Arc<dyn ToolInputTransformHandler>,
+    ) {
+        self.registrations
+            .tool_input_transform
+            .push(ToolUseRegistration {
+                priority,
+                target,
+                handler,
+            });
+    }
+
+    pub fn on_pre_tool_use(&mut self, priority: i32, handler: Arc<dyn PreToolUseHandler>) {
+        self.on_pre_tool_use_for(ToolHookTarget::All, priority, handler);
     }
 
     pub fn on_pre_tool_use_for(
         &mut self,
         target: ToolHookTarget,
-        mode: HookMode,
         priority: i32,
         handler: Arc<dyn PreToolUseHandler>,
     ) {
-        self.pre_tool_use.push(ToolHookRegistration {
-            mode,
+        self.registrations.pre_tool_use.push(ToolUseRegistration {
             priority,
             target,
             handler,
@@ -121,43 +243,19 @@ impl Registrar {
         self.on_post_tool_use_for(ToolHookTarget::All, mode, priority, handler);
     }
 
-    fn on_post_tool_use_for(
+    pub fn on_post_tool_use_for(
         &mut self,
         target: ToolHookTarget,
         mode: HookMode,
         priority: i32,
         handler: Arc<dyn PostToolUseHandler>,
     ) {
-        self.post_tool_use.push(ToolHookRegistration {
+        self.registrations.post_tool_use.push(ToolHookRegistration {
             mode,
             priority,
             target,
             handler,
         });
-    }
-
-    pub fn on_provider(
-        &mut self,
-        event: ProviderEvent,
-        mode: HookMode,
-        priority: i32,
-        handler: Arc<dyn ProviderHandler>,
-    ) {
-        match event {
-            ProviderEvent::BeforeRequest => {
-                self.on_before_provider_request(mode, priority, handler);
-            },
-            ProviderEvent::AfterResponse => {
-                if mode != HookMode::Advisory {
-                    tracing::warn!(
-                        ?mode,
-                        "on_provider(AfterResponse) ignores HookMode; use \
-                         on_after_provider_response instead"
-                    );
-                }
-                self.on_after_provider_response(priority, handler);
-            },
-        }
     }
 
     /// 注册 provider request hook。
@@ -169,7 +267,8 @@ impl Registrar {
         priority: i32,
         handler: Arc<dyn ProviderHandler>,
     ) {
-        self.provider
+        self.registrations
+            .provider
             .push((ProviderEvent::BeforeRequest, mode, priority, handler));
     }
 
@@ -177,7 +276,7 @@ impl Registrar {
     ///
     /// Response 阶段只观察结果，不允许阻断或改写后续流程。
     pub fn on_after_provider_response(&mut self, priority: i32, handler: Arc<dyn ProviderHandler>) {
-        self.provider.push((
+        self.registrations.provider.push((
             ProviderEvent::AfterResponse,
             HookMode::Advisory,
             priority,
@@ -185,17 +284,28 @@ impl Registrar {
         ));
     }
 
-    pub fn on_prompt_build(&mut self, priority: i32, handler: Arc<dyn PromptBuildHandler>) {
-        self.prompt_build.push((priority, handler));
+    /// Register a request-local contribution whose pending state is settled only after durable
+    /// provider success.
+    pub fn on_provider_contribution(
+        &mut self,
+        priority: i32,
+        handler: Arc<dyn ProviderContributionHandler>,
+    ) {
+        self.registrations
+            .provider_contributions
+            .push((priority, handler));
     }
 
-    pub fn on_compact(
-        &mut self,
-        event: CompactEvent,
-        priority: i32,
-        handler: Arc<dyn CompactHandler>,
-    ) {
-        self.compact.push((event, priority, handler));
+    pub fn on_prompt_build(&mut self, priority: i32, handler: Arc<dyn PromptBuildHandler>) {
+        self.registrations.prompt_build.push((priority, handler));
+    }
+
+    pub fn on_pre_compact(&mut self, priority: i32, handler: Arc<dyn PreCompactHandler>) {
+        self.registrations.pre_compact.push((priority, handler));
+    }
+
+    pub fn on_post_compact(&mut self, priority: i32, handler: Arc<dyn PostCompactHandler>) {
+        self.registrations.post_compact.push((priority, handler));
     }
 
     pub fn on_continue_after_stop(
@@ -204,7 +314,8 @@ impl Registrar {
         options: ContinueAfterStopOptions,
         handler: Arc<dyn ContinueAfterStopHandler>,
     ) {
-        self.continue_after_stop
+        self.registrations
+            .continue_after_stop
             .push(ContinueAfterStopRegistration {
                 priority,
                 options,
@@ -217,39 +328,43 @@ impl Registrar {
         priority: i32,
         handler: Arc<dyn UserMessageEnvelopeHandler>,
     ) {
-        self.user_message_envelope
+        self.registrations
+            .user_message_envelope
             .push(UserMessageEnvelopeRegistration { priority, handler });
     }
 
-    pub fn on_event(
+    pub fn on_lifecycle(
         &mut self,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
         mode: HookMode,
         priority: i32,
         handler: Arc<dyn LifecycleHandler>,
     ) {
-        self.lifecycle.push((event, mode, priority, handler));
+        self.registrations
+            .lifecycle
+            .push((event, mode, priority, handler));
     }
 
-    /// 声明插件可发出的事件类型，返回构建器。
-    pub fn extension_event(&mut self, event_type: &str) -> ExtensionEventDeclBuilder<'_> {
-        ExtensionEventDeclBuilder::new(self, event_type)
+    #[doc(hidden)]
+    pub fn finish(
+        self,
+        manifest: ExtensionManifest,
+    ) -> Result<(ExtensionManifest, ExtensionRegistrations), RegistrationError> {
+        manifest
+            .validate()
+            .map_err(|error| invalid_registration(manifest.id(), error.to_string()))?;
+        self.registrations.validate(&manifest)?;
+        Ok((manifest, self.registrations))
     }
+}
 
-    pub(super) fn register_extension_event_decl(&mut self, declaration: ExtensionEventDecl) {
-        self.extension_event_decls.push(declaration);
-    }
-
-    pub fn tools(&self) -> &[(ToolDefinition, Arc<dyn ToolHandler>)] {
+impl ExtensionRegistrations {
+    pub fn tools(&self) -> &[ToolRegistration] {
         &self.tools
     }
 
     pub fn tool_discoveries(&self) -> &[Arc<dyn ToolDiscoveryHandler>] {
         &self.tool_discovery
-    }
-
-    pub fn all_tool_metadata(&self) -> &HashMap<String, ToolPromptMetadata> {
-        &self.tool_metadata
     }
 
     pub fn commands(&self) -> &[(SlashCommand, Arc<dyn CommandHandler>)] {
@@ -264,7 +379,11 @@ impl Registrar {
         &self.http_routes
     }
 
-    pub fn pre_tool_use(&self) -> &[ToolHookRegistration<dyn PreToolUseHandler>] {
+    pub fn tool_input_transforms(&self) -> &[ToolUseRegistration<dyn ToolInputTransformHandler>] {
+        &self.tool_input_transform
+    }
+
+    pub fn pre_tool_use(&self) -> &[ToolUseRegistration<dyn PreToolUseHandler>] {
         &self.pre_tool_use
     }
 
@@ -276,12 +395,20 @@ impl Registrar {
         &self.provider
     }
 
+    pub fn provider_contributions(&self) -> &[(i32, Arc<dyn ProviderContributionHandler>)] {
+        &self.provider_contributions
+    }
+
     pub fn prompt_build(&self) -> &[(i32, Arc<dyn PromptBuildHandler>)] {
         &self.prompt_build
     }
 
-    pub fn compact(&self) -> &[(CompactEvent, i32, Arc<dyn CompactHandler>)] {
-        &self.compact
+    pub fn pre_compact(&self) -> &[(i32, Arc<dyn PreCompactHandler>)] {
+        &self.pre_compact
+    }
+
+    pub fn post_compact(&self) -> &[(i32, Arc<dyn PostCompactHandler>)] {
+        &self.post_compact
     }
 
     pub fn continue_after_stop(
@@ -296,7 +423,7 @@ impl Registrar {
         &self.user_message_envelope
     }
 
-    pub fn lifecycle(&self) -> &[(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)] {
+    pub fn lifecycle(&self) -> &[(LifecycleEvent, HookMode, i32, Arc<dyn LifecycleHandler>)] {
         &self.lifecycle
     }
 
@@ -308,8 +435,444 @@ impl Registrar {
         &self.status_items
     }
 
-    pub fn extension_event_decls(&self) -> &[ExtensionEventDecl] {
-        &self.extension_event_decls
+    pub fn custom_event_declarations(&self) -> &[CustomEventDeclaration] {
+        &self.custom_event_declarations
+    }
+
+    pub fn custom_event_subscriptions(&self) -> &[CustomEventRegistration] {
+        &self.custom_event_subscriptions
+    }
+
+    fn validate(&self, manifest: &ExtensionManifest) -> Result<(), RegistrationError> {
+        let extension_id = manifest.id();
+        let capabilities = manifest.capabilities();
+
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.custom_event_declarations.is_empty(),
+            "event",
+            ExtensionCapability::EmitCustomEvents,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.custom_event_subscriptions.is_empty(),
+            "custom_event_subscription",
+            ExtensionCapability::ConsumeCustomEvents,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.pre_compact.is_empty() || !self.post_compact.is_empty(),
+            "compact",
+            ExtensionCapability::SessionHistory,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.user_message_envelope.is_empty(),
+            "user_message_envelope",
+            ExtensionCapability::ProviderRequest,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.provider.is_empty() || !self.provider_contributions.is_empty(),
+            "provider",
+            ExtensionCapability::ProviderRequest,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.tool_input_transform.is_empty() || !self.pre_tool_use.is_empty(),
+            "pre_tool_use",
+            ExtensionCapability::ToolIntercept,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            self.post_tool_use
+                .iter()
+                .any(|registration| registration.mode == HookMode::Blocking),
+            "post_tool_use",
+            ExtensionCapability::ToolIntercept,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.continue_after_stop.is_empty(),
+            "continue_after_stop",
+            ExtensionCapability::TurnContinuationControl,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            self.commands
+                .iter()
+                .any(|(command, _)| matches!(command.execution, CommandExecution::Host(_))),
+            "command",
+            ExtensionCapability::SessionCommand,
+        )?;
+
+        for (event, mode, _, _) in &self.lifecycle {
+            if *mode == HookMode::Blocking && !lifecycle_event_allows_blocking(event) {
+                return Err(RegistrationError::InvalidLifecycleMode {
+                    extension_id: extension_id.to_owned(),
+                    event: event.clone(),
+                });
+            }
+        }
+
+        let mut tool_names = HashSet::new();
+        for registration in &self.tools {
+            let name = registration.definition.name.as_str();
+            if name.is_empty() {
+                return Err(invalid_registration(
+                    extension_id,
+                    "tool name cannot be empty",
+                ));
+            }
+            if has_duplicate_registration_name(tool_names.iter().copied(), name) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("duplicate tool `{name}`"),
+                ));
+            }
+            tool_names.insert(name);
+        }
+        let mut command_names = HashSet::new();
+        for (command, handler) in &self.commands {
+            let name = command.name.as_str();
+            if name.is_empty() {
+                return Err(invalid_registration(
+                    extension_id,
+                    "command name cannot be empty",
+                ));
+            }
+            if has_duplicate_registration_name(command_names.iter().copied(), name) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("duplicate command `{name}`"),
+                ));
+            }
+            command_names.insert(name);
+            if command.argument_completions && !handler.supports_argument_completions() {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!(
+                        "command `{name}` declares argument completions, but its handler does not \
+                         support them"
+                    ),
+                ));
+            }
+        }
+        for binding in &self.keybindings {
+            if binding.key.trim().is_empty() {
+                return Err(invalid_registration(
+                    extension_id,
+                    "keybinding key cannot be empty",
+                ));
+            }
+            if !command_names.contains(binding.command.as_str())
+                && self.command_discovery.is_empty()
+            {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!(
+                        "keybinding `{}` targets unknown static command `{}`",
+                        binding.key, binding.command
+                    ),
+                ));
+            }
+        }
+
+        let mut status_ids = HashSet::new();
+        for item in &self.status_items {
+            let id = item.id.as_str();
+            if id.is_empty() || has_duplicate_registration_name(status_ids.iter().copied(), id) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("invalid or duplicate status item id `{id}`"),
+                ));
+            }
+            status_ids.insert(id);
+        }
+
+        let mut event_types = HashSet::new();
+        for event in &self.custom_event_declarations {
+            let event_type = event.event_type.as_str();
+            if event_type.is_empty()
+                || has_duplicate_registration_name(event_types.iter().copied(), event_type)
+            {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("invalid or duplicate custom event `{event_type}`"),
+                ));
+            }
+            event_types.insert(event_type);
+            if event.schema_version == 0 {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("custom event `{event_type}` requires a non-zero schema version"),
+                ));
+            }
+            if !(1..=MAX_CUSTOM_EVENT_PAYLOAD_BYTES).contains(&event.max_payload_bytes) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!(
+                        "custom event `{event_type}` payload limit must be between 1 and \
+                         {MAX_CUSTOM_EVENT_PAYLOAD_BYTES} bytes"
+                    ),
+                ));
+            }
+        }
+
+        let mut subscription_ids = HashSet::new();
+        for registration in &self.custom_event_subscriptions {
+            if let Err(reason) = validate_custom_event_subscription(&registration.subscription) {
+                return Err(invalid_registration(extension_id, reason));
+            }
+            let subscription_id = registration.subscription.id.as_str();
+            if has_duplicate_registration_name(subscription_ids.iter().copied(), subscription_id) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!(
+                        "invalid or duplicate custom event subscription id `{subscription_id}`"
+                    ),
+                ));
+            }
+            subscription_ids.insert(subscription_id);
+        }
+
+        for (index, registration) in self.http_routes.iter().enumerate() {
+            let route = &registration.route;
+            validate_extension_http_route(route)
+                .map_err(|reason| invalid_registration(extension_id, reason))?;
+            let capability = match route.access {
+                ExtensionHttpAccess::Public => ExtensionCapability::PublicHttp,
+                ExtensionHttpAccess::Authenticated => ExtensionCapability::AuthenticatedHttp,
+            };
+            require_capability(extension_id, capabilities, true, "http_route", capability)?;
+            if self.http_routes[..index].iter().any(|existing| {
+                existing.route.access == route.access
+                    && existing.route.method == route.method
+                    && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+            }) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("conflicting HTTP route `{}`", route.path),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegistrationError {
+    #[error("extension {extension_id} registered {registration} without declaring {capability:?}")]
+    MissingCapability {
+        extension_id: String,
+        registration: &'static str,
+        capability: ExtensionCapability,
+    },
+    #[error(
+        "extension {extension_id} registered lifecycle {event:?} with blocking mode, but the \
+         event is observe-only"
+    )]
+    InvalidLifecycleMode {
+        extension_id: String,
+        event: LifecycleEvent,
+    },
+    #[error("extension {extension_id} has an invalid registration: {reason}")]
+    Invalid {
+        extension_id: String,
+        reason: String,
+    },
+}
+
+impl From<RegistrationError> for super::ExtensionError {
+    fn from(error: RegistrationError) -> Self {
+        match error {
+            RegistrationError::MissingCapability {
+                extension_id,
+                registration,
+                capability,
+            } => Self::MissingCapability {
+                extension_id,
+                hook: registration,
+                capability,
+            },
+            RegistrationError::InvalidLifecycleMode {
+                extension_id,
+                event,
+            } => Self::InvalidLifecycleMode {
+                extension_id,
+                event,
+            },
+            RegistrationError::Invalid {
+                extension_id,
+                reason,
+            } => Self::InvalidRegistration {
+                extension_id,
+                reason,
+            },
+        }
+    }
+}
+
+fn require_capability(
+    extension_id: &str,
+    capabilities: &[ExtensionCapability],
+    registration_present: bool,
+    registration: &'static str,
+    capability: ExtensionCapability,
+) -> Result<(), RegistrationError> {
+    if registration_present && !capabilities.contains(&capability) {
+        return Err(RegistrationError::MissingCapability {
+            extension_id: extension_id.to_owned(),
+            registration,
+            capability,
+        });
+    }
+    Ok(())
+}
+
+fn invalid_registration(extension_id: &str, reason: impl Into<String>) -> RegistrationError {
+    RegistrationError::Invalid {
+        extension_id: extension_id.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        builder::{command, command_handler, manifest, tool, tool_handler},
+        extension::{
+            CommandDiscovery, CommandDiscoveryContext, CustomEventDelivery, ExtensionCommandResult,
+            ExtensionError,
+        },
+        tool::{ToolPlan, ToolResult},
+    };
+
+    struct EmptyCommandDiscovery;
+
+    #[async_trait::async_trait]
+    impl CommandDiscoveryHandler for EmptyCommandDiscovery {
+        async fn discover(
+            &self,
+            _ctx: CommandDiscoveryContext,
+        ) -> Result<CommandDiscovery, ExtensionError> {
+            Ok(CommandDiscovery::new(Vec::new()))
+        }
+    }
+
+    fn finish_with_event_limit(max_payload_bytes: usize) -> Result<(), RegistrationError> {
+        let mut registrar = Registrar::new();
+        registrar.declare_custom_event(CustomEventDeclaration {
+            event_type: "test.completed".into(),
+            schema_version: 1,
+            delivery: CustomEventDelivery::SessionDurable,
+            max_payload_bytes,
+        });
+        registrar
+            .finish(
+                manifest("event-limit-test")
+                    .version("1.0.0")
+                    .capability(ExtensionCapability::EmitCustomEvents)
+                    .build(),
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn event_payload_limit_accepts_host_ceiling_only() {
+        for (max_payload_bytes, accepted) in [
+            (0, false),
+            (MAX_CUSTOM_EVENT_PAYLOAD_BYTES, true),
+            (MAX_CUSTOM_EVENT_PAYLOAD_BYTES + 1, false),
+        ] {
+            assert_eq!(
+                finish_with_event_limit(max_payload_bytes).is_ok(),
+                accepted,
+                "unexpected validation result for {max_payload_bytes} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_names_are_stored_in_canonical_form() {
+        let mut registrar = Registrar::new();
+        registrar.tool(
+            tool("  review  ")
+                .parameters(serde_json::json!({"type": "object"}))
+                .build(),
+            tool_handler(
+                |_| async { Ok(ToolPlan::default()) },
+                |_| async { Ok(ToolResult::success("ok")) },
+            ),
+        );
+        registrar.command(
+            command("  inspect  ").build(),
+            command_handler(|_| async { Ok(ExtensionCommandResult::handled("ok")) }),
+        );
+        registrar.keybinding(Keybinding {
+            key: "  ctrl+i  ".into(),
+            command: "  inspect  ".into(),
+            arguments: String::new(),
+            description: String::new(),
+        });
+        registrar.status_item(StatusItem {
+            id: "  state  ".into(),
+            text: String::new(),
+            priority: 0,
+            tooltip: None,
+        });
+        registrar.declare_custom_event(CustomEventDeclaration {
+            event_type: "  review.completed  ".into(),
+            schema_version: 1,
+            delivery: CustomEventDelivery::SessionDurable,
+            max_payload_bytes: 1024,
+        });
+
+        let (_, registrations) = registrar
+            .finish(
+                manifest("canonical-registration-test")
+                    .version("1.0.0")
+                    .capability(ExtensionCapability::EmitCustomEvents)
+                    .build(),
+            )
+            .expect("canonical registrations");
+
+        assert_eq!(registrations.tools()[0].definition().name, "review");
+        assert_eq!(registrations.commands()[0].0.name, "inspect");
+        assert_eq!(registrations.keybindings()[0].key, "ctrl+i");
+        assert_eq!(registrations.keybindings()[0].command, "inspect");
+        assert_eq!(registrations.status_items()[0].id, "state");
+        assert_eq!(
+            registrations.custom_event_declarations()[0].event_type,
+            "review.completed"
+        );
+    }
+
+    #[test]
+    fn keybinding_may_target_a_dynamically_discovered_command() {
+        let mut registrar = Registrar::new();
+        registrar.command_discovery(Arc::new(EmptyCommandDiscovery));
+        registrar.keybinding(Keybinding {
+            key: "ctrl+d".into(),
+            command: "dynamic-command".into(),
+            arguments: String::new(),
+            description: String::new(),
+        });
+
+        registrar
+            .finish(manifest("dynamic-keybinding-test").version("1.0.0").build())
+            .expect("dynamic command target is validated at discovery time");
     }
 }
 

@@ -9,7 +9,7 @@ pub(crate) fn inline_preview(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::inline_preview;
 
     #[test]
     fn inline_preview_normalizes_and_truncates_display_text() {

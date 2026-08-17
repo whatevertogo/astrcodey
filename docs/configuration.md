@@ -2,7 +2,7 @@
 
 > 以当前代码为准（`astrcode-core::config`、`astrcode-storage::config_store`、`astrcode-server` 启动流程）。
 
-AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。迁移期仍兼容旧的 `config.json`；当同目录同时存在 `config.toml` 和 `config.json` 时优先读取 TOML。首次从旧 JSON 读取主配置、项目覆盖或 last-known-good 快照时，会自动写出对应的 TOML 文件；旧 JSON 会保留为备份。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
+AstrCode 使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
 
 ---
 
@@ -14,14 +14,18 @@ AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行�
 | 项目覆盖 | `<workspace>/.astrcode/config.toml` | [`ConfigOverlay`] | 仅写需覆盖的字段；**服务启动时**按启动工作目录合并进主配置 |
 | 全局 MCP | `~/.astrcode/mcp.json` | `mcpServers` | MCP 客户端（与 `config.toml` 分离） |
 | 项目 MCP | `<workspace>/.astrcode/mcp.json` | 同上 | 默认**不加载**；设置 `ASTRCODE_ENABLE_PROJECT_MCP=1` 后启用，同名 server 覆盖全局 |
-| 上次可用快照 | `~/.astrcode/.last-known-good.toml` | `Config` | 解析成功时自动写入，启动失败时回退；旧 `.last-known-good.json` 仍可读取 |
+| 上次可用快照 | `~/.astrcode/.last-known-good.toml` | `Config` | 解析成功时自动写入，启动失败时回退 |
 
 [`Config`]: ../crates/astrcode-core/src/config/raw.rs
 [`ConfigOverlay`]: ../crates/astrcode-core/src/config/raw.rs
 
-**项目覆盖生效范围**：在 `astrcode-server` / CLI 启动时，对 **启动时的工作目录**（默认 `std::env::current_dir()`）读取 `.astrcode/config.toml` 并合并；旧 `.astrcode/config.json` 在 TOML 不存在时作为 fallback。之后在其他目录创建的 session 仍使用已合并后的全局有效配置；若需按仓库分别覆盖，请在该仓库目录下启动进程。
+**项目覆盖生效范围**：在 `astrcode-server` / CLI 启动时，对 **启动时的工作目录**（默认 `std::env::current_dir()`）读取 `.astrcode/config.toml` 并合并。之后在其他目录创建的 session 仍使用已合并后的全局有效配置；若需按仓库分别覆盖，请在该仓库目录下启动进程。
 
-**热更新**：修改 `~/.astrcode/config.toml` 后可通过设置页或 `POST` 重载；已运行 session 的 per-session 快照需同步（服务端在重载后会调用 `sync_session_model_bindings`）。扩展通过 `on_config_changed()` 接收 `extensions` 段变更。
+**热更新**：设置页/API 更新时，宿主先解析 core 配置，并在当前运行代之外构造发生变化的
+Extension 实例；所有候选完成配置校验和 `start()` 后才保存配置并发布新代。任一候选失败时会被
+停止并丢弃，磁盘与运行态继续使用上一已提交代。直接修改磁盘文件再触发 reload 时，文件本身已经
+是 desired config；候选失败只保留上一运行代，磁盘内容不会被宿主反向覆盖，修正后可再次 reload。
+未变化 Extension 的来源指纹与规范化配置完全相同时复用原实例，不会因无关 core 配置更新而重启。
 
 ---
 
@@ -44,7 +48,6 @@ compactThresholdPercent = 83.5
 compactKeepRecentTurns = 1
 agentMaxDepth = 2
 agentToolMaxParallelCalls = 5
-shellTimeoutSecs = 120
 approvalMode = "manual"
 
 [permissions]
@@ -112,7 +115,6 @@ provider = "duckduckgo"
 | `postCompactMaxTokensPerFile` | `5000` | 单文件恢复 token 上限 |
 | `agentMaxDepth` | `2` | 子 Agent 最大嵌套深度（root=0） |
 | `agentToolMaxParallelCalls` | `5` | 单轮并行工具调用上限 |
-| `shellTimeoutSecs` | `120` | Shell 工具默认超时（秒）；LLM 可传更短值，上限 600 |
 | `allowApiKeyShellCommand` | `false` | 是否允许 `apiKey` 使用 `!command` 从 shell 读取密钥 |
 | `approvalMode` | `"manual"` | **全局**审批模式：`"manual"` 需确认；`"yolo"` 跳过 Ask。对所有 session 生效（每轮 turn 从有效配置读取，非「每个 session 单独记忆」）。Web 设置页保存后写入本字段。CLI/TUI 进程内启动时，若未设置此项则**默认 yolo**；`astrcode tui --manual` / `--yolo` 可强制覆盖。HTTP `server` 子命令未设置时仍为 `manual`。 |
 | `extensionStates` | `{}` | 扩展启停，见 §7 |
@@ -155,8 +157,8 @@ allow = [{ tool = "read" }]
 | `capabilities` | 可选：`supportsPromptCacheKey`、`promptCacheRetention`（`inMemory` / `24h`）、`supportsStreamUsage`、`supportsStrictToolUse` |
 
 `supportsStrictToolUse` 控制是否把工具自身的 `strict` 声明发送给 provider。旧配置缺少该字段时按
-`false` 处理；OpenAI-compatible 网关需确认兼容后显式开启。内置工具和内置扩展工具默认声明
-`strict`（MCP 暂不声明）。发送前会从工具的自然参数契约编译 provider 专用 Schema：
+`false` 处理；OpenAI-compatible 网关需确认兼容后显式开启。第一方 bundled Extension 工具默认
+声明 `strict`（MCP 暂不声明）。发送前会从工具的自然参数契约编译 provider 专用 Schema：
 
 - OpenAI：递归关闭额外属性，并把可选字段转换为 required + nullable；
 - Anthropic：递归关闭额外属性，移除其 strict 子集不支持、但仍由执行器校验的约束关键字；
@@ -167,10 +169,14 @@ OpenAI strict 可能因此为原本可选的字段返回 `null`。工具注册�
 null 不会被吞掉。执行器看到的仍是原始工具契约。
 
 Anthropic 还限制单次请求中的 strict 工具、可选参数和 union 数量。超过硬上限时，wire 副本按
-Builtin → Bundled → Extension → SDK 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
+Bundled → Extension 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
 为 nullable union；仍无法容纳的工具仅在该次 Anthropic 请求中降级为非 strict，并输出包含工具
-名的 warning。当前 8 个核心工具的自然 Schema 合计 44 个 optional，超过其 `24 optional + 16
-union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表中的原始 strict 定义不会被修改。
+名的 warning。Bundled composition catalog 把 Coding Extension 放在其他第一方工具之前，因而
+`read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 优先保留 strict。
+八个 Coding Schema 按稳定顺序参与 Anthropic strict-tool 预算；若与其他 bundled Extension 的
+schema 合计超过 provider 容量，wire compiler 只对本次请求中靠后的超限项做确定性降级，注册表中的
+原始 strict 定义不会被修改。不要通过提高本地上限或把可选字段强制改成非 nullable required 来
+伪装全部工具均可 strict：前者会被 provider 拒绝，后者会改变模型可见的工具语义。
 
 该开关只表示 provider 支持 OpenAI / Anthropic 的**逐工具** strict 契约，不代表所有厂商的等价
 能力都能复用同一字段：
@@ -243,6 +249,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 | 扩展 ID | 默认 | 说明 |
 |---------|------|------|
+| `astrcode-coding` | 启用 | workspace 与受监管 shell 工具 |
 | `astrcode-agent-tools` | 启用 | 子 Agent 工具 |
 | `astrcode-mcp` | 启用 | MCP 客户端 |
 | `astrcode-skill` | 启用 | Skill 斜杠命令 |
@@ -265,9 +272,20 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 ## 8. `extensions` 段（按扩展 id）
 
-键为扩展 ID，值为扩展自行反序列化的配置值（`ExtensionCtx::config.deserialize()`）。TOML 中无法表达 `null`，需要“未设置”语义时请省略字段。
+键为扩展 ID，值为扩展自行反序列化的配置值（`ExtensionStartContext::config().deserialize()`）。TOML 中无法表达 `null`，需要“未设置”语义时请省略字段。
 
-### 8.1 `astrcode.memory`
+### 8.1 `astrcode-coding`
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `shellTimeoutSecs` | `120` | `shell` 未显式提供 `timeout` 时使用；范围 1–600 秒，热更新只影响后续调用 |
+
+```toml
+[extensions.astrcode-coding]
+shellTimeoutSecs = 180
+```
+
+### 8.2 `astrcode.memory`
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -285,10 +303,14 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 **数据目录**（与 config 分离）：
 
-- 用户偏好：`~/.astrcode/memory/`（`user_pref` 类别）
-- 项目记忆：`~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/`
+- 用户偏好：`~/.astrcode/extension_data/astrcode.memory/`（`user_pref` 类别）
+- 项目记忆：`~/.astrcode/extension_data/astrcode.memory/projects/<project_key>/`
 
-### 8.2 `astrcode-web-tools`
+> Breaking change：旧目录 `~/.astrcode/memory/` 和
+> `~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/` 不再读取，也不会自动
+> 迁移。如需保留旧数据，升级前手动复制到上述新目录。
+
+### 8.3 `astrcode-web-tools`
 
 | 工具 | 名称 |
 |------|------|
@@ -312,6 +334,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 | `requestTimeoutSecs` | `60` | 请求超时 |
 | `maxContentBytes` | `10485760` | 响应体上限 |
 | `maxOutputChars` | `100000` | 返回给模型的字符上限 |
+| `summarizerMaxOutputTokens` | `4096` | 小模型摘要请求的输出 token 上限；实际值仍受模型能力上限约束 |
 | `userAgent` | AstrCode 默认 UA | HTTP User-Agent |
 | `cacheTtlSecs` | `900` | 缓存 TTL |
 | `cacheMaxEntries` | `64` | 缓存条目数 |
@@ -320,7 +343,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 `fetch-url` 阻止 localhost 与私网地址（SSRF 防护）。
 
-### 8.3 `astrcode-channels`
+### 8.4 `astrcode-channels`
 
 ```toml
 [extensions.astrcode-channels.telegram]
@@ -330,15 +353,14 @@ allowedChatIds = ["123456789"]
 allowAllChats = false
 registerCommands = false
 streaming = false
-workingDir = "D:/my-project"
 requestTimeoutSecs = 30
 pollTimeoutSecs = 25
 maxReplyChars = 3500
 ```
 
-未设置 `allowAllChats: true` 时应配置 `allowedChatIds` 白名单。`botToken` 可直接写 token，更推荐 `botTokenEnv`。
+未设置 `allowAllChats: true` 时应配置 `allowedChatIds` 白名单。`botToken` 可直接写 token，更推荐 `botTokenEnv`。Telegram 创建的顶层 session 绑定扩展启动时的宿主 workspace，通道配置不能覆盖该路径。
 
-### 8.4 MCP（**不在** `extensions` 内）
+### 8.5 MCP（**不在** `extensions` 内）
 
 MCP 服务器仅通过 `mcp.json` 配置，由 `astrcode-mcp` 扩展加载。
 
@@ -408,7 +430,7 @@ braveApiKeyEnv = "BRAVE_API_KEY"
 
 - `Config::effective_from()` 要求 `activeProfile` / `activeModel` 存在且可解析 API key。
 - 配置文件含未知字段 → **加载失败**（不自动覆盖你的文件）；修正字段名或删除废弃键后重试。成功加载时可能回写 `config.toml` 以补齐新版本字段（不删除已有自定义段）。
-- 解析失败时服务尝试 `.last-known-good.toml`，再 fallback 到旧 `.last-known-good.json`；仍失败则使用 dummy LLM（HTTP 仍可用，但无法对话直至修复配置）。
+- 解析失败时服务尝试 `.last-known-good.toml`；仍失败则使用 dummy LLM（HTTP 仍可用，但无法对话直至修复配置）。
 
 实现入口：[`resolve.rs`](../crates/astrcode-core/src/config/resolve.rs)、启动 [`bootstrap/mod.rs`](../crates/astrcode-server/src/bootstrap/mod.rs)。
 

@@ -23,8 +23,6 @@ pub enum SlashCommand {
     New,
     /// 恢复指定 ID 的会话
     Resume(String),
-    /// 压缩当前会话上下文
-    Compact,
     /// 生成当前对话摘要
     Recap,
     /// 退出 astrcode
@@ -48,12 +46,6 @@ pub fn builtin_commands() -> Vec<SlashCommandSpec> {
             name: "resume".into(),
             usage: "/resume".into(),
             description: "Resume a previous session (interactive picker)".into(),
-            needs_argument: false,
-        },
-        SlashCommandSpec {
-            name: "compact".into(),
-            usage: "/compact".into(),
-            description: "Compact the current session context".into(),
             needs_argument: false,
         },
         SlashCommandSpec {
@@ -118,7 +110,6 @@ pub fn parse(input: &str, extension_command_names: &[String]) -> Option<SlashCom
     match cmd {
         "new" => Some(SlashCommand::New),
         "resume" | "r" => Some(SlashCommand::Resume(arg.to_string())),
-        "compact" => Some(SlashCommand::Compact),
         "recap" => Some(SlashCommand::Recap),
         "quit" | "q" | "exit" => Some(SlashCommand::Quit),
         "help" | "?" => Some(SlashCommand::Help),

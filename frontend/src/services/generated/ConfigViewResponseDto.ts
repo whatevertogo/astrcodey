@@ -5,4 +5,4 @@ import type { ProfileDto } from "./ProfileDto";
 /**
  * GET /api/config 响应。
  */
-export type ConfigViewResponseDto = { configPath: string, activeProfile: string, activeModel: string, activeSmallProfile?: string | null, activeSmallModel?: string | null, approvalMode: ApprovalModeDto, profiles: Array<ProfileDto>, warning: string | null, };
+export type ConfigViewResponseDto = { configPath: string, activeProfile: string, activeModel: string, activeSmallProfile?: string, activeSmallModel?: string, approvalMode: ApprovalModeDto, profiles: Array<ProfileDto>, warning: string | null, };

@@ -16,11 +16,44 @@ import {
   ReadToolDetails,
   SearchToolDetails,
   ShellToolDetails,
-  TerminalToolDetails,
+  ToolResultDetails,
 } from './details'
-import { registerToolRenderer } from './registry'
+import { registerToolRenderer, type ToolJsonRecord } from './registry'
 import { todoWriteRenderSpec, todoWriteSummaryLine } from './todoWrite'
 import { RenderSpecViewer } from '../RenderSpecViewer'
+
+// Presentation intents declared via ToolResult metadata key `presentation`.
+// Values mirror the snake_case wire strings of astrcode-core `ToolPresentation`;
+// each maps to an existing built-in details component — no new renderers here.
+const presentationIntentRenderers = {
+  terminal: ShellToolDetails,
+  diff: FileToolDetails,
+  search: SearchToolDetails,
+  read: ReadToolDetails,
+} as const
+
+type PresentationIntent = keyof typeof presentationIntentRenderers
+
+function presentationIntentOf(
+  meta: ToolJsonRecord
+): PresentationIntent | undefined {
+  const intent = stringValue(meta, 'presentation')
+  return intent != null && intent in presentationIntentRenderers
+    ? (intent as PresentationIntent)
+    : undefined
+}
+
+registerToolRenderer({
+  id: 'builtin:presentation-intent',
+  priority: 50,
+  match: ({ meta }) => presentationIntentOf(meta) !== undefined,
+  render: ({ block, meta }) => {
+    const intent = presentationIntentOf(meta)
+    if (!intent) return undefined
+    const Details = presentationIntentRenderers[intent]
+    return <Details block={block} />
+  },
+})
 
 registerToolRenderer({
   id: 'builtin:read',
@@ -43,6 +76,33 @@ registerToolRenderer({
     )
   },
   render: ({ block }) => <ReadToolDetails block={block} />,
+})
+
+registerToolRenderer({
+  id: 'builtin:read-tool-result',
+  priority: 100,
+  match: ({ block }) => block.name === 'read_tool_result',
+  summary: ({ args, meta }) => {
+    const artifactId =
+      stringValue(meta, 'artifactId') || stringValue(args, 'artifactId')
+    const returnedBytes = numberValue(meta, 'returnedBytes')
+    const totalBytes = numberValue(meta, 'bytes')
+    const size =
+      returnedBytes != null && totalBytes != null
+        ? `${formatBytes(returnedBytes)}/${formatBytes(totalBytes)}`
+        : formatBytes(returnedBytes)
+    return compactLine(
+      [
+        'read tool result',
+        artifactId && truncateMiddle(artifactId, 40),
+        size,
+        paginationLabel(meta),
+      ]
+        .filter(Boolean)
+        .join(' ')
+    )
+  },
+  render: ({ block }) => <ToolResultDetails block={block} />,
 })
 
 registerToolRenderer({
@@ -169,41 +229,4 @@ registerToolRenderer({
     if (block.status === 'streaming') return null
     return undefined
   },
-})
-
-registerToolRenderer({
-  id: 'builtin:terminal',
-  priority: 100,
-  match: ({ block }) => block.name === 'terminal',
-  summary: ({ args, meta }) => {
-    const action = stringValue(args, 'action')
-    const id = stringValue(meta, 'id') || stringValue(args, 'id')
-    const command = stringValue(meta, 'command') || stringValue(args, 'command')
-    const bytesSent = numberValue(meta, 'bytesSent')
-    const alive = boolValue(meta, 'alive')
-    const exitCode = numberValue(meta, 'exitCode')
-    const count = numberValue(meta, 'count')
-    const status =
-      alive != null
-        ? alive
-          ? 'alive'
-          : 'exited'
-        : exitCode != null
-          ? `exit ${exitCode}`
-          : ''
-    return compactLine(
-      [
-        'terminal',
-        action,
-        command && truncateMiddle(command, 72),
-        id && truncateMiddle(id, 36),
-        bytesSent != null && formatBytes(bytesSent),
-        count != null && `${count} active`,
-        status,
-      ]
-        .filter(Boolean)
-        .join(' ')
-    )
-  },
-  render: ({ block }) => <TerminalToolDetails block={block} />,
 })

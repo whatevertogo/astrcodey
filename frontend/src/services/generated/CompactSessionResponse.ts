@@ -3,4 +3,4 @@
 /**
  * 手动 compact 响应。
  */
-export type CompactSessionResponse = { accepted: boolean, deferred: boolean, sessionId?: string | null, message: string, };
+export type CompactSessionResponse = { compacted: boolean, message: string, };

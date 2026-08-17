@@ -165,9 +165,11 @@ export function changesLabel(meta: JsonRecord): string {
 export function paginationLabel(meta: JsonRecord): string {
   const hasMore = boolValue(meta, 'hasMore', 'truncated')
   const nextOffset = numberValue(meta, 'nextOffset')
+  const nextByteOffset = numberValue(meta, 'nextByteOffset')
   const nextCharOffset = numberValue(meta, 'nextCharOffset')
   if (!hasMore) return ''
   if (nextOffset != null) return `more at offset ${nextOffset}`
+  if (nextByteOffset != null) return `more at byte ${nextByteOffset}`
   if (nextCharOffset != null) return `more at char ${nextCharOffset}`
   return 'has more'
 }

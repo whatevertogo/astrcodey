@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ToolRegistry,
-    early_tool_scheduler::EarlyToolScheduler,
     session::Session,
     tool_exec::{ToolCallRuntimeContext, TurnToolContext},
     turn_context::SharedTurnContext,
@@ -25,6 +24,7 @@ pub(crate) struct ToolCalls {
     extension_runner: Arc<dyn TurnHooks>,
     session: Session,
     cancellation_token: CancellationToken,
+    max_parallel_tool_calls: usize,
 }
 
 impl ToolCalls {
@@ -34,6 +34,7 @@ impl ToolCalls {
         extension_runner: Arc<dyn TurnHooks>,
         session: Session,
         cancellation_token: CancellationToken,
+        max_parallel_tool_calls: usize,
     ) -> Self {
         Self {
             turn,
@@ -41,6 +42,7 @@ impl ToolCalls {
             extension_runner,
             session,
             cancellation_token,
+            max_parallel_tool_calls,
         }
     }
 
@@ -58,6 +60,10 @@ impl ToolCalls {
         &mut self.turn.shared
     }
 
+    pub(crate) fn max_parallel_tool_calls(&self) -> usize {
+        self.max_parallel_tool_calls
+    }
+
     /// 构建工具调用的运行时上下文。
     pub(crate) fn make_runtime_context(
         &self,
@@ -71,19 +77,5 @@ impl ToolCalls {
             ),
             cancellation_token: self.cancellation_token.clone(),
         }
-    }
-
-    /// 创建流式工具执行调度器。
-    pub(crate) fn create_early_scheduler(
-        &self,
-        tools: Vec<ToolDefinition>,
-        max_parallel: usize,
-    ) -> EarlyToolScheduler {
-        let tools_arc: Arc<[ToolDefinition]> = Arc::from(tools);
-        EarlyToolScheduler::new(
-            Arc::clone(&self.tool_registry),
-            self.make_runtime_context(tools_arc),
-            max_parallel,
-        )
     }
 }

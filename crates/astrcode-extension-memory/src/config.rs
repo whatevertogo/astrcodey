@@ -50,13 +50,7 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     pub(crate) fn from_extension_config(
         config: &astrcode_extension_sdk::extension::ExtensionConfig,
-    ) -> Self {
-        match config.deserialize() {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::warn!(%error, "invalid memory extension config, falling back to defaults");
-                Self::default()
-            },
-        }
+    ) -> Result<Self, astrcode_extension_sdk::extension::ExtensionConfigError> {
+        config.deserialize_or_default()
     }
 }

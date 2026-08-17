@@ -15,8 +15,8 @@
 //!
 //! | 路径 | 格式 | 说明 |
 //! |------|------|------|
-//! | `~/.astrcode/config.toml` | [`Config`] | 全局主配置；缺失时兼容旧 `config.json` |
-//! | `<workspace>/.astrcode/config.toml` | [`ConfigOverlay`] | 项目覆盖（启动时合并进全局）；缺失时兼容旧 `config.json` |
+//! | `~/.astrcode/config.toml` | [`Config`] | 全局主配置 |
+//! | `<workspace>/.astrcode/config.toml` | [`ConfigOverlay`] | 项目覆盖（启动时合并进全局） |
 //! | `~/.astrcode/mcp.json` | MCP 专用 JSON | MCP 服务器（**不**走 `extensions` 段） |
 //! | `<workspace>/.astrcode/mcp.json` | 同上 | 项目 MCP（需 `ASTRCODE_ENABLE_PROJECT_MCP=1`） |
 //!
@@ -24,11 +24,11 @@
 //!
 //! # 解析流程
 //!
-//! 1. 加载 `~/.astrcode/config.toml`（不存在则写入内置默认；旧 `config.json` 作为 fallback）。
+//! 1. 加载 `~/.astrcode/config.toml`（不存在则写入内置默认）。
 //! 2. 若存在 `<startup_cwd>/.astrcode/config.toml`，[`merge_overlay`] 合并 [`ConfigOverlay`]。
 //! 3. [`Config::effective_from()`] 解析主模型 / 小模型、API key、runtime、permissions、extensions。
-//! 4. 解析失败时服务端回退到 `.last-known-good.toml`、旧 `.last-known-good.json` 或内置 dummy
-//!    LLM（见 `astrcode-server::bootstrap::config_resolve`）。
+//! 4. 解析失败时服务端回退到 `.last-known-good.toml` 或内置 dummy LLM（见
+//!    `astrcode-server::bootstrap::config_resolve`）。
 //!
 //! # 新增字段
 //!
@@ -44,9 +44,18 @@ pub mod provider_catalog;
 pub mod raw;
 pub mod resolve;
 
-pub use effective::*;
-pub use provider_catalog::*;
-pub use raw::*;
+pub use effective::{
+    AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
+};
+pub use provider_catalog::{
+    ProviderEndpointPreset, ProviderSpec, ProviderSpecCapabilities, builtin_provider_catalog,
+    resolve_thinking_capability,
+};
+pub use raw::{
+    Config, ConfigOverlay, ExtensionRawConfig, ModelConfig, ModelOptionsConfig, ModelSelection,
+    OpenAiApiMode, Profile, ProviderAuthScheme, ProviderCapabilities, ProviderWireFormat,
+    RuntimeSection,
+};
 pub use resolve::{ResolveError, merge_overlay, profile_has_resolvable_api_key, resolve_api_key};
 
 /// 配置持久化 trait。
@@ -84,9 +93,6 @@ pub enum ConfigStoreError {
     /// IO 错误。
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    /// 序列化/反序列化错误。
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
     /// 配置内容无效。
     #[error("Invalid config: {0}")]
     Invalid(String),

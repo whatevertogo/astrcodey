@@ -1,4 +1,4 @@
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 /// manual 模式兜底：未命中更具体策略的工具默认放行。
 ///
@@ -6,11 +6,7 @@ use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 pub(super) struct FallbackAllowPolicy;
 
 impl PermissionPolicy for FallbackAllowPolicy {
-    fn priority(&self) -> u32 {
-        999
-    }
-
-    fn evaluate(&self, _ctx: &PermissionContext<'_>) -> PermissionDecision {
-        PermissionDecision::Allow
+    fn evaluate(&self, _ctx: &PermissionContext<'_>) -> PolicyDecision {
+        PolicyDecision::Allow
     }
 }

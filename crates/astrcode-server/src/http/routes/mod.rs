@@ -8,6 +8,7 @@ use super::{HttpState, bad_request_response, internal_error_response};
 use crate::config_manager::ConfigUpdateError;
 
 pub(in crate::http) mod config;
+pub(in crate::http) mod event_consumers;
 pub(in crate::http) mod extensions;
 pub(in crate::http) mod lifecycle;
 pub(in crate::http) mod models;
@@ -55,24 +56,20 @@ pub(in crate::http) async fn update_config<T>(
             ConfigUpdateError::Provider(error) => {
                 ConfigUpdateHttpError(Box::new(bad_request_response("invalid_provider", error)))
             },
+            ConfigUpdateError::ExtensionValidation(error) => ConfigUpdateHttpError(Box::new(
+                bad_request_response("invalid_extension_config", error),
+            )),
+            ConfigUpdateError::ExtensionCandidate(error) => ConfigUpdateHttpError(Box::new(
+                internal_error_response("extension_candidate_failed", error),
+            )),
             ConfigUpdateError::Store(error) => {
                 ConfigUpdateHttpError(Box::new(internal_error_response("save_failed", error)))
             },
+            ConfigUpdateError::Transaction(error) => ConfigUpdateHttpError(Box::new(
+                internal_error_response("config_publication_failed", error),
+            )),
         })?;
-    notify_extensions_config_changed(state).await;
     Ok(result)
-}
-
-async fn notify_extensions_config_changed(state: &HttpState) {
-    for error in state
-        .app
-        .runtime()
-        .config_manager()
-        .notify_extensions_config_changed()
-        .await
-    {
-        tracing::warn!("extension config notify error: {error}");
-    }
 }
 
 async fn reload_extension_registry(state: &HttpState) -> Vec<String> {

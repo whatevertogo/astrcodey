@@ -20,11 +20,27 @@ impl TurnScheduler {
             .await
     }
 
+    /// Keeps deferred child notifications out of `deliver_input`'s recursive abort future.
+    pub(crate) async fn deliver_child_completion_notification(
+        &self,
+        session_id: SessionId,
+        input: UserInput,
+    ) -> Result<DeliveryOutcome, TurnScheduleError> {
+        let _admission = self.admit_owned()?;
+        validate_user_input(&input)?;
+        let operation = self.begin_session_operation(&session_id).await?;
+        self.inject_if_running_else_start(operation, input).await
+    }
+
     pub(crate) async fn begin_session_operation(
         &self,
         session_id: &SessionId,
     ) -> Result<SessionOperationGuard, TurnScheduleError> {
-        self.delivery_gates.begin(session_id).await
+        let operation = self.delivery_gates.begin(session_id).await?;
+        self.session_manager
+            .recover_durability_for_operation(session_id)
+            .await?;
+        Ok(operation)
     }
 
     pub(crate) async fn deliver_input_in_operation(

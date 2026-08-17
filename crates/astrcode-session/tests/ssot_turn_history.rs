@@ -29,10 +29,10 @@ trait ProviderMessages {
 impl ProviderMessages for SessionReadModel {
     fn provider_messages(&self) -> Vec<LlmMessage> {
         astrcode_core::llm::provider_visible_messages(
-            self.transcript
+            self.model_context
                 .messages
                 .iter()
-                .map(|message| message.message.clone())
+                .map(|message| (*message.message).clone())
                 .collect(),
         )
     }
@@ -44,10 +44,9 @@ struct ToolLoopLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ToolLoopLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -125,10 +124,9 @@ struct FailingGenerateLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for FailingGenerateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         Err(LlmError::ClientError {
             status: 429,
@@ -171,10 +169,9 @@ async fn provider_start_error_is_persisted_as_durable_error() {
 
 #[async_trait::async_trait]
 impl LlmProvider for UsageLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::Usage {
@@ -182,6 +179,7 @@ impl LlmProvider for UsageLlm {
                 input_tokens: Some(100),
                 cached_input_tokens: Some(64),
                 cache_creation_input_tokens: None,
+                input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
                 output_tokens: Some(20),
                 reasoning_output_tokens: Some(5),
                 total_tokens: Some(120),
@@ -209,7 +207,13 @@ async fn top_level_turn_persists_the_current_main_model_before_running() {
         common::spawn_session_with_services(Arc::new(UsageLlm)).await;
     let mut effective = services.read_effective().as_ref().clone();
     effective.llm.model_id = "new-main-model".into();
-    services.update_effective(effective);
+    // 默认 extension ports 无真实 runner,extension epoch 恒为 0。
+    services.publish_runtime_generation_for_extension(
+        effective,
+        services.llm(),
+        services.small_llm(),
+        0,
+    );
 
     let handle = session
         .submit("use current model".into(), new_turn_id(), None)
@@ -289,10 +293,9 @@ struct NoUsageCountingLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for NoUsageCountingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
@@ -304,7 +307,7 @@ impl LlmProvider for NoUsageCountingLlm {
 
     async fn count_input_tokens(
         &self,
-        _messages: Vec<LlmMessage>,
+        _messages: Vec<Arc<LlmMessage>>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         Ok(ProviderInputTokenCount::provider_count(321))
@@ -355,10 +358,9 @@ struct ThinkingToolsLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ThinkingToolsLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -427,10 +429,9 @@ struct DelayThenCompleteLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for DelayThenCompleteLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -465,16 +466,15 @@ impl LlmProvider for DelayThenCompleteLlm {
     }
 }
 
-struct EarlyCompletedToolLlm {
+struct CompletedToolCallLlm {
     calls: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for EarlyCompletedToolLlm {
-    async fn generate(
+impl LlmProvider for CompletedToolCallLlm {
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -527,7 +527,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.messages.iter().any(|message| {
+        model.model_context.messages.iter().any(|message| {
             message.message.role == LlmRole::Assistant
                 && message.message.content.iter().any(|content| {
                     matches!(
@@ -542,14 +542,14 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 }
 
 #[tokio::test]
-async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
-    let (session, store, sid) = common::spawn_session_with_store(Arc::new(EarlyCompletedToolLlm {
+async fn ssot_tool_request_is_durable_after_assistant_message() {
+    let (session, store, sid) = common::spawn_session_with_store(Arc::new(CompletedToolCallLlm {
         calls: AtomicUsize::new(0),
     }))
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger early tool".into(), turn_id, None)
+        .submit("trigger tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -570,8 +570,7 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
         .expect("tool request should be durable");
     assert!(
         assistant_completed_index < tool_requested_index,
-        "early tool preparation must not persist ToolCallRequested before \
-         assistant_message_completed"
+        "ToolCallRequested must not be persisted before assistant_message_completed"
     );
 
     let provider_messages = session.read_model().await.unwrap().provider_messages();
@@ -631,7 +630,7 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.messages.iter().any(|message| {
+        model.model_context.messages.iter().any(|message| {
             message.message.role == LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(

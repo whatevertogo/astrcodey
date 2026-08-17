@@ -3,6 +3,8 @@
 //! 将 crate-internal 的 [`LlmMessage`] / [`LlmContent`] / [`ToolDefinition`]
 //! 转换为 OpenAI Chat Completions 和 Responses API 所需的 JSON 结构。
 
+use std::sync::Arc;
+
 use astrcode_core::{
     config::OpenAiApiMode,
     llm::{LlmContent, LlmMessage, LlmRole, PromptCacheRetention},
@@ -62,7 +64,7 @@ pub(crate) fn responses_tools_json(
 
 #[cfg(test)]
 mod strict_tool_tests {
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::tool::ToolOrigin;
 
     use super::*;
 
@@ -77,8 +79,7 @@ mod strict_tool_tests {
                 "additionalProperties": false
             }),
             strict,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Parallel,
+            origin: ToolOrigin::Bundled,
         }
     }
 
@@ -198,10 +199,10 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
             if matches!(message.role, LlmRole::Assistant) {
                 set_reasoning_content(&mut obj, &message.reasoning_content);
             }
-            if matches!(message.role, LlmRole::Tool) {
-                if let Some(ref name) = message.name {
-                    obj["name"] = serde_json::json!(name);
-                }
+            if matches!(message.role, LlmRole::Tool)
+                && let Some(ref name) = message.name
+            {
+                obj["name"] = serde_json::json!(name);
             }
             obj
         },
@@ -323,7 +324,7 @@ fn tool_call_arguments_text(arguments: &serde_json::Value, raw_arguments: Option
 
 // ─── Prompt cache 辅助 ─────────────────────────────────────────────────
 
-pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
+pub(crate) fn system_text(messages: &[Arc<LlmMessage>]) -> String {
     LlmContent::join_text(
         messages
             .iter()
@@ -331,20 +332,6 @@ pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
             .flat_map(|message| &message.content),
         "\n\n",
     )
-}
-
-/// 稳定的十六进制指纹：对每段 part 逐字节做 FNV-1a，段间插入 `0xff` 分隔。
-pub(crate) fn stable_hash_hex(parts: &[&str]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for part in parts {
-        for &byte in part.as_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 pub(crate) fn prompt_cache_retention_wire_value(
@@ -360,9 +347,12 @@ pub(crate) fn prompt_cache_retention_wire_value(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+    use astrcode_core::{
+        event::stable_hash_hex,
+        llm::{LlmContent, LlmMessage, LlmRole},
+    };
 
-    use super::{chat_message_to_json, responses_input_items, stable_hash_hex};
+    use super::{chat_message_to_json, responses_input_items};
 
     #[test]
     fn chat_tool_call_message_preserves_content_and_reasoning_content() {

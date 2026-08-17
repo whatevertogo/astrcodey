@@ -1,6 +1,6 @@
 //! Deferred tool visibility for provider requests.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     llm::LlmMessage,
@@ -35,7 +35,7 @@ pub(crate) fn provider_visible_tools(
 }
 
 pub(crate) fn append_deferred_tools_reminder(
-    messages: &mut Vec<LlmMessage>,
+    messages: &mut Vec<Arc<LlmMessage>>,
     tools: &[ToolSnapshot],
     active_deferred_tools: &HashSet<String>,
 ) {
@@ -58,7 +58,7 @@ pub(crate) fn append_deferred_tools_reminder(
         text.push('\n');
     }
     text.push_str("</available-deferred-tools>");
-    messages.push(LlmMessage::system(text));
+    messages.push(Arc::new(LlmMessage::system(text)));
 }
 
 pub(crate) fn activate_deferred_tools(
@@ -179,8 +179,7 @@ mod tests {
             description: String::new(),
             parameters: serde_json::json!({}),
             strict: false,
-            origin: ToolOrigin::Builtin,
-            execution_mode: Default::default(),
+            origin: ToolOrigin::Bundled,
         }
     }
 
@@ -269,47 +268,32 @@ mod tests {
     }
 
     #[test]
-    fn tool_is_visible_found() {
-        let tools = vec![def("read"), def("write")];
-        assert!(tool_is_visible(&tools, "read"));
-        assert!(!tool_is_visible(&tools, "shell"));
-    }
-
-    #[test]
-    fn suggest_tool_alias_maps_common_mistakes() {
+    fn visibility_aliases_and_unavailable_guidance_cover_each_resolution_path() {
+        let visible = vec![
+            def("glob"),
+            def("grep"),
+            def("read"),
+            def("tool_search_tool"),
+        ];
+        assert!(tool_is_visible(&visible, "read"));
+        assert!(!tool_is_visible(&visible, "shell"));
         assert_eq!(suggest_tool_alias("find"), Some("glob"));
         assert_eq!(suggest_tool_alias("list_files"), Some("glob"));
         assert_eq!(suggest_tool_alias("read_file"), Some("read"));
         assert_eq!(suggest_tool_alias("shell"), None);
-    }
 
-    #[test]
-    fn unavailable_tool_guidance_suggests_glob_for_legacy_find() {
-        let visible = vec![def("glob"), def("grep"), def("read")];
-        let registered = visible.clone();
-        let msg = unavailable_tool_guidance("find", &visible, &registered);
-        assert!(msg.contains("glob"));
-        assert!(!msg.contains("tool_search_tool"));
-    }
+        let legacy = unavailable_tool_guidance("find", &visible, &visible);
+        assert!(legacy.contains("glob"));
+        assert!(!legacy.contains("not loaded for this turn"));
 
-    #[test]
-    fn unavailable_tool_guidance_defers_mcp_tools_to_search() {
-        let visible = vec![def("read"), def("tool_search_tool")];
-        let registered = vec![
-            def("read"),
-            def("tool_search_tool"),
-            def("mcp__demo__search"),
-        ];
-        let msg = unavailable_tool_guidance("mcp__demo__search", &visible, &registered);
-        assert!(msg.contains("tool_search_tool"));
-        assert!(msg.contains("not loaded for this turn"));
-    }
+        let mut registered = visible.clone();
+        registered.push(def("mcp__demo__search"));
+        let deferred = unavailable_tool_guidance("mcp__demo__search", &visible, &registered);
+        assert!(deferred.contains("tool_search_tool"));
+        assert!(deferred.contains("not loaded for this turn"));
 
-    #[test]
-    fn unavailable_tool_guidance_lists_visible_tools_for_unknown_names() {
-        let visible = vec![def("glob"), def("grep")];
-        let msg = unavailable_tool_guidance("missing_tool", &visible, &visible);
-        assert!(msg.contains("Available tools"));
-        assert!(msg.contains("glob"));
+        let unknown = unavailable_tool_guidance("missing_tool", &visible, &visible);
+        assert!(unknown.contains("Available tools"));
+        assert!(unknown.contains("glob"));
     }
 }

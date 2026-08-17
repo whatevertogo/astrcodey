@@ -32,8 +32,9 @@ use super::{
     ConfigRequestError, reload_extension_registry, update_config,
 };
 use crate::protocol_mapping::{
-    extension_capability_to_dto, extension_event_decl_to_dto, extension_http_method_to_dto,
-    extension_slash_command_to_dto, keybinding_to_dto, status_item_to_dto,
+    custom_event_declaration_to_dto, custom_event_subscription_to_dto, extension_capability_to_dto,
+    extension_http_method_to_dto, extension_slash_command_to_dto, keybinding_to_dto,
+    status_item_to_dto, transport_feature_to_dto,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -69,11 +70,14 @@ pub(in crate::http) async fn set_enabled(
         return error.into_response();
     }
 
-    let reload_errors = reload_extension_registry(&state).await;
+    state
+        .app
+        .event_bus()
+        .send_notification(astrcode_protocol::events::ClientNotification::ExtensionRegistryChanged);
 
     Json(SetExtensionEnabledResponseDto {
         success: true,
-        reload_errors,
+        reload_errors: Vec::new(),
     })
     .into_response()
 }
@@ -174,14 +178,13 @@ fn extension_http_method(method: &Method) -> Option<ExtensionHttpMethod> {
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
     let effective = state.app.runtime().config_manager().read_effective();
     let runner = state.app.runtime().extension_runner();
-    let loaded_ids = runner.registered_extension_ids().await;
-    let loaded_set: BTreeSet<_> = loaded_ids.iter().cloned().collect();
     let registry = runner.registry_snapshot().await;
     let declarations: BTreeMap<_, _> = registry
         .extensions
         .into_iter()
         .map(|declaration| (declaration.id.clone(), declaration))
         .collect();
+    let loaded_set: BTreeSet<_> = declarations.keys().cloned().collect();
     let diagnostics = runner.diagnostics_snapshot();
     let bundled_set: BTreeSet<_> = astrcode_bundled_extensions::bundled_extension_ids()
         .into_iter()
@@ -233,6 +236,11 @@ fn extension_declaration_dto(
             .into_iter()
             .map(extension_capability_to_dto)
             .collect(),
+        required_transport_features: declaration
+            .required_transport_features
+            .into_iter()
+            .map(transport_feature_to_dto)
+            .collect(),
         tools: declaration.tools.into_iter().map(Into::into).collect(),
         dynamic_tools: declaration.dynamic_tools,
         commands: declaration
@@ -251,10 +259,15 @@ fn extension_declaration_dto(
             .into_iter()
             .map(status_item_to_dto)
             .collect(),
-        events: declaration
-            .events
+        custom_events: declaration
+            .custom_events
             .into_iter()
-            .map(extension_event_decl_to_dto)
+            .map(custom_event_declaration_to_dto)
+            .collect(),
+        custom_event_subscriptions: declaration
+            .custom_event_subscriptions
+            .into_iter()
+            .map(custom_event_subscription_to_dto)
             .collect(),
         http_routes: declaration
             .http_routes

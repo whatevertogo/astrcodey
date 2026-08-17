@@ -5,7 +5,6 @@ import type {
   ExtensionStateView,
   KeybindingInfo,
   PendingAskUserQuestion,
-  Phase,
   SessionListItem,
   SlashCommandInfo,
 } from '../services/types'
@@ -36,9 +35,15 @@ export interface AppState {
   workingDir: string | null
 
   blocks: ConversationBlock[]
+  /** Live preview block id -> owning turn id. Durable blocks never appear here. */
+  transientBlockOwners: Record<string, string>
   control: ConversationControlState | null
   cursor: string | null
-  phase: Phase
+  timelineOlderCursor: string | null
+  timelineHasOlder: boolean
+  timelineLoading: boolean
+  timelinePageBlockIds: string[][]
+  timelineDetachedFromLatest: boolean
   compactSubmitting: boolean
 
   sessionStream: ActiveSessionStream | null
@@ -69,6 +74,8 @@ export interface AppState {
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
   refreshConversationSnapshot: () => Promise<string | null>
+  loadOlderConversationItems: () => Promise<void>
+  returnToLatestConversation: () => Promise<void>
   refreshPendingAskUserQuestions: () => Promise<void>
   refreshExtensionData: () => Promise<void>
   refreshCommands: () => Promise<void>

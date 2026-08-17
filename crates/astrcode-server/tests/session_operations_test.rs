@@ -10,26 +10,26 @@ use std::{
     time::Duration,
 };
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
-        CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionLifecycleState,
-        SessionOperations, SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
+        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionDeliveryOutcome,
+        SessionLifecycleState, SessionOperations, SubmitTurnRequest, SubmitTurnResult,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
     ChildSessionCoordinator, ServerSessionOperations, SessionManager, TurnRegistry, TurnScheduler,
-    finish_and_watch_next_for_test, pause_next_completion_guard_claim_for_test,
-    pause_next_completion_guard_registration_for_test, pause_next_sync_completion_settled_for_test,
-    registered_completion_guard_count_for_test, session_started_event_for_test,
-    start_with_completion_and_hold_operation_for_test, start_with_completion_for_test,
+    completed_completion_guard_count_for_test, finish_and_watch_next_for_test,
+    pause_next_completion_guard_claim_for_test, pause_next_completion_guard_registration_for_test,
+    pause_next_sync_completion_settled_for_test, registered_completion_guard_count_for_test,
+    session_started_event_for_test, start_with_completion_and_hold_operation_for_test,
+    start_with_completion_for_test,
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary, replay};
 use astrcode_storage::{
@@ -45,35 +45,57 @@ struct StaticTextLlm {
 
 /// 在发送 Done 前阻塞，便于在活跃 turn 期间调用 `inject_message`。
 struct GateLlm {
-    release: Arc<tokio::sync::Notify>,
+    gate: Arc<GateLlmControl>,
+}
+
+struct GateLlmControl {
+    started: Semaphore,
+    release: tokio::sync::Notify,
+}
+
+impl GateLlmControl {
+    async fn wait_until_started(&self) {
+        self.started.acquire().await.unwrap().forget();
+    }
+
+    fn notify_one(&self) {
+        self.release.notify_one();
+    }
+
+    fn notify_waiters(&self) {
+        self.release.notify_waiters();
+    }
 }
 
 impl GateLlm {
-    fn new_pair() -> (Self, Arc<tokio::sync::Notify>) {
-        let release = Arc::new(tokio::sync::Notify::new());
+    fn new_pair() -> (Self, Arc<GateLlmControl>) {
+        let gate = Arc::new(GateLlmControl {
+            started: Semaphore::new(0),
+            release: tokio::sync::Notify::new(),
+        });
         (
             Self {
-                release: Arc::clone(&release),
+                gate: Arc::clone(&gate),
             },
-            release,
+            gate,
         )
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for GateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let release = Arc::clone(&self.release);
+        let gate = Arc::clone(&self.gate);
+        gate.started.add_permits(1);
         tokio::spawn(async move {
             let _ = tx.send(LlmEvent::ContentDelta {
                 delta: "partial".into(),
             });
-            release.notified().await;
+            gate.release.notified().await;
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
             });
@@ -91,10 +113,9 @@ impl LlmProvider for GateLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -310,15 +331,15 @@ impl SessionPathResolver for BlockingChildCreateStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for BlockingChildCreateStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<astrcode_core::tool::ToolResultArtifactSlice, StorageError> {
         self.inner
-            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
             .await
     }
 
@@ -369,6 +390,40 @@ impl SessionEventJournal for BlockingChildCreateStore {
         self.inner.append_event(event).await
     }
 
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        for event in &events {
+            if matches!(
+                &event.payload,
+                DurableEventPayload::AgentSessionFailed { error, .. } if error == "deleted"
+            ) && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
+            {
+                return Err(StorageError::Unsupported(
+                    "injected deleted relation failure".into(),
+                ));
+            }
+            if matches!(
+                &event.payload,
+                DurableEventPayload::AgentSessionRecycled { .. }
+            ) && self.fail_next_recycled_event.swap(false, Ordering::AcqRel)
+            {
+                return Err(StorageError::Unsupported(
+                    "injected recycled relation failure".into(),
+                ));
+            }
+        }
+        self.inner.append_events(events).await
+    }
+
+    async fn append_events_and_sync(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner.append_events_and_sync(events).await
+    }
+
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let mut fail_sync_session = self.fail_sync_session.lock().await;
         if fail_sync_session.as_ref() == Some(session_id) {
@@ -380,16 +435,69 @@ impl SessionEventJournal for BlockingChildCreateStore {
         drop(fail_sync_session);
         self.inner.sync_durable_events(session_id).await
     }
+
+    async fn retry_uncertain_sync(
+        &self,
+        session_id: &SessionId,
+        expected_through_seq: u64,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner
+            .retry_uncertain_sync(session_id, expected_through_seq)
+            .await
+    }
+
+    async fn ensure_no_uncertain_durability(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), StorageError> {
+        self.inner.ensure_no_uncertain_durability(session_id).await
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionStore for BlockingChildCreateStore {
-    async fn checkpoint(
+    async fn event_consumer_state(
         &self,
         session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.inner.checkpoint(session_id, cursor).await
+        consumer_id: &str,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .event_consumer_state(session_id, consumer_id)
+            .await
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+        self.inner
+            .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+            .await
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .set_event_consumer_paused(session_id, consumer_id, paused)
+            .await
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: astrcode_storage::EventConsumerCheckpointReset,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+            .await
     }
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -453,7 +561,6 @@ fn build_test_ops_with_llm(
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Arc<ServerSessionOperations> {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -502,14 +609,11 @@ fn build_test_ops_with_llm(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
-        context_assembler,
-        std::sync::Arc::clone(&shell_timeout_secs),
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
@@ -535,6 +639,30 @@ fn build_test_ops(
     llm_text: &'static str,
 ) -> Arc<ServerSessionOperations> {
     build_test_ops_with_llm(store, Arc::new(StaticTextLlm { text: llm_text }))
+}
+
+#[tokio::test]
+async fn create_root_session_persists_source_extension_attribution() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+
+    let created = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+        })
+        .await
+        .expect("create attributed root session");
+    let model = store
+        .session_read_model(&SessionId::new(created.session_id))
+        .await
+        .expect("read created root session");
+
+    assert!(model.identity.parent.is_none());
+    assert_eq!(
+        model.identity.source_extension.as_deref(),
+        Some("channel-a")
+    );
 }
 
 #[tokio::test]
@@ -869,12 +997,9 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
             ))
             .await
     });
-    for _ in 0..100 {
-        if ops.scheduler.registry().has_active(&parent_id) && ops.scheduler.owned_task_count() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(5), release.wait_until_started())
+        .await
+        .expect("root provider did not start");
     assert!(ops.scheduler.registry().has_active(&parent_id));
     root_request.abort();
     assert!(root_request.await.unwrap_err().is_cancelled());
@@ -913,7 +1038,7 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
     let child_ops = Arc::clone(&ops);
     let child_parent = parent_id.clone();
     let child_target = child_id.clone();
-    let child_request = tokio::spawn(async move {
+    let mut child_request = tokio::spawn(async move {
         child_ops
             .submit_turn(SubmitTurnRequest::for_child(
                 child_parent.as_str(),
@@ -922,12 +1047,16 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
             ))
             .await
     });
-    for _ in 0..100 {
-        if ops.scheduler.registry().has_active(&child_id) {
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            () = release.wait_until_started() => {},
+            result = &mut child_request => {
+                panic!("child request completed before provider start: {result:?}");
+            },
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("child provider did not start");
     assert!(ops.scheduler.registry().has_active(&child_id));
     child_request.abort();
     assert!(child_request.await.unwrap_err().is_cancelled());
@@ -1887,6 +2016,8 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         ops.scheduler.registry().has_active(&child_id),
         "child turn should be active before inject"
     );
+    // 等 turn 进入首个 provider 调用：step 0 的吸收点已过，inject 必然落在 step 内部。
+    release.wait_until_started().await;
 
     let outcome = ops
         .inject_message(
@@ -1896,26 +2027,58 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         .await
         .unwrap();
 
+    // 接受 ≠ 进入 transcript：只落归属活跃 turn 的 UserInputAccepted。
     let events = store.replay_events(&child_id).await.unwrap();
-    let injected = events
+    let accepted = events
         .iter()
-        .find(|e| {
+        .find(|event| {
             matches!(
-                &e.payload,
-                DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "mid-turn inject"
             )
         })
-        .expect("injected UserMessage must be durable");
-    assert!(
-        injected.turn_id.is_some(),
-        "active-turn inject must bind turn_id (same as TurnScheduler::inject)"
-    );
+        .expect("inject must durably accept the input");
+    let injected_turn_id = accepted
+        .turn_id
+        .as_ref()
+        .expect("active-turn inject must bind turn_id")
+        .clone();
     assert_eq!(
         outcome,
         SessionDeliveryOutcome::Injected {
-            turn_id: injected.turn_id.as_ref().unwrap().to_string(),
+            turn_id: injected_turn_id.to_string(),
         }
     );
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+        )),
+        "accepted input must not enter the transcript before the next step boundary"
+    );
+
+    // step 边界吸收：放行首个 provider 响应后,turn 为吸收再跑一个 step。
+    release.notify_one();
+    let mut absorbed = None;
+    for _ in 0..100 {
+        let events = store.replay_events(&child_id).await.unwrap();
+        absorbed = events.into_iter().find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+            )
+        });
+        if absorbed.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let absorbed = absorbed.expect("absorbed UserMessage must be durable");
+    assert_eq!(absorbed.turn_id.as_ref(), Some(&injected_turn_id));
+    let DurableEventPayload::UserMessage { accepted_seq, .. } = &absorbed.payload else {
+        unreachable!()
+    };
+    assert_eq!(*accepted_seq, Some(accepted.seq));
 
     release.notify_one();
     for _ in 0..100 {
@@ -2069,6 +2232,237 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
 }
 
 #[tokio::test]
+async fn queue_or_start_when_idle_starts_turn() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "queued user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+
+    for _ in 0..50 {
+        if ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        ops.scheduler.registry().has_active(&session_id),
+        "idle queue_or_start must start a turn"
+    );
+
+    release.notify_one();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn queue_or_start_during_active_turn_queues_fifo() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "first user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+    release.wait_until_started().await;
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "queued follow-up".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, SessionDeliveryOutcome::Queued { queue_len: 1 });
+
+    // 排队 ≠ 注入：pending 输入不归属当前活跃 turn。
+    let events = store.replay_events(&session_id).await.unwrap();
+    let accepted = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "queued follow-up"
+            )
+        })
+        .expect("queued input must be durably accepted");
+    assert!(
+        accepted.turn_id.is_none(),
+        "queued input must not bind the active turn"
+    );
+
+    // 当前 turn 结束后,队列自动开新 turn 并吸收该输入。
+    release.notify_one();
+    let mut drained = false;
+    for _ in 0..100 {
+        let events = store.replay_events(&session_id).await.unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserMessage { text, .. } if text == "queued follow-up"
+            )
+        }) {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(drained, "queued input must start a follow-up turn");
+
+    release.notify_waiters();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn defer_context_during_active_turn_binds_turn_id() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let outcome = ops
+        .queue_or_start(
+            SessionAccess::same(session_id.as_str()),
+            "first user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
+    release.wait_until_started().await;
+    let active_turn_id = ops
+        .scheduler
+        .registry()
+        .active_turn_id(&session_id)
+        .expect("turn must be active before defer_context");
+
+    let outcome = ops
+        .defer_context(
+            SessionAccess::same(session_id.as_str()),
+            "deferred context".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        SessionDeliveryOutcome::Injected {
+            turn_id: active_turn_id.to_string(),
+        }
+    );
+
+    let events = store.replay_events(&session_id).await.unwrap();
+    let accepted = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "deferred context"
+            )
+        })
+        .expect("defer_context must durably accept the input");
+    assert_eq!(accepted.turn_id.as_ref(), Some(&active_turn_id));
+
+    release.notify_waiters();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn defer_context_when_idle_returns_no_active_turn() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+    assert!(!ops.scheduler.registry().has_active(&session_id));
+
+    let error = ops
+        .defer_context(
+            SessionAccess::same(session_id.as_str()),
+            "deferred context".into(),
+        )
+        .await
+        .expect_err("idle defer_context must fail instead of starting a turn");
+    assert!(
+        matches!(error, astrcode_core::tool::SessionApiError::NoActiveTurn(_)),
+        "idle defer_context must return a typed no-active-turn error, got {error:?}"
+    );
+    assert!(!ops.scheduler.registry().has_active(&session_id));
+    assert!(
+        store
+            .replay_events(&session_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "deferred context"
+            )),
+        "failed defer_context must not durably accept the input"
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_sync_returns_llm_output() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
@@ -2192,7 +2586,7 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
     );
 
     // notify_parent_on_complete 消息应存在，且包含子 agent 输出
-    let has_notify = parent_model.transcript.messages.iter().any(|m| {
+    let has_notify = parent_model.model_context.messages.iter().any(|m| {
         m.message.content.iter().any(|c| {
             matches!(
                 c,
@@ -2260,7 +2654,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2269,7 +2663,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         });
@@ -2285,7 +2679,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2297,7 +2691,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         }),
@@ -2321,6 +2715,278 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
     assert!(
         !ops.scheduler.registry().has_active(&child_id),
         "recycle must release registry without leaving a stale active entry"
+    );
+}
+
+#[tokio::test]
+async fn parent_abort_classifies_child_by_state_before_claim() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let parent_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+    ops.child_sessions.shutdown_completion_watcher().await;
+    let child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "completed-undrained".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(child.session_id.as_str());
+
+    ops.submit_turn(
+        SubmitTurnRequest::for_child(
+            parent_id.as_str(),
+            child.session_id,
+            "complete before parent abort",
+        )
+        .wait_for_result(false)
+        .notify_parent_on_complete(Some("cascade completion".into())),
+    )
+    .await
+    .unwrap();
+    release.notify_one();
+
+    for _ in 0..100 {
+        if completed_completion_guard_count_for_test(&ops.child_sessions, &parent_id) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        completed_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        1,
+        "the paused watcher must leave one completed guard for the abort race"
+    );
+    assert!(
+        ops.scheduler.registry().active_is_finished(&child_id),
+        "the completed guard should still own an undrained finished execution"
+    );
+
+    assert!(
+        !ops.scheduler.abort(&parent_id).await.unwrap(),
+        "draining an already-completed descendant is not a cancellation"
+    );
+    assert_eq!(
+        registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        0
+    );
+    let parent_model = store.session_read_model(&parent_id).await.unwrap();
+    assert_eq!(parent_model.agent_sessions.len(), 1);
+    assert_eq!(
+        parent_model.agent_sessions[0].status,
+        AgentSessionStatus::Completed
+    );
+    let parent_events = store.replay_events(&parent_id).await.unwrap();
+    assert!(parent_events.iter().any(|event| matches!(
+        &event.payload,
+        DurableEventPayload::AgentSessionCompleted {
+            child_session_id,
+            ..
+        } if child_session_id == &child_id
+    )));
+    assert!(!parent_events.iter().any(|event| matches!(
+        &event.payload,
+        DurableEventPayload::AgentSessionFailed {
+            child_session_id,
+            ..
+        } if child_session_id == &child_id
+    )));
+
+    let mut notification = None;
+    let mut observed_parent_events = Vec::new();
+    for _ in 0..100 {
+        observed_parent_events = store.replay_events(&parent_id).await.unwrap();
+        notification = observed_parent_events.iter().find_map(|event| {
+            let DurableEventPayload::UserMessage { text, .. } = &event.payload else {
+                return None;
+            };
+            text.contains("<background-agent-notification>")
+                .then(|| text.clone())
+        });
+        if notification.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release.notify_one();
+    let notification = notification.unwrap_or_else(|| {
+        panic!(
+            "deferred completion notification should be accepted; parent events: \
+             {observed_parent_events:?}"
+        )
+    });
+    assert!(notification.contains("<status>completed</status>"));
+    assert!(notification.contains("<summary>cascade completion</summary>"));
+
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&parent_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !ops.scheduler.registry().has_active(&parent_id),
+        "the deferred parent notification turn should settle after release"
+    );
+
+    let cancelled_parent_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            cancelled_parent_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    let cancelled_child = ops
+        .create_session(
+            cancelled_parent_id.as_str(),
+            CreateSessionRequest {
+                name: "shutdown-before-claim".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cancelled_child_id = SessionId::from(cancelled_child.session_id.as_str());
+    ops.submit_turn(
+        SubmitTurnRequest::for_child(
+            cancelled_parent_id.as_str(),
+            cancelled_child.session_id,
+            "complete after cascade shutdown",
+        )
+        .wait_for_result(false),
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        if ops.scheduler.registry().has_active(&cancelled_child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ops.scheduler.registry().has_active(&cancelled_child_id));
+
+    let (claim_reached, release_claim) =
+        pause_next_completion_guard_claim_for_test(&ops.child_sessions);
+    let abort_scheduler = Arc::clone(&ops.scheduler);
+    let abort_parent_id = cancelled_parent_id.clone();
+    let abort = tokio::spawn(async move { abort_scheduler.abort(&abort_parent_id).await });
+    tokio::time::timeout(Duration::from_secs(2), claim_reached)
+        .await
+        .expect("cascade should pause after requesting child shutdown")
+        .unwrap();
+
+    release.notify_one();
+    for _ in 0..100 {
+        if completed_completion_guard_count_for_test(&ops.child_sessions, &cancelled_parent_id) == 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        completed_completion_guard_count_for_test(&ops.child_sessions, &cancelled_parent_id),
+        1,
+        "child should complete after cascade shutdown but before its guard is claimed"
+    );
+    let _ = release_claim.send(());
+    assert!(
+        abort.await.unwrap().unwrap(),
+        "a child first observed running must count as cancelled"
+    );
+
+    let cancelled_parent_events = store.replay_events(&cancelled_parent_id).await.unwrap();
+    assert!(cancelled_parent_events.iter().any(|event| matches!(
+        &event.payload,
+        DurableEventPayload::AgentSessionFailed {
+            child_session_id,
+            ..
+        } if child_session_id == &cancelled_child_id
+    )));
+}
+
+#[tokio::test]
+async fn parent_abort_reports_cancel_when_watcher_claims_shutdown_child() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let parent_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+    let child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "watcher-claim".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(child.session_id.as_str());
+    ops.submit_turn(
+        SubmitTurnRequest::for_child(parent_id.as_str(), child.session_id, "finish while paused")
+            .wait_for_result(false),
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        if ops.scheduler.registry().has_active(&child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ops.scheduler.registry().has_active(&child_id));
+
+    let (claim_reached, release_claim) =
+        pause_next_completion_guard_claim_for_test(&ops.child_sessions);
+    let abort_scheduler = Arc::clone(&ops.scheduler);
+    let abort_parent_id = parent_id.clone();
+    let abort = tokio::spawn(async move { abort_scheduler.abort(&abort_parent_id).await });
+    tokio::time::timeout(Duration::from_secs(2), claim_reached)
+        .await
+        .expect("cascade should pause after requesting child shutdown")
+        .unwrap();
+    release.notify_one();
+    for _ in 0..100 {
+        if registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        0,
+        "the normal completion watcher should claim the guard before cascade resumes"
+    );
+
+    let _ = release_claim.send(());
+    assert!(
+        abort.await.unwrap().unwrap(),
+        "cascade must report a cancellation even after another owner claims the guard"
     );
 }
 
@@ -2377,7 +3043,10 @@ async fn parent_abort_stops_sync_child_and_recycles() {
         "sync child turn should be active in registry"
     );
 
-    ops.scheduler.abort(&parent_id).await.unwrap();
+    assert!(
+        ops.scheduler.abort(&parent_id).await.unwrap(),
+        "cancelling an idle parent must report its active descendant"
+    );
     release.notify_one();
 
     let sync_result = sync_turn.await.expect("sync turn task panicked");
@@ -2403,7 +3072,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionFailed {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2415,7 +3084,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         }),

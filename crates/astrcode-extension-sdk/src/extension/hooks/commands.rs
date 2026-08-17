@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::StatusItemUpdatePayload;
+pub use crate::wire::manifest::{CommandAvailability, CommandExecution, SessionCommandKind};
 
 /// 扩展注册的斜杠命令。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,16 +13,38 @@ pub struct SlashCommand {
     /// 人类可读的命令描述。
     pub description: String,
     /// 参数的 JSON Schema 定义。
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub args_schema: Option<serde_json::Value>,
     /// 是否要求当前 session 空闲。
-    #[serde(default)]
     pub requires_idle: bool,
     /// 是否提供参数补全。
-    #[serde(default)]
     pub argument_completions: bool,
-    /// 同来源命令冲突时的优先级，数值越高优先级越高。
-    #[serde(default)]
+    /// 同名命令冲突时的优先级，数值越高优先级越高。
     pub priority: i32,
+    /// 命令是否只应出现在具备交互 UI 的传输中。
+    pub availability: CommandAvailability,
+    /// 命令执行的责任边界。
+    pub execution: CommandExecution,
+}
+
+/// Typed request produced by a command extension for the host to execute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionCommandIntent {
+    CompactSession {
+        #[serde(deserialize_with = "deserialize_required_option")]
+        keep_recent_turns: Option<usize>,
+    },
+    SelectModel,
+}
+
+impl SessionCommandIntent {
+    pub const fn kind(&self) -> SessionCommandKind {
+        match self {
+            Self::CompactSession { .. } => SessionCommandKind::CompactSession,
+            Self::SelectModel => SessionCommandKind::SelectModel,
+        }
+    }
 }
 
 /// 斜杠命令参数补全项。
@@ -57,6 +80,8 @@ pub enum ExtensionCommandResult {
     Handled { message: String },
     /// 启动一个 agent turn，携带附加指令合并到用户消息中。
     StartTurn { instructions: String },
+    /// 请求宿主在当前 session operation 内执行一个特权命令。
+    HostCommand { intent: SessionCommandIntent },
 }
 
 impl ExtensionCommandResult {
@@ -91,4 +116,16 @@ impl ExtensionCommandResult {
             instructions: instructions.into(),
         }
     }
+
+    pub const fn host_command(intent: SessionCommandIntent) -> Self {
+        Self::HostCommand { intent }
+    }
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }

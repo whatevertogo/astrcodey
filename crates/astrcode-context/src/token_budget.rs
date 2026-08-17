@@ -2,6 +2,8 @@
 //!
 //! 提供基于文本长度的粗略 token 估算，并据此判断上下文是否达到压缩阈值。
 
+use std::borrow::Borrow;
+
 pub use astrcode_core::llm::token_estimate::{
     estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
 };
@@ -28,8 +30,8 @@ pub struct PromptTokenSnapshot {
 /// 构建 compact gate 使用的 token 快照。
 ///
 /// `limits` 必须来自当前请求使用的模型，不能由 context manager 缓存。
-pub fn build_prompt_snapshot(
-    messages: &[LlmMessage],
+pub fn build_prompt_snapshot<M: Borrow<LlmMessage>>(
+    messages: &[M],
     system_prompt: Option<&str>,
     limits: ModelLimits,
     threshold_percent: f32,
@@ -43,14 +45,18 @@ pub fn build_prompt_snapshot(
     }
 }
 
-pub(crate) fn estimate_request_tokens_with_prompt(
-    messages: &[LlmMessage],
+pub(crate) fn estimate_request_tokens_with_prompt<M: Borrow<LlmMessage>>(
+    messages: &[M],
     system_prompt: Option<&str>,
 ) -> usize {
     let system_messages = system_prompt
         .map(system_messages_from_prompt)
         .unwrap_or_default();
-    estimate_provider_message_tokens(system_messages.iter().chain(messages))
+    estimate_provider_message_tokens(
+        system_messages
+            .iter()
+            .chain(messages.iter().map(|message| message.borrow())),
+    )
 }
 
 /// 根据模型输入窗口和百分比阈值计算 compact 触发 token。
@@ -62,6 +68,12 @@ pub fn compact_threshold_tokens(effective_window: usize, threshold_percent: f32)
     };
     ((effective_window as f64) * f64::from(threshold_percent) / 100.0).floor() as usize
 }
+
+/// 本地估算达到 compact 阈值的这一比例后,才调 provider count_tokens 精确判定。
+///
+/// 低于该水位时本地锚点估算足够安全:估算偏差只会推迟 auto compaction,
+/// 由 reactive compaction(ContextWindowExceeded 恢复)兜底。
+pub const PROVIDER_COUNT_GATE_RATIO: f64 = 0.9;
 
 /// 判断当前请求是否已经达到 compact 阈值。
 pub fn should_compact(snapshot: PromptTokenSnapshot) -> bool {
@@ -95,7 +107,10 @@ pub fn request_max_output_tokens(
 }
 
 /// 估算下一轮 token 增长（EMA + 最近一轮取最大值，下限为 baseline）。
-pub fn estimate_turn_growth(messages: &[LlmMessage], baseline: usize) -> usize {
+pub fn estimate_turn_growth<'a>(
+    messages: impl IntoIterator<Item = &'a LlmMessage>,
+    baseline: usize,
+) -> usize {
     let turns = turn_token_totals(messages);
     if turns.is_empty() {
         return baseline;
@@ -138,17 +153,7 @@ pub fn truncate_text_to_tokens(content: &str, max_tokens: usize, marker: &str) -
     truncated
 }
 
-/// 按字符数裁剪文本，并追加调用方指定的截断标记。
-pub fn truncate_chars(content: &str, max_chars: usize, marker: &str) -> String {
-    if content.chars().count() <= max_chars {
-        return content.to_string();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push_str(marker);
-    truncated
-}
-
-fn turn_token_totals(messages: &[LlmMessage]) -> Vec<usize> {
+fn turn_token_totals<'a>(messages: impl IntoIterator<Item = &'a LlmMessage>) -> Vec<usize> {
     let mut turns = Vec::new();
     let mut current = 0usize;
 

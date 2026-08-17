@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use astrcode_core::llm::{LlmEvent, LlmTokenUsage, LlmTokenUsageSource};
 use tokio::sync::mpsc;
 
-use crate::common::{send_event, stream_text_delta, token_usage_has_value};
+use crate::common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix};
 
 /// 流式响应的 `Done` 事件守卫，保证至多发送一次 `Done`。
 #[derive(Debug, Default)]
@@ -48,6 +48,7 @@ impl StreamEventSink {
 pub(crate) struct AnthropicStreamState {
     pub(crate) sink: StreamEventSink,
     usage_reported: bool,
+    usage: Option<LlmTokenUsage>,
     /// SSE content block index → actual tool call id。
     index_to_call_id: HashMap<u64, String>,
     block_stream_state: HashMap<u64, BlockStreamState>,
@@ -119,6 +120,12 @@ fn handle_anthropic_event(
     state: &mut AnthropicStreamState,
 ) -> bool {
     match event_type {
+        "message_start" => {
+            if let Some(usage) = event.pointer("/message/usage") {
+                merge_anthropic_token_usage(&mut state.usage, usage);
+            }
+            true
+        },
         "content_block_start" => {
             if let Some(block) = event.get("content_block") {
                 match block.get("type").and_then(|v| v.as_str()) {
@@ -282,22 +289,20 @@ fn handle_anthropic_event(
             true
         },
         "message_delta" => {
-            if !state.usage_reported {
-                if let Some(usage) = extract_anthropic_token_usage(event) {
-                    if !send_event(tx, LlmEvent::Usage { usage }) {
-                        return false;
-                    }
-                    state.usage_reported = true;
-                }
+            if let Some(usage) = event.get("usage") {
+                merge_anthropic_token_usage(&mut state.usage, usage);
             }
             if let Some(stop_reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
             {
+                if !emit_anthropic_token_usage(tx, state) {
+                    return false;
+                }
                 state.sink.emit_done(tx, stop_reason)
             } else {
                 true
             }
         },
-        "message_stop" => state.sink.ensure_done(tx),
+        "message_stop" => emit_anthropic_token_usage(tx, state) && state.sink.ensure_done(tx),
         "error" => {
             let message = event
                 .pointer("/error/message")
@@ -313,8 +318,7 @@ fn handle_anthropic_event(
     }
 }
 
-fn extract_anthropic_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
-    let usage = event.get("usage")?;
+fn merge_anthropic_token_usage(accumulated: &mut Option<LlmTokenUsage>, usage: &serde_json::Value) {
     let token_usage = LlmTokenUsage {
         input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
         cached_input_tokens: usage
@@ -323,12 +327,48 @@ fn extract_anthropic_token_usage(event: &serde_json::Value) -> Option<LlmTokenUs
         cache_creation_input_tokens: usage
             .get("cache_creation_input_tokens")
             .and_then(|v| v.as_u64()),
+        input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Components),
         output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
         reasoning_output_tokens: None,
         total_tokens: None,
         source: Some(LlmTokenUsageSource::ProviderUsage),
     };
-    token_usage_has_value(&token_usage).then_some(token_usage)
+    if !token_usage_has_value(&token_usage) {
+        return;
+    }
+
+    let accumulated = accumulated.get_or_insert_with(LlmTokenUsage::default);
+    if token_usage.input_tokens.is_some() {
+        accumulated.input_tokens = token_usage.input_tokens;
+    }
+    if token_usage.cached_input_tokens.is_some() {
+        accumulated.cached_input_tokens = token_usage.cached_input_tokens;
+    }
+    if token_usage.cache_creation_input_tokens.is_some() {
+        accumulated.cache_creation_input_tokens = token_usage.cache_creation_input_tokens;
+    }
+    if token_usage.output_tokens.is_some() {
+        accumulated.output_tokens = token_usage.output_tokens;
+    }
+    accumulated.input_accounting = token_usage.input_accounting;
+    accumulated.source = token_usage.source;
+}
+
+fn emit_anthropic_token_usage(
+    tx: &mpsc::UnboundedSender<LlmEvent>,
+    state: &mut AnthropicStreamState,
+) -> bool {
+    if state.usage_reported {
+        return true;
+    }
+    let Some(usage) = state.usage.clone() else {
+        return true;
+    };
+    if !send_event(tx, LlmEvent::Usage { usage }) {
+        return false;
+    }
+    state.usage_reported = true;
+    true
 }
 
 /// 处理单行 SSE 输出。返回 `false` 表示接收端已关闭。
@@ -374,7 +414,7 @@ pub(crate) fn process_sse_line(
                  {error}",
                 current_event_type,
                 data.len(),
-                &data[..data.floor_char_boundary(80)]
+                utf8_prefix(data, 80)
             );
         },
     }
@@ -473,22 +513,39 @@ mod tests {
     }
 
     #[test]
-    fn message_delta_usage_emits_token_usage_before_done() {
+    fn message_usage_merges_start_input_with_final_delta_output_before_done() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut state = AnthropicStreamState::default();
-        let event = serde_json::json!({
-            "usage": {
+        let start = serde_json::json!({
+            "message": {"usage": {
                 "input_tokens": 100,
                 "cache_read_input_tokens": 40,
                 "cache_creation_input_tokens": 7,
-                "output_tokens": 20
-            },
-            "delta": {"stop_reason": "end_turn"}
+                "output_tokens": 1
+            }}
         });
-
+        assert!(handle_anthropic_event(
+            "message_start",
+            &start,
+            &tx,
+            &mut state,
+        ));
         assert!(handle_anthropic_event(
             "message_delta",
-            &event,
+            &serde_json::json!({
+                "usage": {"output_tokens": 10},
+                "delta": {"stop_reason": null}
+            }),
+            &tx,
+            &mut state,
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(handle_anthropic_event(
+            "message_delta",
+            &serde_json::json!({
+                "usage": {"output_tokens": 20},
+                "delta": {"stop_reason": "end_turn"}
+            }),
             &tx,
             &mut state,
         ));
@@ -502,6 +559,8 @@ mod tests {
             ] if usage.input_tokens == Some(100)
                 && usage.cached_input_tokens == Some(40)
                 && usage.cache_creation_input_tokens == Some(7)
+                && usage.input_accounting
+                    == Some(astrcode_core::llm::LlmInputTokenAccounting::Components)
                 && usage.output_tokens == Some(20)
                 && usage.reasoning_output_tokens.is_none()
                 && usage.total_tokens.is_none()

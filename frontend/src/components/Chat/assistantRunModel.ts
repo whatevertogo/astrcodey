@@ -27,6 +27,7 @@ export type MessageListItem =
       type: 'assistantRun'
       id: string
       blocks: AssistantLikeBlock[]
+      actionBlocks: AssistantLikeBlock[] | null
       index: number
     }
   | {
@@ -108,8 +109,35 @@ function isAssistantLike(
   return block.kind === 'assistant' || block.kind === 'toolCall'
 }
 
+// One logical turn can contain hundreds of progress and tool blocks; keep each virtual row bounded.
+const ASSISTANT_RUN_CHUNK_BLOCK_LIMIT = 32
+
+function appendAssistantRunItems(
+  items: MessageListItem[],
+  blocks: AssistantLikeBlock[],
+  firstIndex: number,
+  actionBlocks: AssistantLikeBlock[] | null
+) {
+  for (
+    let offset = 0;
+    offset < blocks.length;
+    offset += ASSISTANT_RUN_CHUNK_BLOCK_LIMIT
+  ) {
+    const chunk = blocks.slice(offset, offset + ASSISTANT_RUN_CHUNK_BLOCK_LIMIT)
+    const isLastChunk = offset + chunk.length === blocks.length
+    items.push({
+      type: 'assistantRun',
+      id: `assistant-run:${chunk[0].id}`,
+      blocks: chunk,
+      actionBlocks: isLastChunk ? actionBlocks : null,
+      index: firstIndex + offset,
+    })
+  }
+}
+
 export function buildMessageListItems(
-  blocks: ConversationBlock[]
+  blocks: ConversationBlock[],
+  assistantRunBreaks: ReadonlySet<string> = new Set()
 ): MessageListItem[] {
   const items: MessageListItem[] = []
   let index = 0
@@ -123,12 +151,20 @@ export function buildMessageListItems(
         runBlocks.push(blocks[index] as AssistantLikeBlock)
         index += 1
       }
-      items.push({
-        type: 'assistantRun',
-        id: `assistant-run:${runBlocks[0].id}`,
-        blocks: runBlocks,
-        index: firstIndex,
-      })
+      let segmentStart = 0
+      for (let offset = 1; offset <= runBlocks.length; offset += 1) {
+        const atRunEnd = offset === runBlocks.length
+        if (!atRunEnd && !assistantRunBreaks.has(runBlocks[offset].id)) {
+          continue
+        }
+        appendAssistantRunItems(
+          items,
+          runBlocks.slice(segmentStart, offset),
+          firstIndex + segmentStart,
+          atRunEnd ? runBlocks : null
+        )
+        segmentStart = offset
+      }
       continue
     }
 
@@ -266,7 +302,7 @@ export function toolActivityFor(block: ToolBlock): ToolActivity {
     }
   }
 
-  if (block.name === 'shell' || block.name === 'terminal') {
+  if (block.name === 'shell') {
     return {
       kind: 'command',
       title: '运行命令',

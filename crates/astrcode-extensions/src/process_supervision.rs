@@ -123,6 +123,10 @@ impl SupervisedChild {
         }
     }
 
+    pub(crate) async fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.inner.wait().await
+    }
+
     /// Terminates the complete child process tree and waits for the direct child to be reaped.
     pub(crate) async fn terminate(&mut self, grace: Duration) -> io::Result<ExitStatus> {
         #[cfg(unix)]

@@ -7,7 +7,7 @@ use astrcode_core::event::Event;
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
-use crate::wire::{CommandSourceDto, MessageRoleDto};
+use crate::wire::MessageRoleDto;
 
 /// 服务器推送给客户端的通知枚举。
 ///
@@ -36,7 +36,6 @@ pub enum ClientNotification {
         #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<Vec<String>>,
         /// 超时时间（秒），超时后服务器可自动处理。
-        #[serde(default)]
         timeout_secs: u64,
     },
 
@@ -47,10 +46,8 @@ pub enum ClientNotification {
     ExtensionCommandList {
         commands: Vec<ExtensionCommandInfoDto>,
         /// 插件注册的快捷键绑定。
-        #[serde(default)]
         keybindings: Vec<KeybindingDto>,
         /// 插件注册的状态栏项（含初始值）。
-        #[serde(default)]
         status_items: Vec<StatusItemInfoDto>,
     },
 
@@ -70,7 +67,7 @@ pub enum ClientNotification {
     },
 
     /// 需要跨会话传播的扩展事件。
-    GlobalExtensionEvent {
+    GlobalCustomEvent {
         session_id: String,
         extension_id: String,
         event_type: String,
@@ -99,7 +96,6 @@ pub struct SessionListItemDto {
     pub working_dir: String,
     pub parent_session_id: Option<String>,
     /// 会话标题（首条用户消息摘要或工作目录名）。
-    #[serde(default)]
     pub title: Option<String>,
 }
 
@@ -112,7 +108,6 @@ pub struct SessionSnapshot {
     pub messages: Vec<MessageDto>,
     pub model_id: String,
     pub working_dir: String,
-    #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkDto>,
 }
 
@@ -121,8 +116,7 @@ pub struct SessionSnapshot {
 pub struct MessageDto {
     pub role: MessageRoleDto,
     pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_compact_summary: Option<bool>,
+    pub is_compact_summary: bool,
 }
 
 /// 插件注册的斜杠命令信息。
@@ -130,12 +124,12 @@ pub struct MessageDto {
 pub struct ExtensionCommandInfoDto {
     /// 命令名称（不含前导斜杠 `/`）。
     pub name: String,
+    pub extension_id: String,
     pub description: String,
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    pub source: CommandSourceDto,
 }
 
 /// 插件注册的快捷键绑定。
@@ -148,7 +142,6 @@ pub struct KeybindingDto {
     /// 触发的命令名（不含 `/`）。
     pub command: String,
     /// 命令参数。
-    #[serde(default)]
     pub arguments: String,
     /// 人类可读描述。
     pub description: String,
@@ -162,7 +155,6 @@ pub struct StatusItemInfoDto {
     /// 初始显示文本。
     pub text: String,
     /// 排序优先级（越小越靠左）。
-    #[serde(default)]
     pub priority: i32,
 }
 

@@ -2,6 +2,8 @@
 //!
 //! 厂商 wire DTO 和流累积器都封装在 `wire::openai` 内部，本模块只暴露标准 provider。
 
+use std::sync::Arc;
+
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
@@ -78,7 +80,7 @@ impl StandardProvider {
 
     fn build_request_body(
         &self,
-        messages: &[LlmMessage],
+        messages: &[Arc<LlmMessage>],
         tools: &[ToolDefinition],
         max_output_tokens: Option<usize>,
     ) -> serde_json::Value {
@@ -87,7 +89,7 @@ impl StandardProvider {
 
     fn build_responses_count_body(
         &self,
-        messages: &[LlmMessage],
+        messages: &[Arc<LlmMessage>],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
         openai_wire::build_input_token_count_body(self.wire_config(None), messages, tools)
@@ -98,15 +100,6 @@ impl StandardProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for StandardProvider {
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        self.generate_request(LlmRequest::new(messages, tools))
-            .await
-    }
-
     async fn generate_request(
         &self,
         request: LlmRequest,
@@ -149,7 +142,7 @@ impl LlmProvider for StandardProvider {
 
     async fn count_input_tokens(
         &self,
-        messages: Vec<LlmMessage>,
+        messages: Vec<Arc<LlmMessage>>,
         mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         if self.api_mode != OpenAiApiMode::Responses {
@@ -198,7 +191,7 @@ mod tests {
     use astrcode_core::{
         config::OpenAiApiMode,
         llm::thinking::ThinkingConfig,
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin},
     };
 
     use super::*;
@@ -237,8 +230,7 @@ mod tests {
                 "required": ["path"]
             }),
             strict: false,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Parallel,
+            origin: ToolOrigin::Bundled,
         }
     }
 
@@ -251,7 +243,10 @@ mod tests {
             None,
         );
         let body = p.build_request_body(
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &[sample_tool()],
             Some(123),
         );
@@ -272,7 +267,7 @@ mod tests {
             ThinkingConfig::default(),
             None,
         );
-        let body = p.build_request_body(&[LlmMessage::user("hi")], &[], None);
+        let body = p.build_request_body(&[Arc::new(LlmMessage::user("hi"))], &[], None);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -295,7 +290,10 @@ mod tests {
             }),
         );
         let body = p.build_responses_count_body(
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &[sample_tool()],
         );
 
@@ -321,7 +319,10 @@ mod tests {
             None,
         );
         let body = p.build_request_body(
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &[],
             None,
         );
@@ -342,7 +343,10 @@ mod tests {
         invalid.parameters = serde_json::json!({"type": "string"});
 
         let result = provider
-            .generate(vec![LlmMessage::user("hi")], vec![invalid])
+            .generate_request(LlmRequest::new(
+                vec![Arc::new(LlmMessage::user("hi"))],
+                vec![invalid],
+            ))
             .await;
 
         assert!(matches!(
@@ -361,12 +365,19 @@ mod tests {
             None,
         );
         let t = vec![sample_tool()];
-        let a = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("a")], &t, None);
+        let a = p.build_request_body(
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("a")),
+            ],
+            &t,
+            None,
+        );
         let b = p.build_request_body(
             &[
-                LlmMessage::system("s"),
-                LlmMessage::user("b"),
-                LlmMessage::assistant("hist"),
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("b")),
+                Arc::new(LlmMessage::assistant("hist")),
             ],
             &t,
             None,
@@ -382,7 +393,10 @@ mod tests {
             ThinkingConfig::default(),
             None,
         );
-        let messages = [LlmMessage::system("s"), LlmMessage::user("hi")];
+        let messages = [
+            Arc::new(LlmMessage::system("s")),
+            Arc::new(LlmMessage::user("hi")),
+        ];
         let mut other = sample_tool();
         other.name = "other".into();
 
@@ -411,7 +425,10 @@ mod tests {
             }),
         );
         let body = p.build_request_body(
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &[],
             None,
         );

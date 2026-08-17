@@ -4,7 +4,6 @@
 
 pub mod compaction;
 pub(crate) mod deferred_tools;
-pub(crate) mod early_tool_scheduler;
 pub(crate) mod llm_stream;
 pub mod payload;
 mod perf_snapshot;
@@ -12,7 +11,6 @@ pub(crate) mod permission;
 pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;
 mod session;
-mod session_compaction;
 mod session_error;
 mod session_event_sink;
 mod session_extension_ports;
@@ -23,7 +21,6 @@ mod session_runtime;
 mod session_runtime_services;
 pub(crate) mod session_setup;
 mod session_state;
-pub(crate) mod session_tools;
 mod session_turn;
 pub(crate) mod steer;
 #[cfg(test)]
@@ -42,8 +39,7 @@ pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
 pub use payload::{
-    agent_session_completed_payload, agent_session_failed_payload,
-    system_prompt_configured_payload, transcript_rewritten_payload,
+    agent_session_completed_payload, agent_session_failed_payload, system_prompt_configured_payload,
 };
 pub use session::{Session, SessionCreateParams, emit_lifecycle_for_read_model};
 pub use session_error::SessionError;

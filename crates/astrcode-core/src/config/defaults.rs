@@ -2,7 +2,7 @@
 //!
 //! 集中定义配置常量和 serde 默认值函数，便于统一管理和修改。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TEST_HOME_ENV: &str = "ASTRCODE_TEST_HOME";
 const USER_HOME_ENV: &str = "ASTRCODE_HOME_DIR";
@@ -20,6 +20,11 @@ pub fn user_home_dir() -> PathBuf {
 /// 返回 AstrCode 的进程级数据目录，默认是 `~/.astrcode`。
 pub fn astrcode_dir() -> PathBuf {
     user_home_dir().join(".astrcode")
+}
+
+/// 返回扩展在指定存储基目录下的数据目录：`<base>/extension_data/<extension_id>`。
+pub fn extension_data_dir(base: &Path, extension_id: &str) -> PathBuf {
+    base.join("extension_data").join(extension_id)
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -85,8 +90,6 @@ pub(crate) const DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE: usize = 5_000;
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: usize = 2;
 /// 单轮中允许同时执行的并行工具调用数上限。
 pub(crate) const DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS: usize = 5;
-/// Shell 工具默认超时时间（秒）。足以覆盖多数构建/安装命令。
-pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
 // ── Serde 默认值函数 ──────────────────────────────────────────────────
 
@@ -120,7 +123,8 @@ mod tests {
     fn application_directories_follow_test_home() {
         let _guard = env_lock().lock().unwrap();
         let previous = std::env::var_os(TEST_HOME_ENV);
-        std::env::set_var(TEST_HOME_ENV, "/tmp/astrcode-config-defaults");
+        // SAFETY: tests accessing this variable serialize through `env_lock`.
+        unsafe { std::env::set_var(TEST_HOME_ENV, "/tmp/astrcode-config-defaults") };
 
         assert_eq!(
             user_home_dir(),
@@ -132,8 +136,10 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var(TEST_HOME_ENV, value),
-            None => std::env::remove_var(TEST_HOME_ENV),
+            // SAFETY: tests accessing this variable serialize through `env_lock`.
+            Some(value) => unsafe { std::env::set_var(TEST_HOME_ENV, value) },
+            // SAFETY: tests accessing this variable serialize through `env_lock`.
+            None => unsafe { std::env::remove_var(TEST_HOME_ENV) },
         }
     }
 

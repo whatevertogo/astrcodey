@@ -192,22 +192,33 @@ fn detect_posix_shell() -> ShellInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
 
     #[test]
     fn test_resolve_shell_override() {
-        env::set_var("ASTRCODE_SHELL", "bash");
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: every test in this process that reads or writes this variable holds `env_lock`.
+        unsafe { env::set_var("ASTRCODE_SHELL", "bash") };
         let shell = resolve_shell();
         assert_eq!(shell.family, ShellFamily::Posix);
         assert_eq!(shell.name, "bash");
-        env::remove_var("ASTRCODE_SHELL");
+        // SAFETY: every test in this process that reads or writes this variable holds `env_lock`.
+        unsafe { env::remove_var("ASTRCODE_SHELL") };
     }
 
     #[test]
     fn test_resolve_shell_default() {
+        let _guard = env_lock().lock().unwrap();
         let shell = resolve_shell();
         // 应始终返回有效的 Shell 信息
         assert!(!shell.name.is_empty());
         assert!(!shell.path.is_empty());
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }

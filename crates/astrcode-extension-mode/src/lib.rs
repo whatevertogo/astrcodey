@@ -20,19 +20,22 @@ mod prompts;
 mod store;
 mod tools;
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-        StatusItemUpdatePayload, ToolHandler,
+        CommandContext, CommandHandler, CompactContributions, CompactRetainedContext, Extension,
+        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionManifest, PreCompactContext, PreCompactHandler, PreCompactResult,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
+        PreparedProviderEffect, ProviderContext, ProviderContributionHandler,
+        ProviderContributionId, ProviderSettlementContext, Registrar, SlashCommand,
+        StatusItemUpdatePayload, ToolContext, ToolHandler, ToolPlanContext,
     },
     llm::LlmMessage,
     permission::ApprovalMode,
-    state,
-    tool::{ToolResult, tool_metadata},
+    tool::{HostResource, ToolPlan, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata},
 };
 use serde_json::json;
 
@@ -43,13 +46,6 @@ use crate::{
         switch_mode_tool_definition, upsert_plan_tool_definition,
     },
 };
-
-fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<PathBuf, ExtensionError> {
-    session_store_dir
-        .as_deref()
-        .map(|base| state::session_data_dir(base, "astrcode-mode"))
-        .ok_or_else(|| ExtensionError::Internal("session store not available".into()))
-}
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(ModeExtension {
@@ -63,45 +59,41 @@ struct ModeExtension {
 
 #[async_trait::async_trait]
 impl Extension for ModeExtension {
-    fn id(&self) -> &str {
-        "astrcode-mode"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::ProviderRequest,
-            ExtensionCapability::ToolIntercept,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-mode")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::SessionHistory)
+            .capability(ExtensionCapability::ToolIntercept)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
         let catalog = self.catalog.clone();
+        let tool_prompt = mode_tool_prompt();
         reg.tool(
-            switch_mode_tool_definition(),
+            ExtensionToolDefinition::from_definition(switch_mode_tool_definition())
+                .with_prompt(tool_prompt.clone()),
             Arc::new(ModeToolHandler {
                 catalog: Arc::clone(&catalog),
             }),
         );
         reg.tool(
-            upsert_plan_tool_definition(),
+            ExtensionToolDefinition::from_definition(upsert_plan_tool_definition())
+                .with_prompt(tool_prompt),
             Arc::new(ModeToolHandler {
                 catalog: Arc::clone(&catalog),
             }),
         );
-        reg.tool_metadata(mode_tool_metadata());
         reg.on_pre_tool_use(
-            HookMode::Blocking,
             100,
             Arc::new(ModePreToolUseHandler {
                 catalog: Arc::clone(&catalog),
             }),
         );
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
-            50,
-            Arc::new(ModeProviderHandler),
-        );
+        reg.on_provider_contribution(50, Arc::new(ModeProviderHandler));
+        reg.on_pre_compact(100, Arc::new(ModePreCompactHandler));
         // 注册快捷键：Shift+Tab 切换模式
         reg.keybinding(astrcode_extension_sdk::extension::Keybinding {
             key: "shift+tab".into(),
@@ -125,6 +117,8 @@ impl Extension for ModeExtension {
                 requires_idle: false,
                 argument_completions: false,
                 priority: 0,
+                availability: astrcode_extension_sdk::extension::CommandAvailability::AllTransports,
+                execution: astrcode_extension_sdk::extension::CommandExecution::Extension,
             },
             Arc::new(ModeSlashCommandHandler {
                 catalog: Arc::clone(&catalog),
@@ -139,41 +133,33 @@ struct ModeToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for ModeToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let base = require_session_base(&ctx.capabilities.paths.store_dir)?;
-        let mode_root = store::mode_dir_from_base(&base);
-        let plan_dir = store::plan_dir_from_base(&base);
+        let extension_data_dir = ctx.paths().require_session_data_dir()?;
+        let mode_root = store::mode_dir_from_base(extension_data_dir);
+        let plan_dir = store::plan_dir_from_base(extension_data_dir);
+        let tool_name = ctx.tool_name();
 
-        match tool_name {
+        let result = match tool_name {
             SWITCH_MODE_TOOL_NAME => {
-                Ok(
-                    match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let meta = tool_metadata([("error", json!(&error))]);
-                            ToolResult::text(error, true, meta)
-                        },
-                    }
-                    .into(),
-                )
+                handle_switch_mode(ctx.arguments()?, &mode_root, &plan_dir, &self.catalog)
             },
-            UPSERT_PLAN_TOOL_NAME => {
-                Ok(match handle_upsert_plan(arguments, &mode_root, &plan_dir) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let meta = tool_metadata([("error", json!(&error))]);
-                        ToolResult::text(error, true, meta)
-                    },
-                }
-                .into())
+            UPSERT_PLAN_TOOL_NAME => handle_upsert_plan(ctx.arguments()?, &mode_root, &plan_dir),
+            _ => return Err(ExtensionError::NotFound(tool_name.into())),
+        };
+
+        match result {
+            Ok(result) => Ok(result.into()),
+            Err(error) => {
+                let metadata = tool_metadata([("error", json!(&error))]);
+                Ok(ToolResult::text(error, true, metadata).into())
             },
-            _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
     }
 }
@@ -185,23 +171,24 @@ struct ModePreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        if ctx.approval_mode == ApprovalMode::Yolo {
+        if ctx.approval_mode() == ApprovalMode::Yolo {
             return Ok(PreToolUseResult::Allow);
         }
 
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(&base);
+        let base = ctx.paths().require_session_data_dir()?;
+        let mode_root = store::mode_dir_from_base(base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
             return Ok(PreToolUseResult::Allow);
         };
 
-        if spec.restricted_tools.contains(&ctx.tool_name) {
+        if spec.restricted_tools.contains(ctx.tool_name()) {
             return Ok(PreToolUseResult::Block {
                 reason: format!(
                     "Tool '{}' is not available in {} mode",
-                    ctx.tool_name, spec.name
+                    ctx.tool_name(),
+                    spec.name
                 ),
             });
         }
@@ -212,6 +199,25 @@ impl PreToolUseHandler for ModePreToolUseHandler {
 
 struct ModeProviderHandler;
 
+struct ModePreCompactHandler;
+
+#[async_trait::async_trait]
+impl PreCompactHandler for ModePreCompactHandler {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
+        let plan_dir = store::plan_dir_from_base(ctx.paths().require_session_data_dir()?);
+        let Some(plan) = store::load_plan(&plan_dir).map_err(ExtensionError::Internal)? else {
+            return Ok(PreCompactResult::Allow);
+        };
+        Ok(PreCompactResult::Contributions(CompactContributions {
+            instructions: Vec::new(),
+            retained_context: vec![CompactRetainedContext::Note {
+                title: "Session Plan".into(),
+                body: plan,
+            }],
+        }))
+    }
+}
+
 /// /mode 斜杠命令处理器：切换或设置当前模式。
 struct ModeSlashCommandHandler {
     catalog: Arc<ModeCatalog>,
@@ -219,18 +225,12 @@ struct ModeSlashCommandHandler {
 
 #[async_trait::async_trait]
 impl CommandHandler for ModeSlashCommandHandler {
-    async fn execute(
-        &self,
-        _command_name: &str,
-        arguments: &str,
-        _working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(&base);
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
+        let extension_data_dir = ctx.paths().require_session_data_dir()?;
+        let mode_root = store::mode_dir_from_base(extension_data_dir);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
-        let target_mode = match arguments.trim() {
+        let target_mode = match ctx.argument().trim() {
             "" => {
                 // 切换：code → plan, plan → code
                 if state.current_mode == "plan" {
@@ -279,36 +279,33 @@ impl CommandHandler for ModeSlashCommandHandler {
 }
 
 #[async_trait::async_trait]
-impl ProviderHandler for ModeProviderHandler {
-    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(&base);
-        let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
+impl ProviderContributionHandler for ModeProviderHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
+        let base = ctx.paths().require_session_data_dir()?;
+        let mode_root = store::mode_dir_from_base(base);
+        let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
-        if let Some(context) = state.pending_transition_context.take() {
-            store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
-            return Ok(ProviderResult::AppendMessages {
-                messages: vec![LlmMessage::user(context)],
-            });
+        if let Some(pending) = state.pending_transition {
+            return Ok(Some(PreparedProviderContribution::new(
+                ProviderContributionId::new(pending.id),
+                PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(pending.context)]),
+            )));
         }
 
-        Ok(ProviderResult::Allow)
+        Ok(None)
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let base = ctx.paths().require_session_data_dir()?;
+        let mode_root = store::mode_dir_from_base(base);
+        store::acknowledge_mode_transition(&mode_root, ctx.contribution_id().as_str())
+            .map_err(ExtensionError::Internal)
     }
 }
 
-fn mode_tool_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    use astrcode_extension_sdk::tool::ToolPromptMetadata;
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        SWITCH_MODE_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(String::new())
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map.insert(
-        UPSERT_PLAN_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(String::new())
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map
+fn mode_tool_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::Planning)
 }

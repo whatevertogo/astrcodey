@@ -5,25 +5,31 @@
 //! `SKILL.md` content only when a matching task appears.
 
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::extension::internal::command_discovery_context;
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
     extension::{
-        CommandContext, CommandDiscoveryHandler, CommandHandler, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolHandler,
+        CommandContext, CommandDiscovery, CommandDiscoveryContext, CommandDiscoveryHandler,
+        CommandHandler, DiscoveredCommand, Extension, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, ExtensionManifest, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
     frontmatter, hostpaths,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
+    },
 };
 use noyalib::compat::serde_yaml as yaml;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const SKILL_TOOL_NAME: &str = "Skill";
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -40,23 +46,23 @@ struct SkillExtension;
 
 #[async_trait::async_trait]
 impl Extension for SkillExtension {
-    fn id(&self) -> &str {
-        "astrcode-skill"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::WorkspaceRead]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-skill")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::WorkspaceRead)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
         let shared = Arc::new(SkillShared::new());
         reg.tool(
-            skill_tool_definition(),
+            ExtensionToolDefinition::from_definition(skill_tool_definition())
+                .with_prompt(skill_tool_prompt()),
             Arc::new(SkillToolHandler {
                 shared: shared.clone(),
             }),
         );
-        reg.tool_metadata(skill_tool_metadata());
         reg.command_discovery(Arc::new(SkillCommandDiscovery {
             shared: shared.clone(),
         }));
@@ -90,21 +96,31 @@ struct SkillToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for SkillToolHandler {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let home = hostpaths::user_home_dir();
+        let roots = skill_roots(ctx.working_dir(), Some(&home));
+        Ok(ToolPlan::new(
+            roots
+                .into_iter()
+                .map(|root| ResourceAccess::search_file(root.dir, true)),
+        ))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != SKILL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
+        let session_id = ctx.session_id();
 
         Ok(handle_skill_tool(
-            arguments,
-            working_dir,
-            ctx.scope.session_id.as_str(),
+            ctx.arguments()?,
+            &working_dir,
+            session_id.as_str(),
             &self.shared,
         )
         .into())
@@ -118,12 +134,13 @@ struct SkillPromptBuildHandler {
 #[async_trait::async_trait]
 impl PromptBuildHandler for SkillPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let has_skill_tool = ctx.tools.iter().any(|t| t.name == SKILL_TOOL_NAME);
+        let has_skill_tool = ctx.tools().iter().any(|t| t.name == SKILL_TOOL_NAME);
         if !has_skill_tool {
             return Ok(PromptContributions::default());
         }
 
-        let skills = self.shared.get_or_discover(&ctx.working_dir);
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let skills = self.shared.get_or_discover(&working_dir);
         Ok(PromptContributions {
             skills: vec![format_skills_for_model(&skills)],
             ..Default::default()
@@ -139,13 +156,12 @@ struct SkillCommandDiscovery {
 impl CommandDiscoveryHandler for SkillCommandDiscovery {
     async fn discover(
         &self,
-        working_dir: &str,
-    ) -> Vec<(
-        astrcode_extension_sdk::extension::SlashCommand,
-        Arc<dyn CommandHandler>,
-    )> {
-        self.shared
-            .get_or_discover(working_dir)
+        ctx: CommandDiscoveryContext,
+    ) -> Result<CommandDiscovery, ExtensionError> {
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let commands = self
+            .shared
+            .get_or_discover(&working_dir)
             .into_iter()
             .map(|skill| {
                 let description =
@@ -157,8 +173,11 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
                     requires_idle: false,
                     argument_completions: false,
                     priority: 0,
+                    availability:
+                        astrcode_extension_sdk::extension::CommandAvailability::AllTransports,
+                    execution: astrcode_extension_sdk::extension::CommandExecution::Extension,
                 };
-                (
+                DiscoveredCommand::new(
                     cmd,
                     Arc::new(SkillCommandHandler {
                         skill_id: skill.id,
@@ -166,7 +185,8 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
                     }) as Arc<dyn CommandHandler>,
                 )
             })
-            .collect()
+            .collect();
+        Ok(CommandDiscovery::new(commands))
     }
 }
 
@@ -177,14 +197,10 @@ struct SkillCommandHandler {
 
 #[async_trait::async_trait]
 impl CommandHandler for SkillCommandHandler {
-    async fn execute(
-        &self,
-        _command_name: &str,
-        arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let skills = self.shared.get_or_discover(working_dir);
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let session_id = ctx.session_id();
+        let skills = self.shared.get_or_discover(&working_dir);
         let Some(skill) = skills
             .iter()
             .find(|skill| skill.matches_requested_name(&self.skill_id))
@@ -194,27 +210,21 @@ impl CommandHandler for SkillCommandHandler {
 
         Ok(ExtensionCommandResult::start_turn(render_skill_content(
             skill,
-            Some(arguments),
-            &ctx.session_id,
+            Some(ctx.argument()),
+            session_id.as_str(),
         )))
     }
 }
 
-fn skill_tool_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        SKILL_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
-            .caveat("Users may also refer to skills as slash commands, e.g. `/commit`.")
-            .caveat(
-                "If the skill was not found, pick from the listed [Skills] names — do not retry \
-                 with a guessed name.",
-            )
-            .example("Task matches `/commit` in [Skills] → Skill(\"commit\"), not ad-hoc prose.")
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Discovery),
-    );
-    map
+fn skill_tool_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new())
+        .caveat("Users may also refer to skills as slash commands, e.g. `/commit`.")
+        .caveat(
+            "If the skill was not found, pick from the listed [Skills] names — do not retry with \
+             a guessed name.",
+        )
+        .example("Task matches `/commit` in [Skills] → Skill(\"commit\"), not ad-hoc prose.")
+        .prompt_tag(ToolPromptTag::Discovery)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,31 +323,15 @@ fn skill_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
     }
 }
 
 fn handle_skill_tool(
-    arguments: Value,
+    args: SkillToolArgs,
     working_dir: &str,
     session_id: &str,
     shared: &SkillShared,
 ) -> ToolResult {
-    let args = match serde_json::from_value::<SkillToolArgs>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let msg = format!("invalid Skill input: {error}");
-            return ToolResult {
-                // content 必须非空,LLM 只读 content,不读 error 字段。
-                content: msg.clone(),
-                is_error: true,
-                error: Some(msg),
-                metadata: BTreeMap::new(),
-                duration_ms: None,
-            };
-        },
-    };
-
     let skills = shared.get_or_discover(working_dir);
     let Some(skill) = skills
         .iter()
@@ -502,10 +496,7 @@ fn trimmed_nonempty(value: Option<String>) -> Option<String> {
 }
 
 fn normalize_skill_content(content: &str) -> String {
-    content
-        .trim_start_matches('\u{feff}')
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
+    astrcode_extension_sdk::frontmatter::normalize_markdown(content)
 }
 
 fn extract_description_from_markdown(markdown: &str) -> Option<String> {
@@ -662,9 +653,8 @@ fn truncate_for_index(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use astrcode_extension_sdk::{
-        config::ModelSelection,
-        extension::CommandContext,
-        tool::{ExtensionToolContext, ToolCapabilities, ToolExecutionContext},
+        extension::ExtensionCall,
+        testing::{CommandContextBuilder, HookContextBuilder, ToolContextBuilder},
     };
 
     use super::*;
@@ -771,40 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_tool_renders_content_with_paths_assets_and_session() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        fs::create_dir_all(&workspace).expect("workspace");
-        let skill_dir = write_skill(
-            &workspace.join(".claude").join("skills"),
-            "review",
-            "---\ndescription: Review code.\n---\nRead ${SKILL_DIR} for ${SESSION_ID}.",
-        );
-        fs::create_dir_all(skill_dir.join("references")).expect("asset dir");
-        fs::write(skill_dir.join("references").join("rules.md"), "rules").expect("asset");
-
-        let shared = SkillShared::new();
-        let result = handle_skill_tool(
-            json!({ "skill": "/review", "args": "src/lib.rs" }),
-            &workspace.to_string_lossy(),
-            "session-123",
-            &shared,
-        );
-
-        assert!(!result.is_error);
-        assert!(result.content.contains("<skill-name>review</skill-name>"));
-        assert!(
-            result
-                .content
-                .contains("<skill-args>src/lib.rs</skill-args>")
-        );
-        assert!(result.content.contains("Skill: review"));
-        assert!(result.content.contains("Invocation arguments: src/lib.rs"));
-        assert!(result.content.contains("session-123"));
-        assert!(result.content.contains("- references/rules.md"));
-    }
-
-    #[test]
     fn skill_variable_substitution_accepts_neutral_and_claude_aliases() {
         let output = substitute_skill_variables(
             "${SKILL_DIR} ${SESSION_ID} ${CLAUDE_SKILL_DIR} ${CLAUDE_SESSION_ID}",
@@ -813,62 +769,6 @@ mod tests {
         );
 
         assert_eq!(output, "/tmp/skill session-1 /tmp/skill session-1");
-    }
-
-    #[test]
-    fn formats_index_with_blocking_instruction() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let skill_dir = write_skill(
-            temp.path(),
-            "commit",
-            &sample_md("Commit changes.", "Commit guide"),
-        );
-        let skill = load_skill_dir(skill_dir, SkillSource::UserAstrcode).expect("skill");
-
-        let index = format_skills_for_model(&[skill]);
-
-        assert!(index.contains("calling the Skill tool"));
-        assert!(index.contains("/commit"));
-        assert!(index.contains("- commit: Commit changes."));
-    }
-
-
-    fn tool_ctx(working_dir: &Path) -> ExtensionToolContext {
-        ExtensionToolContext::new(
-            ToolExecutionContext::new(
-                "session".into(),
-                working_dir.to_string_lossy().into_owned(),
-                None,
-                None,
-                ToolCapabilities::default(),
-            ),
-            None,
-        )
-    }
-
-    #[tokio::test]
-    async fn prompt_build_contributes_skill_index_when_tool_is_available() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        fs::create_dir_all(&workspace).expect("workspace");
-        write_skill(
-            &workspace.join(".astrcode").join("skills"),
-            "commit",
-            &sample_md("Commit changes.", "Commit guide"),
-        );
-
-        let handler = SkillPromptBuildHandler {
-            shared: Arc::new(SkillShared::new()),
-        };
-        let ctx = PromptBuildContext {
-            session_id: "test".into(),
-            working_dir: workspace.to_string_lossy().into_owned(),
-            model: astrcode_extension_sdk::config::ModelSelection::simple("mock"),
-            tools: vec![skill_tool_definition()],
-        };
-        let contributions = handler.handle(ctx).await.expect("prompt build");
-
-        assert!(contributions.skills[0].contains("- commit: Commit changes."));
     }
 
     #[tokio::test]
@@ -885,46 +785,20 @@ mod tests {
         let discovery = SkillCommandDiscovery {
             shared: Arc::new(SkillShared::new()),
         };
-        let commands = discovery.discover(&workspace.to_string_lossy()).await;
-
-        assert!(commands.iter().any(|(cmd, _)| {
-            cmd.name == "reviewnow" && cmd.description == "Review current code."
-        }));
-    }
-
-    #[tokio::test]
-    async fn skill_slash_command_starts_turn_with_rendered_instructions() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        fs::create_dir_all(&workspace).expect("workspace");
-        write_skill(
-            &workspace.join(".astrcode").join("skills"),
-            "commit",
-            &sample_md("Commit changes.", "Use ${SKILL_DIR} for ${SESSION_ID}."),
-        );
-
-        let handler = SkillCommandHandler {
-            skill_id: "commit".into(),
-            shared: Arc::new(SkillShared::new()),
-        };
-        let ctx = CommandContext {
-            session_id: "session".into(),
-            working_dir: workspace.to_string_lossy().into_owned(),
-            model: ModelSelection::simple("mock"),
-            session_store_dir: None,
-        };
-        let result = handler
-            .execute("commit", "staged files", &workspace.to_string_lossy(), &ctx)
+        let call = ToolContextBuilder::new("astrcode-skill", "fixture")
+            .workspace(&workspace)
+            .build()
+            .call()
+            .clone();
+        let commands = discovery
+            .discover(command_discovery_context(call, &workspace, 1))
             .await
-            .expect("skill command");
+            .unwrap();
 
-        let astrcode_extension_sdk::extension::ExtensionCommandResult::StartTurn { instructions } =
-            result
-        else {
-            panic!("skill command should start a turn");
-        };
-        assert!(instructions.contains("<skill-name>commit</skill-name>"));
-        assert!(instructions.contains("<skill-args>staged files</skill-args>"));
+        assert!(commands.commands().iter().any(|command| {
+            command.command().name == "reviewnow"
+                && command.command().description == "Review current code."
+        }));
     }
 
     #[tokio::test]
@@ -932,26 +806,70 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
-        write_skill(
+        let skill_dir = write_skill(
             &workspace.join(".astrcode").join("skills"),
             "commit",
-            &sample_md("Commit changes.", "Commit guide"),
+            &sample_md(
+                "Commit changes.",
+                "Use ${SKILL_DIR} for ${SESSION_ID} and inspect references.",
+            ),
         );
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(skill_dir.join("references/rules.md"), "rules").unwrap();
 
         let handler = SkillToolHandler {
             shared: Arc::new(SkillShared::new()),
         };
-        let result = handler
-            .execute(
-                SKILL_TOOL_NAME,
-                json!({ "skill": "commit" }),
-                &workspace.to_string_lossy(),
-                &tool_ctx(&workspace),
-            )
-            .await
-            .expect("skill tool");
+        let ctx = ToolContextBuilder::new("astrcode-skill", SKILL_TOOL_NAME)
+            .session("session", &workspace, None)
+            .arguments(json!({ "skill": "/commit", "args": "staged files" }))
+            .build();
+        let result = handler.execute(ctx).await.expect("skill tool");
 
         assert!(!result.is_error);
         assert!(result.content.contains("Skill: commit"));
+        assert!(
+            result
+                .content
+                .contains("<skill-args>staged files</skill-args>")
+        );
+        assert!(result.content.contains("session"));
+        assert!(result.content.contains("- references/rules.md"));
+
+        let skills = discover_skills_with_home(&workspace, None);
+        let index = format_skills_for_model(&skills);
+        assert!(index.contains("calling the Skill tool"));
+        assert!(index.contains("/commit"));
+        assert!(index.contains("- commit: Commit changes."));
+
+        let prompt = SkillPromptBuildHandler {
+            shared: Arc::new(SkillShared::new()),
+        }
+        .handle(
+            HookContextBuilder::new("astrcode-skill")
+                .session("session", &workspace, None)
+                .build_prompt(vec![skill_tool_definition()]),
+        )
+        .await
+        .unwrap();
+        assert!(prompt.skills[0].contains("- commit: Commit changes."));
+
+        let command = SkillCommandHandler {
+            skill_id: "commit".into(),
+            shared: Arc::new(SkillShared::new()),
+        }
+        .execute(
+            CommandContextBuilder::new("astrcode-skill", "commit")
+                .session("session", &workspace, None)
+                .argument("staged files")
+                .build(),
+        )
+        .await
+        .unwrap();
+        let ExtensionCommandResult::StartTurn { instructions } = command else {
+            panic!("skill command should start a turn");
+        };
+        assert!(instructions.contains("<skill-name>commit</skill-name>"));
+        assert!(instructions.contains("<skill-args>staged files</skill-args>"));
     }
 }

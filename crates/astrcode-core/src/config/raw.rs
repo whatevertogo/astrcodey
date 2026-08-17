@@ -47,7 +47,7 @@ pub struct Config {
     /// 扩展专有配置。key 为扩展 id（如 `"astrcode.mcp"`），value 为任意 JSON。
     ///
     /// 通过此字段，用户可在配置文件中统一管理各扩展的参数，无需扩展各自从额外文件读取。
-    /// 扩展在 `start(ctx)` 时通过 `ctx.config.deserialize::<T>()` 获取。
+    /// 扩展在 `start(ctx)` 时通过 `ctx.config().deserialize::<T>()` 获取。
     ///
     /// 例：
     /// ```json
@@ -237,8 +237,6 @@ pub struct RuntimeSection {
     pub agent_max_depth: Option<usize>,
     /// 单轮中允许同时执行的并行工具调用数上限。
     pub agent_tool_max_parallel_calls: Option<usize>,
-    /// Shell 工具默认超时时间（秒）。
-    pub shell_timeout_secs: Option<u64>,
     /// 是否允许在解析 API key 时执行 `!command`。
     pub allow_api_key_shell_command: Option<bool>,
     /// 工具审批模式：`manual`（默认）或 `yolo`。

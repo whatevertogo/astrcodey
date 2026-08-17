@@ -5,22 +5,35 @@ use std::sync::Arc;
 use super::{
     commands::{CommandCompletions, ExtensionCommandResult, SlashCommand},
     contexts::{
-        CommandContext, CompactContext, ContinueAfterStopContext, LifecycleContext,
-        PostToolUseContext, PreToolUseContext, PromptBuildContext, ProviderContext,
-        UserMessageEnvelopeContext,
+        CommandCompletionContext, CommandContext, CommandDiscoveryContext,
+        ContinueAfterStopContext, LifecycleContext, PostCompactContext, PostToolUseContext,
+        PreCompactContext, PreToolUseContext, PromptBuildContext, ProviderContext,
+        ProviderSettlementContext, ToolDiscoveryContext, UserMessageEnvelopeContext,
     },
     results::{
-        CompactResult, ContinueAfterStopResult, HookResult, PostToolUseResult, PreToolUseResult,
-        ProviderResult, UserMessageEnvelopeResult,
+        ContinueAfterStopResult, HookResult, PostToolUseResult, PreCompactResult, PreToolUseResult,
+        PreparedProviderContribution, ProviderResult, ToolInputTransformResult,
+        UserMessageEnvelopeResult,
     },
     types::ExtensionError,
 };
 use crate::{
-    extension::ExtensionToolContext,
-    tool::{ToolDefinition, ToolExecutionResult, ToolPromptMetadata},
+    extension::{ToolContext, ToolPlanContext},
+    tool::{
+        ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolPlan, ToolPromptMetadata,
+    },
 };
 
-/// PreToolUse 钩子处理器。
+/// 工具参数变换处理器。
+#[async_trait::async_trait]
+pub trait ToolInputTransformHandler: Send + Sync {
+    async fn transform(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<ToolInputTransformResult, ExtensionError>;
+}
+
+/// PreToolUse 准入处理器。
 #[async_trait::async_trait]
 pub trait PreToolUseHandler: Send + Sync {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError>;
@@ -38,6 +51,18 @@ pub trait ProviderHandler: Send + Sync {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError>;
 }
 
+/// Stateful request-local contribution with an explicit prepare/acknowledge lifecycle.
+#[async_trait::async_trait]
+pub trait ProviderContributionHandler: Send + Sync {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError>;
+
+    /// Acknowledge one exact pending contribution after its provider cycle is durably committed.
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError>;
+}
+
 /// PromptBuild 钩子处理器。
 #[async_trait::async_trait]
 pub trait PromptBuildHandler: Send + Sync {
@@ -47,10 +72,16 @@ pub trait PromptBuildHandler: Send + Sync {
     ) -> Result<super::types::PromptContributions, ExtensionError>;
 }
 
-/// Compact 钩子处理器。
+/// Collects instructions and extension-owned context before compacting.
 #[async_trait::async_trait]
-pub trait CompactHandler: Send + Sync {
-    async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError>;
+pub trait PreCompactHandler: Send + Sync {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError>;
+}
+
+/// Receives a notification after the transcript rewrite is durably committed.
+#[async_trait::async_trait]
+pub trait PostCompactHandler: Send + Sync {
+    async fn handle(&self, ctx: PostCompactContext) -> Result<(), ExtensionError>;
 }
 
 /// 通用生命周期钩子处理器。
@@ -80,54 +111,183 @@ pub trait UserMessageEnvelopeHandler: Send + Sync {
 /// 工具执行处理器。
 #[async_trait::async_trait]
 pub trait ToolHandler: Send + Sync {
-    async fn execute(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &ExtensionToolContext,
-    ) -> Result<ToolExecutionResult, ExtensionError>;
+    /// Interpret the final tool arguments into the resources required by execution.
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError>;
+
+    async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError>;
 }
 
 /// 命令执行处理器。
 #[async_trait::async_trait]
 pub trait CommandHandler: Send + Sync {
-    async fn execute(
-        &self,
-        command_name: &str,
-        args: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError>;
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError>;
 
     async fn complete(
         &self,
-        _command_name: &str,
-        _argument: &str,
-        _cursor: usize,
-        _working_dir: &str,
-        _ctx: &CommandContext,
+        _ctx: CommandCompletionContext,
     ) -> Result<CommandCompletions, ExtensionError> {
         Ok(CommandCompletions::default())
+    }
+
+    /// Whether this handler implements argument completion.
+    ///
+    /// The registrar uses this to reject declarations that advertise completion while retaining
+    /// the default no-op implementation above.
+    fn supports_argument_completions(&self) -> bool {
+        false
     }
 }
 
 /// 动态工具发现处理器。
 #[async_trait::async_trait]
 pub trait ToolDiscoveryHandler: Send + Sync {
-    async fn discover(&self, working_dir: &str) -> Vec<DiscoveredTool>;
+    async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError>;
 }
 
 /// 动态命令发现处理器。
 #[async_trait::async_trait]
 pub trait CommandDiscoveryHandler: Send + Sync {
-    async fn discover(&self, working_dir: &str) -> Vec<(SlashCommand, Arc<dyn CommandHandler>)>;
+    async fn discover(
+        &self,
+        ctx: CommandDiscoveryContext,
+    ) -> Result<CommandDiscovery, ExtensionError>;
 }
 
 /// Tool contributed by dynamic discovery.
 #[derive(Clone)]
 pub struct DiscoveredTool {
-    pub definition: ToolDefinition,
-    pub handler: Arc<dyn ToolHandler>,
-    pub prompt_metadata: Option<ToolPromptMetadata>,
+    definition: ToolDefinition,
+    execution_policy: ToolExecutionPolicy,
+    handler: Arc<dyn ToolHandler>,
+    prompt_metadata: Option<ToolPromptMetadata>,
+}
+
+impl DiscoveredTool {
+    pub fn new(definition: ToolDefinition, handler: Arc<dyn ToolHandler>) -> Self {
+        Self {
+            definition,
+            execution_policy: ToolExecutionPolicy::default(),
+            handler,
+            prompt_metadata: None,
+        }
+    }
+
+    pub fn prompt_metadata(mut self, metadata: ToolPromptMetadata) -> Self {
+        self.prompt_metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_execution_policy(mut self, execution_policy: ToolExecutionPolicy) -> Self {
+        self.execution_policy = execution_policy;
+        self
+    }
+
+    pub fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    pub fn handler(&self) -> &Arc<dyn ToolHandler> {
+        &self.handler
+    }
+
+    pub fn execution_policy(&self) -> ToolExecutionPolicy {
+        self.execution_policy
+    }
+
+    pub fn prompt(&self) -> Option<&ToolPromptMetadata> {
+        self.prompt_metadata.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ToolDefinition,
+        ToolExecutionPolicy,
+        Arc<dyn ToolHandler>,
+        Option<ToolPromptMetadata>,
+    ) {
+        (
+            self.definition,
+            self.execution_policy,
+            self.handler,
+            self.prompt_metadata,
+        )
+    }
+}
+
+/// Complete result of one dynamic tool discovery pass.
+#[derive(Clone, Default)]
+pub struct ToolDiscovery {
+    tools: Vec<DiscoveredTool>,
+}
+
+impl ToolDiscovery {
+    pub fn new(tools: Vec<DiscoveredTool>) -> Self {
+        Self { tools }
+    }
+
+    pub fn tools(&self) -> &[DiscoveredTool] {
+        &self.tools
+    }
+
+    pub fn into_tools(self) -> Vec<DiscoveredTool> {
+        self.tools
+    }
+}
+
+impl From<Vec<DiscoveredTool>> for ToolDiscovery {
+    fn from(tools: Vec<DiscoveredTool>) -> Self {
+        Self::new(tools)
+    }
+}
+
+/// Command and handler contributed atomically by dynamic discovery.
+#[derive(Clone)]
+pub struct DiscoveredCommand {
+    command: SlashCommand,
+    handler: Arc<dyn CommandHandler>,
+}
+
+impl DiscoveredCommand {
+    pub fn new(command: SlashCommand, handler: Arc<dyn CommandHandler>) -> Self {
+        Self { command, handler }
+    }
+
+    pub fn command(&self) -> &SlashCommand {
+        &self.command
+    }
+
+    pub fn handler(&self) -> &Arc<dyn CommandHandler> {
+        &self.handler
+    }
+
+    pub fn into_parts(self) -> (SlashCommand, Arc<dyn CommandHandler>) {
+        (self.command, self.handler)
+    }
+}
+
+/// Complete result of one dynamic command discovery pass.
+#[derive(Clone, Default)]
+pub struct CommandDiscovery {
+    commands: Vec<DiscoveredCommand>,
+}
+
+impl CommandDiscovery {
+    pub fn new(commands: Vec<DiscoveredCommand>) -> Self {
+        Self { commands }
+    }
+
+    pub fn commands(&self) -> &[DiscoveredCommand] {
+        &self.commands
+    }
+
+    pub fn into_commands(self) -> Vec<DiscoveredCommand> {
+        self.commands
+    }
+}
+
+impl From<Vec<DiscoveredCommand>> for CommandDiscovery {
+    fn from(commands: Vec<DiscoveredCommand>) -> Self {
+        Self::new(commands)
+    }
 }

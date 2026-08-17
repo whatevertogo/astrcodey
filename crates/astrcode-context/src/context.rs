@@ -1,30 +1,27 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use astrcode_core::{
-    config::ContextSettings,
-    llm::{
-        LlmContent, LlmError, LlmMessage, LlmRole, provider_visible_messages,
-        token_estimate::{
-            estimate_provider_message_tokens, estimate_provider_request_tokens,
-            estimate_tool_definition_tokens,
-        },
-    },
-    tool::ToolDefinition,
+use astrcode_core::llm::{
+    LlmError, LlmMessage, SharedTranscriptMessage, TranscriptMessage, TranscriptMessageOrigin,
+    provider_transcript_messages, provider_transcript_shared_messages,
+    provider_visible_shared_messages, token_estimate::estimate_provider_message_tokens,
 };
 
 use crate::prompt_engine::system_messages_from_prompt;
 
-pub const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";
-pub const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
-
 /// 同一 durable revision 下的完整 provider context。
 ///
 /// Compact candidate 从该 snapshot 生成；提交时 `source_seq` 用于保留之后到达的 transcript tail。
+///
+/// `origins` 与 `messages` 等长平行存储,避免 transcript 元数据导致消息双份存放。
+///
+/// `messages` 经 `Arc` 与读模型共享,构造后不可变;请求组装只 clone `Arc` 指针,
+/// 不复制消息体。
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
     pub source_seq: u64,
     pub system_prompt: String,
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
+    origins: Vec<Option<TranscriptMessageOrigin>>,
     input_token_anchor: Option<InputTokenAnchor>,
 }
 
@@ -37,14 +34,74 @@ struct InputTokenAnchor {
 
 impl ContextSnapshot {
     pub fn new(source_seq: u64, system_prompt: String, messages: Vec<LlmMessage>) -> Self {
-        let mut messages = provider_visible_messages(messages);
-        messages.retain(|message| message.role != LlmRole::System);
+        Self::from_transcript(
+            source_seq,
+            system_prompt,
+            messages.into_iter().map(TranscriptMessage::plain).collect(),
+        )
+    }
+
+    pub fn from_transcript(
+        source_seq: u64,
+        system_prompt: String,
+        messages: Vec<TranscriptMessage>,
+    ) -> Self {
+        let (messages, origins) = provider_transcript_messages(messages)
+            .into_iter()
+            .map(|entry| (Arc::new(entry.message), entry.origin))
+            .unzip();
         Self {
             source_seq,
             system_prompt,
             messages,
+            origins,
             input_token_anchor: None,
         }
+    }
+
+    /// 从读模型的共享 transcript 构建;与 [`Self::from_transcript`] 走同一归一化,
+    /// 消息体经 `Arc` 零拷贝复用。
+    pub fn from_shared_transcript(
+        source_seq: u64,
+        system_prompt: String,
+        messages: Vec<SharedTranscriptMessage>,
+    ) -> Self {
+        let (messages, origins) = provider_transcript_shared_messages(messages)
+            .into_iter()
+            .map(|entry| (entry.message, entry.origin))
+            .unzip();
+        Self {
+            source_seq,
+            system_prompt,
+            messages,
+            origins,
+            input_token_anchor: None,
+        }
+    }
+
+    /// 返回 compact 原样保留的 provider transcript 尾部及其 durable 元数据。
+    pub fn retained_transcript_messages(
+        &self,
+        retained_messages: &[LlmMessage],
+    ) -> Option<Vec<TranscriptMessage>> {
+        let start = self.messages.len().checked_sub(retained_messages.len())?;
+        if self.messages[start..]
+            .iter()
+            .map(|message| message.as_ref())
+            .ne(retained_messages.iter())
+        {
+            return None;
+        }
+        Some(
+            self.messages[start..]
+                .iter()
+                .zip(&self.origins[start..])
+                .map(|(message, origin)| TranscriptMessage {
+                    message: (**message).clone(),
+                    origin: *origin,
+                })
+                .collect(),
+        )
     }
 
     /// 绑定 provider usage 覆盖的 transcript 前缀。
@@ -52,62 +109,115 @@ impl ContextSnapshot {
         mut self,
         context_tokens: usize,
         model_context_window: usize,
-        covered_messages: Vec<LlmMessage>,
+        covered_message_count: usize,
     ) -> Self {
-        let covered_message_count = provider_visible_messages(covered_messages)
-            .into_iter()
-            .filter(|message| message.role != LlmRole::System)
-            .count();
-        self.input_token_anchor = Some(InputTokenAnchor {
-            context_tokens,
-            model_context_window,
-            covered_message_count,
-        });
+        if covered_message_count <= self.messages.len() {
+            self.input_token_anchor = Some(InputTokenAnchor {
+                context_tokens,
+                model_context_window,
+                covered_message_count,
+            });
+        }
         self
     }
 
     /// 将可见 transcript 与当前 system prompt 组装为完整 provider 请求。
-    pub fn request_messages(&self, messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    pub fn request_messages(&self, messages: Vec<Arc<LlmMessage>>) -> Vec<Arc<LlmMessage>> {
         let mut request = Vec::with_capacity(messages.len().saturating_add(4));
-        request.extend(system_messages_from_prompt(&self.system_prompt));
+        request.extend(
+            system_messages_from_prompt(&self.system_prompt)
+                .into_iter()
+                .map(Arc::new),
+        );
         request.extend(messages);
-        provider_visible_messages(request)
+        provider_visible_shared_messages(request)
+    }
+
+    /// 估算由本 snapshot 直接组装的请求的输入 token,不物化请求 Vec。
+    ///
+    /// 与 [`Self::estimate_input_tokens`] 的锚点快路径等价:请求由 snapshot
+    /// 自身构建时前缀必然匹配,跳过了物化后的前缀验证。
+    ///
+    /// `tools_tokens` 由调用方按可见工具集 memo 后传入(由
+    /// `estimate_tool_definition_tokens` 预先计算)。
+    pub fn estimate_own_input_tokens(
+        &self,
+        tools_tokens: usize,
+        model_context_window: usize,
+    ) -> usize {
+        let full_estimate = || {
+            estimate_provider_message_tokens(
+                system_messages_from_prompt(&self.system_prompt)
+                    .iter()
+                    .chain(self.messages.iter().map(|message| message.as_ref())),
+            )
+            .saturating_add(tools_tokens)
+        };
+        let Some(anchor) = &self.input_token_anchor else {
+            return full_estimate();
+        };
+        if anchor.model_context_window != model_context_window {
+            return full_estimate();
+        }
+        let Some(trailing_messages) = self.messages.get(anchor.covered_message_count..) else {
+            return full_estimate();
+        };
+        anchor
+            .context_tokens
+            .saturating_add(estimate_provider_message_tokens(
+                trailing_messages.iter().map(|message| message.as_ref()),
+            ))
+            // 与 estimate_input_tokens 相同:再次计入工具是有意的保守上界。
+            .saturating_add(tools_tokens)
     }
 
     /// 估算最终 provider 请求输入。优先复用最近 provider usage，仅估算新增尾部。
     pub fn estimate_input_tokens(
         &self,
-        request_messages: &[LlmMessage],
-        tools: &[ToolDefinition],
+        request_messages: &[Arc<LlmMessage>],
+        tools_tokens: usize,
         model_context_window: usize,
     ) -> usize {
+        let full_estimate = || {
+            estimate_provider_message_tokens(
+                request_messages.iter().map(|message| message.as_ref()),
+            )
+            .saturating_add(tools_tokens)
+        };
         let Some(anchor) = &self.input_token_anchor else {
-            return estimate_provider_request_tokens(request_messages, tools);
+            return full_estimate();
         };
         if anchor.model_context_window != model_context_window {
-            return estimate_provider_request_tokens(request_messages, tools);
+            return full_estimate();
         }
         let system_messages = system_messages_from_prompt(&self.system_prompt);
         let Some(covered_messages) = self.messages.get(..anchor.covered_message_count) else {
-            return estimate_provider_request_tokens(request_messages, tools);
+            return full_estimate();
         };
         let prefix_len = system_messages.len().saturating_add(covered_messages.len());
         let Some(request_prefix) = request_messages.get(..prefix_len) else {
-            return estimate_provider_request_tokens(request_messages, tools);
+            return full_estimate();
         };
-        if !request_prefix[..system_messages.len()].eq(system_messages.as_slice())
-            || !request_prefix[system_messages.len()..].eq(covered_messages)
+        if !request_prefix[..system_messages.len()]
+            .iter()
+            .map(|message| message.as_ref())
+            .eq(system_messages.iter())
+            || !request_prefix[system_messages.len()..]
+                .iter()
+                .eq(covered_messages.iter())
         {
-            return estimate_provider_request_tokens(request_messages, tools);
+            return full_estimate();
         }
         let trailing_messages = &request_messages[prefix_len..];
 
         anchor
             .context_tokens
-            .saturating_add(estimate_provider_message_tokens(trailing_messages))
+            .saturating_add(estimate_provider_message_tokens(
+                trailing_messages.iter().map(|message| message.as_ref()),
+            ))
             // Provider usage 已包含上一请求的工具；再次计入当前工具是有意的保守上界，
             // 同时覆盖 turn 中 deferred tool 激活或工具目录热更新。
-            .saturating_add(estimate_tool_definition_tokens(tools))
+            .saturating_add(tools_tokens)
     }
 }
 
@@ -116,6 +226,27 @@ impl ContextSnapshot {
 pub struct CompactSummaryRenderOptions {
     pub transcript_path: Option<String>,
     pub custom_instructions: Vec<String>,
+}
+
+/// Extension-owned context retained alongside a compact summary.
+///
+/// The context crate intentionally treats both variants as opaque content. Extension-specific
+/// discovery and freshness rules are applied before values cross into this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactRetainedContext {
+    File { path: String, content: String },
+    Note { title: String, body: String },
+}
+
+impl CompactRetainedContext {
+    pub(crate) fn estimated_tokens(&self) -> usize {
+        let (label, content) = match self {
+            Self::File { path, content } => (path, content),
+            Self::Note { title, body } => (title, body),
+        };
+        crate::token_budget::estimate_text_tokens(label)
+            .saturating_add(crate::token_budget::estimate_text_tokens(content))
+    }
 }
 
 /// 压缩操作的结果。
@@ -178,32 +309,6 @@ impl From<LlmError> for CompactError {
     }
 }
 
-/// 判断消息是否是 compact 后注入的 synthetic context message。
-pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
-    message.role == LlmRole::User
-        && message
-            .content
-            .iter()
-            .filter_map(LlmContent::as_text)
-            .any(is_compact_summary_text)
-}
-
-/// 检测文本内容是否以 compact summary 标记开头。
-pub fn is_compact_summary_text(content: &str) -> bool {
-    content.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-}
-
-/// 判断消息是否是 compact/post-compact 注入的 synthetic context message。
-pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
-    is_compact_summary_message(message)
-        || (message.role == LlmRole::User
-            && message
-                .content
-                .iter()
-                .filter_map(LlmContent::as_text)
-                .any(|text| text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)))
-}
-
 /// 粗略识别 provider 返回的上下文过长错误。
 ///
 /// 这里故意排除 rate limit / quota 等错误，避免把限流误判为可 compact 重试。
@@ -224,67 +329,52 @@ pub fn is_prompt_too_long_message(message: &str) -> bool {
     positive && !negative
 }
 
-pub struct PostCompactEnrichInput<'a> {
-    pub session_id: &'a str,
-    pub source_messages: &'a [LlmMessage],
-    pub working_dir: &'a str,
-    pub system_prompt: Option<&'a str>,
-    pub tools: &'a [ToolDefinition],
-    pub settings: &'a ContextSettings,
-    pub session_store_dir: Option<PathBuf>,
-}
-
-#[async_trait::async_trait]
-pub trait PostCompactEnricher: Send + Sync {
-    async fn enrich(&self, compaction: &mut CompactResult, input: PostCompactEnrichInput<'_>);
-}
-
-pub struct NoopPostCompactEnricher;
-
-#[async_trait::async_trait]
-impl PostCompactEnricher for NoopPostCompactEnricher {
-    async fn enrich(&self, _compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {}
-}
-
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::{
+        llm::token_estimate::{estimate_provider_request_tokens, estimate_tool_definition_tokens},
+        tool::{ToolDefinition, ToolOrigin},
+    };
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn input_estimate_reuses_only_matching_provider_usage_prefix() {
+        let shared = |messages: Vec<LlmMessage>| messages.into_iter().map(Arc::new).collect();
+        let owned = |messages: &[Arc<LlmMessage>]| {
+            messages.iter().map(|m| (**m).clone()).collect::<Vec<_>>()
+        };
         let covered_messages = vec![LlmMessage::user("first"), LlmMessage::assistant("response")];
-        let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages.clone())
-            .with_input_token_anchor(655_859, 1_000_000, covered_messages);
-        let request_messages = snapshot.request_messages(vec![
+        let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages)
+            .with_input_token_anchor(655_859, 1_000_000, 2);
+        let request_messages = snapshot.request_messages(shared(vec![
             LlmMessage::user("first"),
             LlmMessage::assistant("response"),
             LlmMessage::user("tail"),
-        ]);
+        ]));
         let tools = vec![ToolDefinition {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
-            execution_mode: ExecutionMode::Sequential,
+            origin: ToolOrigin::Bundled,
         }];
+        let tools_tokens = estimate_tool_definition_tokens(&tools);
 
-        let anchored = snapshot.estimate_input_tokens(&request_messages, &tools, 1_000_000);
-        let local = estimate_provider_request_tokens(&request_messages, &tools);
+        let anchored = snapshot.estimate_input_tokens(&request_messages, tools_tokens, 1_000_000);
+        let local = estimate_provider_request_tokens(&owned(&request_messages), &tools);
         assert!(anchored > 655_859);
         assert!(anchored > local);
         assert_eq!(
-            snapshot.estimate_input_tokens(&request_messages, &tools, 200_000),
+            snapshot.estimate_input_tokens(&request_messages, tools_tokens, 200_000),
             local
         );
 
-        let changed_prefix = snapshot.request_messages(vec![LlmMessage::user("changed")]);
+        let changed_prefix = snapshot.request_messages(shared(vec![LlmMessage::user("changed")]));
         assert_eq!(
-            snapshot.estimate_input_tokens(&changed_prefix, &tools, 1_000_000),
-            estimate_provider_request_tokens(&changed_prefix, &tools)
+            snapshot.estimate_input_tokens(&changed_prefix, tools_tokens, 1_000_000),
+            estimate_provider_request_tokens(&owned(&changed_prefix), &tools)
         );
     }
 }

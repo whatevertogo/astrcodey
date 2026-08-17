@@ -102,60 +102,13 @@ export function applyCoalescedDeltas(
       toolCallIndex.set(block.id, index)
     }
   })
-  let nextBlockIndex = blocks.length
   let changed = false
-
-  const insertBlock = (block: ConversationBlock): number => {
-    const index = nextBlockIndex
-    nextBlockIndex += 1
-    mutations.set(index, block)
-    if (!blockIndex.has(block.id)) {
-      blockIndex.set(block.id, index)
-    }
-    if (block.kind === 'toolCall') {
-      toolCallIndex.set(block.id, index)
-    }
-    changed = true
-    return index
-  }
-
-  const findOrCreateIdx = (
-    blockId: string,
-    kind: 'assistant' | 'toolCall'
-  ): number => {
-    const existing = blockIndex.get(blockId)
-    if (existing !== undefined) return existing
-    const newBlock: ConversationBlock =
-      kind === 'assistant'
-        ? { kind: 'assistant', id: blockId, text: '', status: 'streaming' }
-        : {
-            kind: 'toolCall',
-            id: blockId,
-            name: '',
-            arguments: '',
-            text: '',
-            status: 'streaming',
-          }
-    return insertBlock(newBlock)
-  }
-
-  const findOrCreateToolCallIdx = (callId: string): number => {
-    const existing = toolCallIndex.get(callId)
-    if (existing !== undefined) return existing
-    return insertBlock({
-      kind: 'toolCall',
-      id: callId,
-      name: '',
-      arguments: '',
-      text: '',
-      status: 'streaming',
-    })
-  }
 
   for (const c of coalesced) {
     switch (c.kind) {
       case 'patchBlock': {
-        const idx = findOrCreateIdx(c.blockId, 'assistant')
+        const idx = blockIndex.get(c.blockId)
+        if (idx === undefined) break
         const block = mutations.get(idx) ?? blocks[idx]
         if (block.kind !== 'assistant' && block.kind !== 'toolCall') break
         mutations.set(idx, { ...block, text: (block.text ?? '') + c.textDelta })
@@ -163,7 +116,8 @@ export function applyCoalescedDeltas(
         break
       }
       case 'thinkingDelta': {
-        const idx = findOrCreateIdx(c.blockId, 'assistant')
+        const idx = blockIndex.get(c.blockId)
+        if (idx === undefined) break
         const block = mutations.get(idx) ?? blocks[idx]
         if (block.kind !== 'assistant') break
         mutations.set(idx, {
@@ -191,7 +145,8 @@ export function applyCoalescedDeltas(
         const output = c.parts
           .map((p) => (p.stream === 'stderr' ? '\n[stderr] ' : '\n') + p.delta)
           .join('')
-        const idx = findOrCreateToolCallIdx(c.callId)
+        const idx = toolCallIndex.get(c.callId)
+        if (idx === undefined) break
         const block = mutations.get(idx) ?? blocks[idx]
         if (block.kind !== 'toolCall') break
         const prefix =
@@ -211,11 +166,7 @@ export function applyCoalescedDeltas(
     for (const [idx, block] of [...mutations.entries()].sort(
       ([left], [right]) => left - right
     )) {
-      if (idx < blocks.length) {
-        newBlocks[idx] = block
-      } else {
-        newBlocks.push(block)
-      }
+      newBlocks[idx] = block
     }
   }
 

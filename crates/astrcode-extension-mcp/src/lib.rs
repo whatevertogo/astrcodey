@@ -14,14 +14,16 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
+    builder::manifest,
     extension::{
-        DiscoveredTool, Extension, ExtensionCapability, ExtensionCtx, ExtensionError,
-        ExtensionEvent, HookMode, HookResult, LifecycleContext, LifecycleHandler,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, StopReason,
-        ToolDiscoveryHandler, ToolHandler,
+        DiscoveredTool, Extension, ExtensionCapability, ExtensionError, ExtensionManifest,
+        ExtensionStartContext, ExtensionStopContext, HookMode, HookResult, LifecycleContext,
+        LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+        ToolDiscoveryHandler, ToolHandler, ToolPlanContext,
     },
     tool::{
-        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolExecutionResult, ToolOrigin,
+        ToolDefinition, ToolExecutionPolicy, ToolExecutionResult, ToolOrigin, ToolPlan,
         ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
@@ -63,21 +65,21 @@ struct McpExtension {
 
 #[async_trait::async_trait]
 impl Extension for McpExtension {
-    fn id(&self) -> &str {
-        EXTENSION_ID
+    fn manifest(&self) -> ExtensionManifest {
+        manifest(EXTENSION_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::WorkspaceRead)
+            .capability(ExtensionCapability::ProcessSpawn)
+            .capability(ExtensionCapability::NetworkClient)
+            .build()
     }
 
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::WorkspaceRead,
-            ExtensionCapability::ProcessSpawn,
-            ExtensionCapability::NetworkClient,
-        ]
-    }
-
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         let shared = Arc::clone(&self.shared);
-        let startup_working_dir = ctx.startup_working_dir().map(str::to_owned);
+        let startup_working_dir = ctx
+            .startup_working_dir()
+            .map(|path| path.to_string_lossy().into_owned());
         ctx.tasks().spawn("mcp-warm", async move {
             match startup_working_dir {
                 Some(working_dir) => shared.refresh_workspace(&working_dir).await,
@@ -87,7 +89,7 @@ impl Extension for McpExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.shared.pool.shutdown().await;
         self.shared.clear().await;
         Ok(())
@@ -105,14 +107,14 @@ impl Extension for McpExtension {
         let lifecycle_handler = Arc::new(McpWorkspaceLifecycleHandler {
             shared: Arc::clone(&self.shared),
         });
-        reg.on_event(
-            ExtensionEvent::SessionStart,
+        reg.on_lifecycle(
+            LifecycleEvent::SessionStart,
             HookMode::NonBlocking,
             0,
             lifecycle_handler.clone(),
         );
-        reg.on_event(
-            ExtensionEvent::SessionResume,
+        reg.on_lifecycle(
+            LifecycleEvent::SessionResume,
             HookMode::NonBlocking,
             0,
             lifecycle_handler,
@@ -120,7 +122,6 @@ impl Extension for McpExtension {
         reg.tool_discovery(Arc::new(McpToolDiscovery {
             shared: self.shared.clone(),
         }));
-        reg.tool_metadata(mcp_tool_metadata());
         reg.on_prompt_build(0, Arc::new(McpPromptBuildHandler));
     }
 }
@@ -132,7 +133,8 @@ struct McpWorkspaceLifecycleHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for McpWorkspaceLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        self.shared.refresh_workspace(&ctx.working_dir).await;
+        let working_dir = ctx.working_dir().to_string_lossy();
+        self.shared.refresh_workspace(&working_dir).await;
         Ok(HookResult::Allow)
     }
 }
@@ -276,9 +278,7 @@ impl McpShared {
     where
         F: FnOnce() -> McpConfig + Send,
     {
-        // TODO(optional): measure how often tool discovery reaches this load_config
-        // path. If it becomes a hot path, add an mtime cache for config files;
-        // the current disk-read cost is acceptable.
+        // 当前磁盘读取成本可接受；若 tool discovery 频繁触达此路径，再加 mtime 缓存。
         let config = load_config();
         if self.entry_is_current(working_dir, config.fingerprint) {
             self.mark_warm_complete(working_dir).await;
@@ -340,15 +340,17 @@ struct McpToolDiscovery {
 
 #[async_trait::async_trait]
 impl ToolDiscoveryHandler for McpToolDiscovery {
-    async fn discover(&self, working_dir: &str) -> Vec<DiscoveredTool> {
-        self.shared.await_initial_warm(working_dir).await;
+    async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
+        let working_dir = ctx.working_dir().to_string_lossy();
+        self.shared.await_initial_warm(&working_dir).await;
         // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
         // 已有缓存时会按配置 fingerprint 快速判断是否仍然有效。
-        self.shared.refresh_workspace(working_dir).await;
-        match self.shared.get_entry(working_dir) {
+        self.shared.refresh_workspace(&working_dir).await;
+        Ok(match self.shared.get_entry(&working_dir) {
             Some(entry) => self.build_discovered_tools(&entry),
             None => Vec::new(),
         }
+        .into())
     }
 }
 
@@ -362,17 +364,22 @@ impl McpToolDiscovery {
         let handler = Arc::new(McpToolHandler {
             shared: self.shared.clone(),
         });
-        let mut result = vec![DiscoveredTool {
-            definition: tool_search_tool_definition(),
-            handler: handler.clone() as Arc<dyn ToolHandler>,
-            prompt_metadata: Some(tool_search_metadata()),
-        }];
+        let mut result = vec![
+            DiscoveredTool::new(
+                tool_search_tool_definition(),
+                handler.clone() as Arc<dyn ToolHandler>,
+            )
+            .with_execution_policy(ToolExecutionPolicy::PARALLEL)
+            .prompt_metadata(tool_search_metadata()),
+        ];
         for candidate in &entry.candidates {
-            result.push(DiscoveredTool {
-                definition: candidate.definition.clone(),
-                handler: handler.clone() as Arc<dyn ToolHandler>,
-                prompt_metadata: Some(mcp_concrete_tool_metadata()),
-            });
+            result.push(
+                DiscoveredTool::new(
+                    candidate.definition.clone(),
+                    handler.clone() as Arc<dyn ToolHandler>,
+                )
+                .prompt_metadata(mcp_concrete_tool_metadata()),
+            );
         }
         result
     }
@@ -386,18 +393,22 @@ struct McpToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for McpToolHandler {
-    async fn execute(
-        &self,
-        tool_name: &str,
-        arguments: Value,
-        working_dir: &str,
-        _ctx: &ExtensionToolContext,
-    ) -> Result<ToolExecutionResult, ExtensionError> {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        // MCP tools can reach arbitrary resources declared by an external server. Until MCP
+        // descriptors expose a trustworthy resource contract, approval must remain conservative.
+        Ok(ToolPlan::opaque())
+    }
+
+    async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
         if tool_name == TOOL_SEARCH_TOOL_NAME {
-            return Ok(self.handle_tool_search(arguments, working_dir).await);
+            return Ok(self
+                .handle_tool_search(ctx.arguments()?, &working_dir)
+                .await);
         }
 
-        let entry = self.shared.get_entry(working_dir);
+        let entry = self.shared.get_entry(&working_dir);
         let Some(cached) = entry.as_ref().and_then(|e| e.tool_lookup.get(tool_name)) else {
             return Err(ExtensionError::NotFound(tool_name.into()));
         };
@@ -406,7 +417,7 @@ impl ToolHandler for McpToolHandler {
         match self
             .shared
             .pool
-            .call_tool(server, original_tool, arguments)
+            .call_tool(server, original_tool, ctx.raw_arguments().clone())
             .await
         {
             Ok(result) => Ok(call_result(&server.name, original_tool, result).into()),
@@ -423,24 +434,18 @@ impl ToolHandler for McpToolHandler {
 }
 
 impl McpToolHandler {
-    async fn handle_tool_search(&self, arguments: Value, working_dir: &str) -> ToolExecutionResult {
-        let args = match serde_json::from_value::<ToolSearchArgs>(arguments) {
-            Ok(args) if !args.query.trim().is_empty() => args,
-            Ok(_) => {
-                return error_result(
-                    "invalid tool_search_tool input: query must not be empty".into(),
-                    BTreeMap::new(),
-                )
-                .into();
-            },
-            Err(error) => {
-                return error_result(
-                    format!("invalid tool_search_tool input: {error}"),
-                    BTreeMap::new(),
-                )
-                .into();
-            },
-        };
+    async fn handle_tool_search(
+        &self,
+        args: ToolSearchArgs,
+        working_dir: &str,
+    ) -> ToolExecutionResult {
+        if args.query.trim().is_empty() {
+            return error_result(
+                "invalid tool_search_tool input: query must not be empty".into(),
+                BTreeMap::new(),
+            )
+            .into();
+        }
 
         let (candidates, diagnostics) = if let Some(entry) = self.shared.get_entry(working_dir) {
             (entry.candidates.clone(), entry.diagnostics.clone())
@@ -473,7 +478,10 @@ struct McpPromptBuildHandler;
 #[async_trait::async_trait]
 impl PromptBuildHandler for McpPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let has_tool_search = ctx.tools.iter().any(|t| t.name == TOOL_SEARCH_TOOL_NAME);
+        let has_tool_search = ctx
+            .tools()
+            .iter()
+            .any(|tool| tool.name == TOOL_SEARCH_TOOL_NAME);
         if has_tool_search {
             Ok(PromptContributions {
                 additional_instructions: vec![mcp_discovery_instructions().into()],
@@ -483,13 +491,6 @@ impl PromptBuildHandler for McpPromptBuildHandler {
             Ok(PromptContributions::default())
         }
     }
-}
-
-fn mcp_tool_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(TOOL_SEARCH_TOOL_NAME.to_string(), tool_search_metadata());
-    map
 }
 
 fn tool_search_metadata() -> ToolPromptMetadata {
@@ -618,7 +619,6 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
             .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
         strict: false,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
     })
 }
 
@@ -626,7 +626,7 @@ fn tool_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL_SEARCH_TOOL_NAME.into(),
         description: "Find an external MCP tool by name or keyword and return its input schema \
-                      (not execute it).\n\nWhen NOT to use:\n- Builtin tools suffice: \
+                      (not execute it).\n\nWhen NOT to use:\n- First-party coding tools suffice: \
                       `read`/`grep`/`glob`/`edit`/`patch`/`write`/`shell`\n- Guessing `mcp__...` \
                       argument names without a schema\n\nTips:\n- Task needs an external MCP \
                       capability\n- A visible `mcp__...` tool has unclear \
@@ -656,7 +656,6 @@ fn tool_search_tool_definition() -> ToolDefinition {
         }),
         strict: false,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
     }
 }
 
@@ -759,18 +758,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_tool_is_bundled_and_read_only_parallel() {
-        let def = tool_search_tool_definition();
+    fn discovery_tool_and_prompt_keep_the_two_step_mcp_contract() {
+        let definition = tool_search_tool_definition();
+        assert_eq!(definition.name, TOOL_SEARCH_TOOL_NAME);
+        assert_eq!(definition.origin, ToolOrigin::Bundled);
 
-        assert_eq!(def.name, TOOL_SEARCH_TOOL_NAME);
-        assert_eq!(def.origin, ToolOrigin::Bundled);
-        assert_eq!(def.execution_mode, ExecutionMode::Parallel);
-    }
-
-    #[test]
-    fn mcp_discovery_instruction_is_additional_instruction_content() {
         let instruction = mcp_discovery_instructions();
-
         assert!(instruction.starts_with("MCP discovery workflow:"));
         assert!(instruction.contains("`tool_search_tool`"));
         assert!(!instruction.contains("[Example Workflow]"));

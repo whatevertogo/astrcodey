@@ -426,7 +426,7 @@ fn indent_body(body: &str) -> String {
 mod tests {
     use std::path::Path;
 
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin, ToolPromptMetadata, ToolPromptTag};
+    use astrcode_core::tool::{ToolOrigin, ToolPromptMetadata, ToolPromptTag};
 
     use super::*;
 
@@ -437,7 +437,6 @@ mod tests {
             parameters: Default::default(),
             strict: false,
             origin,
-            execution_mode: ExecutionMode::Sequential,
         }
     }
 
@@ -460,7 +459,7 @@ mod tests {
     #[test]
     fn build_renders_all_sections_in_order() {
         let tools = vec![
-            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool("read", "Read files.", ToolOrigin::Bundled),
             tool(
                 "tool_search_tool",
                 "Search external tools.",
@@ -607,7 +606,7 @@ mod tests {
     #[test]
     fn extension_tools_render_without_mcp_tools() {
         let tools = vec![
-            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool("read", "Read files.", ToolOrigin::Bundled),
             tool(
                 "tool_search_tool",
                 "Search configured MCP tools.",
@@ -655,7 +654,7 @@ mod tests {
 
     #[test]
     fn environment_changes_keep_identity_prefix_stable() {
-        let tools = [tool("read", "Read files.", ToolOrigin::Builtin)];
+        let tools = [tool("read", "Read files.", ToolOrigin::Bundled)];
         let base = SystemPromptInput {
             working_dir: "/one".into(),
             os: "linux".into(),

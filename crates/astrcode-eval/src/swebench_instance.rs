@@ -24,7 +24,6 @@ use crate::{
 
 const INSTANCE_WORKDIR: &str = "/testbed";
 const SERVER_PORT: &str = "3847/tcp";
-const SERVER_AUTH_TOKEN: &str = "astrcode-swebench-local";
 const PREDICTION_MODEL_NAME: &str = "astrcode-eval-deepseek-v4-flash";
 const PROVIDER_GATEWAY_URL: &str = "http://astrcode-swebench-egress:8080";
 const PROVIDER_GATEWAY_PLACEHOLDER_KEY: &str = "gateway-managed";
@@ -360,7 +359,7 @@ async fn run_session(
     let server_addr = wait_for_server(solver_name, relay_name).await?;
     sanitize_repository_for_session(case, solver_name, case_audit_dir).await?;
     let baseline_untracked_paths = list_untracked_paths(solver_name).await?;
-    let client = EvalClient::new(&server_addr, SERVER_AUTH_TOKEN)?;
+    let client = EvalClient::new(&server_addr)?;
     let session_id = client.create_session(INSTANCE_WORKDIR).await?;
 
     for prompt in &case.prompts {
@@ -574,8 +573,6 @@ async fn create_solver(
         "--env",
         "ASTRCODE_TEST_HOME=/astrcode-state",
         "--env",
-        "ASTRCODE_HTTP_TOKEN=astrcode-swebench-local",
-        "--env",
         "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:\
          /usr/sbin:/usr/bin:/sbin:/bin",
         "--env",
@@ -659,7 +656,7 @@ async fn wait_for_server(solver_name: &str, relay_name: &str) -> Result<String, 
         .filter(|port| !port.is_empty())
         .ok_or_else(|| EvalError::Server(format!("invalid Docker port mapping: {mapping:?}")))?;
     let server_addr = format!("http://127.0.0.1:{port}");
-    let client = EvalClient::new(&server_addr, SERVER_AUTH_TOKEN)?;
+    let client = EvalClient::new(&server_addr)?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
@@ -1399,7 +1396,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn official_image_and_container_names_are_deterministic() {
+    fn official_runtime_names_and_pull_budget_are_stable() {
         assert_eq!(
             official_image_name("swebench", "django__django-11620"),
             "swebench/sweb.eval.x86_64.django_1776_django-11620:latest"
@@ -1408,10 +1405,6 @@ mod tests {
             container_name("astrcode-run", "django__django-11620"),
             "astrcode-run-django__django-11620"
         );
-    }
-
-    #[test]
-    fn official_image_pull_has_bounded_attempt_duration() {
         assert_eq!(IMAGE_PULL_TIMEOUT, Duration::from_secs(60 * 60));
         assert_eq!(IMAGE_PULL_RETRY_DELAY, Duration::from_secs(15));
     }

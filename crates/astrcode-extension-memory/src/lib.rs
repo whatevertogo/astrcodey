@@ -1,7 +1,7 @@
 //! astrcode-extension-memory — 持久化记忆扩展。
 //!
-//! - **用户记忆**（跨项目）：`~/.astrcode/memory/`（`user_pref`）
-//! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/`
+//! - **用户记忆**（跨项目）：runtime 归属的 extension data 根目录（`user_pref`）
+//! - **项目记忆**：同一根目录下的 `projects/<key>/`
 //! - `memory_index.json`：结构化索引（BM25/子串搜索；相似条目 upsert）
 //! - **SessionStart** / **`memory_save` 后**：从有变化的 rollout 批量提取，更新 MEMORY.md
 //! - **PromptBuild**：全量用户偏好（SessionStart 预加载快照，session 内只读）
@@ -16,25 +16,26 @@ mod prompts;
 mod scope;
 mod store;
 mod turn_recall;
+mod workers;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
+    builder::{custom_event, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError,
-        ExtensionEvent, ExtensionTasks, HookMode, ProviderEvent, Registrar, StopReason,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, HookMode, LifecycleEvent,
+        Registrar,
     },
-    trusted::ExtensionHostServices,
 };
 use handlers::{
     MemoryDeleteHandler, MemoryListHandler, MemoryRecallHandler, MemorySaveHandler,
     MemorySessionStartHandler,
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use store::MemoryStorePool;
 use turn_recall::{
-    MemoryProjectRecallDeliveryProvider, MemoryProjectRecallTurnEndHandler, ProjectRecallBuffer,
-    SessionPrefsCache,
+    MemoryProjectRecallDeliveryProvider, MemoryProjectRecallTurnEndHandler, SessionPrefsCache,
 };
 
 use crate::config::MemoryConfig;
@@ -42,100 +43,94 @@ use crate::config::MemoryConfig;
 /// 返回记忆扩展；所需宿主能力在标准 `start()` 生命周期中取得。
 pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
-    let pipeline = Arc::new(handlers::MemoryPipelineCoordinator::default());
     let session_prefs = Arc::new(SessionPrefsCache::default());
-    let project_recall_buffer = Arc::new(ProjectRecallBuffer::default());
     Arc::new(MemoryExtension {
         store_pool,
-        services: Arc::new(OnceLock::new()),
-        pipeline,
+        workers: Arc::new(workers::MemoryWorkers::default()),
         session_prefs,
-        project_recall_buffer,
-        tasks: Arc::new(Mutex::new(None)),
         config: Arc::new(RwLock::new(MemoryConfig::default())),
     })
 }
 
-pub(crate) type MemoryServices = Arc<OnceLock<Arc<ExtensionHostServices>>>;
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    MemoryConfig::from_extension_config(config)
+        .map(|_| ())
+        .map_err(Into::into)
+}
 
 struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
-    services: MemoryServices,
-    pipeline: Arc<handlers::MemoryPipelineCoordinator>,
+    workers: Arc<workers::MemoryWorkers>,
     session_prefs: Arc<SessionPrefsCache>,
-    project_recall_buffer: Arc<ProjectRecallBuffer>,
-    tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     config: Arc<RwLock<MemoryConfig>>,
 }
 
 #[async_trait::async_trait]
 impl Extension for MemoryExtension {
-    fn id(&self) -> &str {
-        "astrcode.memory"
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode.memory")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::SmallModel)
+            .capability(ExtensionCapability::SessionInspect)
+            .capability(ExtensionCapability::EmitCustomEvents)
+            .capability(ExtensionCapability::ProviderRequest)
+            .build()
     }
 
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::SmallModel,
-            ExtensionCapability::SessionHistory,
-            ExtensionCapability::EmitEvents,
-            ExtensionCapability::ProviderRequest,
-        ]
+    fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
+        validate_config(config)
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        let services = ctx.host_services().cloned().ok_or_else(|| {
-            ExtensionError::Internal("memory extension requires host services".into())
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let data_dir = ctx.paths().global_data_dir().ok_or_else(|| {
+            ExtensionError::Internal("memory extension data directory is unavailable".into())
         })?;
-        if services.small_llm.is_none() {
+        self.store_pool
+            .set_root(data_dir.to_path_buf())
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        let small_model_available = ctx
+            .host()
+            .models()
+            .small_available()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        if !small_model_available {
             return Err(ExtensionError::Internal(
                 "memory extension requires a configured small model provider".into(),
             ));
         }
-        if services.session_query.is_none() {
-            return Err(ExtensionError::Internal(
-                "memory extension requires session history access".into(),
-            ));
-        }
-        self.services.set(services).map_err(|_| {
-            ExtensionError::Internal("memory extension services already initialized".into())
-        })?;
-        *self.tasks.lock() = Some(ctx.tasks().clone());
-        *self.config.write() = MemoryConfig::from_extension_config(&ctx.config);
+        *self.config.write() = MemoryConfig::from_extension_config(ctx.config())?;
+        self.workers.start(
+            ctx.tasks(),
+            self.store_pool.clone(),
+            ctx.host().clone(),
+            self.config.clone(),
+            self.session_prefs.clone(),
+        )?;
         Ok(())
     }
 
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        *self.config.write() = MemoryConfig::from_extension_config(&config);
-        Ok(())
-    }
-
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
-        *self.tasks.lock() = None;
-        self.pipeline.reset();
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.session_prefs.reset();
-        self.project_recall_buffer.reset();
         Ok(())
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.extension_event("memory.created").register();
-        reg.extension_event("memory.deleted").register();
+        reg.declare_custom_event(custom_event(handlers::MEMORY_CREATED_EVENT_TYPE).build());
+        reg.declare_custom_event(custom_event(handlers::MEMORY_DELETED_EVENT_TYPE).build());
 
         reg.tool(
             handlers::memory_save_definition(),
             Arc::new(MemorySaveHandler {
-                store_pool: self.store_pool.clone(),
-                services: self.services.clone(),
-                tasks: self.tasks.clone(),
-                pipeline: self.pipeline.clone(),
+                workers: self.workers.clone(),
                 config: self.config.clone(),
             }),
         );
         reg.tool(
             handlers::memory_delete_definition(),
             Arc::new(MemoryDeleteHandler {
-                store_pool: self.store_pool.clone(),
+                workers: self.workers.clone(),
             }),
         );
         reg.tool(
@@ -151,36 +146,28 @@ impl Extension for MemoryExtension {
                 session_prefs: self.session_prefs.clone(),
             }),
         );
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
+        reg.on_provider_contribution(
             40,
             Arc::new(MemoryProjectRecallDeliveryProvider {
-                buffer: self.project_recall_buffer.clone(),
                 config: self.config.clone(),
             }),
         );
-        reg.on_event(
-            ExtensionEvent::TurnEnd,
+        reg.on_lifecycle(
+            LifecycleEvent::TurnEnd,
             HookMode::NonBlocking,
             0,
             Arc::new(MemoryProjectRecallTurnEndHandler {
                 store_pool: self.store_pool.clone(),
-                buffer: self.project_recall_buffer.clone(),
                 config: self.config.clone(),
             }),
         );
-        reg.on_event(
-            ExtensionEvent::SessionStart,
+        reg.on_lifecycle(
+            LifecycleEvent::SessionStart,
             HookMode::NonBlocking,
             0,
             Arc::new(MemorySessionStartHandler {
-                store_pool: self.store_pool.clone(),
-                services: self.services.clone(),
-                pipeline: self.pipeline.clone(),
-                tasks: self.tasks.clone(),
+                workers: self.workers.clone(),
                 config: self.config.clone(),
-                session_prefs: self.session_prefs.clone(),
             }),
         );
     }

@@ -85,23 +85,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_user_prompt_omits_empty_existing_block() {
-        let out = batch_user_prompt("### session_id: abc\nUser: hi", "2026-05-31", "  \n");
-        assert!(out.contains("Sessions:"));
-        assert!(!out.contains("Existing memories:"));
-        assert!(out.contains(BATCH_JSON));
-    }
+    fn prompts_include_only_present_memory_sections_and_the_disclaimer() {
+        let empty = batch_user_prompt("### session_id: abc\nUser: hi", "2026-05-31", "  \n");
+        assert!(empty.contains("Sessions:"));
+        assert!(!empty.contains("Existing memories:"));
+        assert!(empty.contains(BATCH_JSON));
 
-    #[test]
-    fn batch_user_prompt_includes_existing_memories() {
-        let out = batch_user_prompt("block", "2026-05-31", "- pref");
-        assert!(out.contains("Existing memories:\n- pref"));
-    }
+        let existing = batch_user_prompt("block", "2026-05-31", "- pref");
+        assert!(existing.contains("Existing memories:\n- pref"));
 
-    #[test]
-    fn project_memory_injection_includes_disclaimer() {
-        let body = project_memory_injection(&["- fact".to_string()]);
-        assert!(body.contains("may NOT match"));
-        assert!(body.contains("- fact"));
+        let injection = project_memory_injection(&["- fact".to_owned()]);
+        assert!(injection.contains("may NOT match"));
+        assert!(injection.contains("- fact"));
     }
 }

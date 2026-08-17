@@ -32,7 +32,7 @@ use axum::{
 };
 use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
-use replay::replay_after_cursor;
+use replay::{parse_replay_cursor, replay_after_cursor};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -149,9 +149,23 @@ pub(in crate::http) async fn session_stream(
         .event_bus()
         .subscribe_conversation_events(&session_id);
     let notification_rx = http_state.app.event_bus().subscribe_global_notifications();
-    let (missed_events, replay_error) = match query.cursor.as_ref() {
-        Some(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
-        None => (Vec::new(), false),
+    let replay_result = match query.cursor.as_deref() {
+        Some(cursor) => match parse_replay_cursor(cursor) {
+            Ok(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
+            Err(error) => Err(error),
+        },
+        None => Ok(Vec::new()),
+    };
+    let (missed_events, replay_error) = match replay_result {
+        Ok(events) => (events, false),
+        Err(error) => {
+            if error.is_cursor_unavailable() {
+                tracing::info!(%session_id, %error, "SSE cursor requires rehydrate");
+            } else {
+                tracing::warn!(%session_id, %error, "failed to replay SSE cursor");
+            }
+            (Vec::new(), true)
+        },
     };
     let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
     let replay_runtime = Arc::clone(http_state.app.runtime());
@@ -302,8 +316,8 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
                     // 让 ask-user 等扩展在 snapshot/replay 竞态下仍能送达挂起状态。
                     let Some(seq) = event.seq else {
                         if matches!(
-                            event.payload,
-                            EventPayload::Live(LiveEventPayload::ExtensionEvent(_))
+                            event.payload.as_live(),
+                            Some(LiveEventPayload::CustomEvent(_))
                         ) {
                             buffered.push(LiveInput::Event(event));
                         }
@@ -333,7 +347,7 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
                 ClientNotification::StatusItemUpdate { .. }
                 | ClientNotification::ExtensionRegistryChanged
                 | ClientNotification::ExtensionCommandResult { .. }
-                | ClientNotification::GlobalExtensionEvent { .. } => {
+                | ClientNotification::GlobalCustomEvent { .. } => {
                     buffered.push(LiveInput::Notification(Box::new(notification)));
                 },
                 _ => {},
@@ -365,11 +379,7 @@ async fn live_input_to_sse_items(state: &mut LiveStreamState, input: LiveInput) 
 async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> Vec<SseItem> {
     match event.as_ref() {
         event if event.session_id == state.session_id => {
-            if state
-                .replay_max_seq
-                .zip(event.seq)
-                .is_some_and(|(max_seq, event_seq)| event_seq <= max_seq)
-            {
+            if already_replayed(state.replay_max_seq, event.seq) {
                 return Vec::new();
             }
             if event_adds_message(event) {
@@ -445,7 +455,7 @@ async fn notification_to_sse_items(
             };
             ConversationDeltaDto::AppendBlock { block }
         },
-        ClientNotification::GlobalExtensionEvent {
+        ClientNotification::GlobalCustomEvent {
             session_id,
             extension_id,
             event_type,
@@ -455,7 +465,7 @@ async fn notification_to_sse_items(
             if session_id == state.session_id.as_str() {
                 return Vec::new();
             }
-            ConversationDeltaDto::ExtensionEvent {
+            ConversationDeltaDto::CustomEvent {
                 extension_id,
                 event_type,
                 schema_version,
@@ -478,6 +488,13 @@ async fn get_or_fetch_cursor(state: &mut LiveStreamState) -> String {
         state.cached_cursor = Some(cursor.clone());
         cursor
     }
+}
+
+/// 事件是否已被 replay 阶段覆盖(durable 事件 seq 不超过 replay 已发送的最大 seq)。
+fn already_replayed(replay_max_seq: Option<u64>, event_seq: Option<u64>) -> bool {
+    replay_max_seq
+        .zip(event_seq)
+        .is_some_and(|(max, seq)| seq <= max)
 }
 
 fn event_adds_message(event: &Event) -> bool {

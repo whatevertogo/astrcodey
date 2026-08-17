@@ -5,7 +5,9 @@ import {
   ProtocolDecodeError,
   decodeConversationBlock,
   decodeConversationDelta,
+  decodeConversationItemsPage,
   decodeConversationSnapshot,
+  decodeConversationState,
   decodeConversationStreamEnvelope,
 } from '../../target/frontend-contract/services/protocol.js'
 
@@ -63,70 +65,81 @@ assert.equal(patchArguments.delta.kind, 'patchArguments')
 assert.equal(patchArguments.delta.blockId, 'tool-1')
 assert.equal(patchArguments.delta.arguments, 'Cargo.toml')
 
+const transientTool = decodeConversationDelta({
+  kind: 'appendTransientBlock',
+  turnId: 'turn-1',
+  block: {
+    kind: 'toolCall',
+    id: 'tool-preview',
+    name: 'read',
+    arguments: '',
+    text: '',
+    status: 'streaming',
+  },
+})
+assert.equal(transientTool.kind, 'appendTransientBlock')
+assert.equal(transientTool.turnId, 'turn-1')
+assert.equal(transientTool.block.id, 'tool-preview')
+assert.deepEqual(
+  decodeConversationDelta({ kind: 'clearTransientBlocks', turnId: 'turn-1' }),
+  { kind: 'clearTransientBlocks', turnId: 'turn-1' }
+)
+
 const agentSession = decodeConversationStreamEnvelope({
   sessionId: 'parent-session',
   cursor: { value: '8' },
   delta: {
     kind: 'agentSessionUpdated',
     agentSession: {
+      kind: 'spawned',
       childSessionId: 'child-session',
       toolCallId: 'tool-call-1',
       agentName: 'explorer',
       task: 'inspect code',
-      status: 'running',
-      finalSessionId: 'leaf-session',
-      summary: 'done',
-      error: 'interrupted',
-      phase: 'calling_tool',
-      currentTool: 'read',
     },
   },
 })
 assert.equal(agentSession.delta.kind, 'agentSessionUpdated')
 assert.equal(agentSession.delta.agentSession.toolCallId, 'tool-call-1')
-assert.equal(agentSession.delta.agentSession.finalSessionId, 'leaf-session')
-assert.equal(agentSession.delta.agentSession.summary, 'done')
-assert.equal(agentSession.delta.agentSession.error, 'interrupted')
-assert.equal(agentSession.delta.agentSession.phase, 'calling_tool')
-assert.equal(agentSession.delta.agentSession.currentTool, 'read')
+assert.equal(agentSession.delta.agentSession.kind, 'spawned')
 
-const sparseAgentSession = decodeConversationStreamEnvelope({
+const progressAgentSession = decodeConversationStreamEnvelope({
   sessionId: 'parent-session',
   cursor: { value: '9' },
   delta: {
     kind: 'agentSessionUpdated',
     agentSession: {
+      kind: 'progress',
       childSessionId: 'child-session',
       phase: 'thinking',
     },
   },
 })
-assert.equal(sparseAgentSession.delta.kind, 'agentSessionUpdated')
-assert.equal(sparseAgentSession.delta.agentSession.status, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)
+assert.equal(progressAgentSession.delta.kind, 'agentSessionUpdated')
+assert.equal(progressAgentSession.delta.agentSession.kind, 'progress')
+assert.equal(progressAgentSession.delta.agentSession.phase, 'thinking')
+assert.equal(progressAgentSession.delta.agentSession.currentTool, undefined)
 
-const extensionEvent = decodeConversationStreamEnvelope({
+const customEvent = decodeConversationStreamEnvelope({
   sessionId: 'session-1',
   cursor: { value: '10' },
   delta: {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
     payload: { sessionId: 'session-1', callId: 'call-1', questions: [] },
   },
 })
-assert.equal(extensionEvent.delta.kind, 'extensionEvent')
-assert.equal(extensionEvent.delta.extensionId, 'astrcode-ask-user')
-assert.equal(extensionEvent.delta.payload.callId, 'call-1')
+assert.equal(customEvent.delta.kind, 'customEvent')
+assert.equal(customEvent.delta.extensionId, 'astrcode-ask-user')
+assert.equal(customEvent.delta.payload.callId, 'call-1')
 
 const scalarExtensionEvent = decodeConversationStreamEnvelope({
   sessionId: 'session-1',
   cursor: { value: '10' },
   delta: {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'extension',
     eventType: 'scalar',
     schemaVersion: 1,
@@ -208,15 +221,21 @@ assert.throws(
   ProtocolDecodeError
 )
 
-// User blocks omit `attachments` when empty (serde skip_serializing_if).
-const userWithoutAttachments = decodeConversationBlock({
+const userWithoutAttachments = {
   kind: 'user',
   id: 'u-1',
   text: 'hello',
+}
+assert.throws(
+  () => decodeConversationBlock(userWithoutAttachments),
+  ProtocolDecodeError
+)
+const userWithEmptyAttachments = decodeConversationBlock({
+  ...userWithoutAttachments,
+  attachments: [],
 })
-assert.equal(userWithoutAttachments.kind, 'user')
-assert.equal(userWithoutAttachments.text, 'hello')
-assert.equal(userWithoutAttachments.attachments, undefined)
+assert.equal(userWithEmptyAttachments.kind, 'user')
+assert.deepEqual(userWithEmptyAttachments.attachments, [])
 
 for (const status of ['failed', 'cancelled']) {
   const toolBlock = decodeConversationBlock({
@@ -271,17 +290,14 @@ assert.throws(
   ProtocolDecodeError
 )
 
-const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
+const snapshot = decodeConversationSnapshot({
   sessionId: 's-1',
   sessionTitle: 'title',
   cursor: { value: '0' },
-  phase: 'idle',
   control: {
     phase: 'idle',
     canSubmitPrompt: true,
     canRequestCompact: false,
-    compactPending: false,
-    compacting: false,
     retryStatus: {
       status: 503,
       attempt: 2,
@@ -290,7 +306,7 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
     },
   },
   blocks: [
-    { kind: 'user', id: 'u-1', text: 'prior message' },
+    { kind: 'user', id: 'u-1', text: 'prior message', attachments: [] },
     {
       kind: 'assistant',
       id: 'a-1',
@@ -298,20 +314,50 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
       status: 'complete',
     },
   ],
-  agentSessions: [],
+  agentSessions: [
+    {
+      childSessionId: 'child-session',
+      toolCallId: 'tool-call-1',
+      agentName: 'explorer',
+      task: 'inspect code',
+      status: 'running',
+    },
+  ],
 })
-assert.equal(snapshotWithoutAttachmentFields.blocks.length, 2)
-assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
+assert.equal(snapshot.blocks.length, 2)
+assert.equal(snapshot.agentSessions[0].agentName, 'explorer')
+assert.deepEqual(snapshot.control.retryStatus, {
   status: 503,
   attempt: 2,
   maxRetries: 5,
   delayMs: 2000,
 })
 
+const state = decodeConversationState({
+  sessionId: 's-1',
+  sessionTitle: 'title',
+  cursor: { value: '8' },
+  control: snapshot.control,
+  transientBlocks: [
+    { kind: 'assistant', id: 'streaming', text: 'hello', status: 'streaming' },
+  ],
+  agentSessions: snapshot.agentSessions,
+})
+assert.equal(state.transientBlocks[0].id, 'streaming')
+
+const itemsPage = decodeConversationItemsPage({
+  items: snapshot.blocks,
+  olderCursor: { value: 'timeline-v1:2' },
+  hasOlder: true,
+  snapshotCursor: { value: '8' },
+})
+assert.equal(itemsPage.items.length, 2)
+assert.equal(itemsPage.olderCursor?.value, 'timeline-v1:2')
+
 const transportRetrySnapshot = decodeConversationSnapshot({
-  ...snapshotWithoutAttachmentFields,
+  ...snapshot,
   control: {
-    ...snapshotWithoutAttachmentFields.control,
+    ...snapshot.control,
     retryStatus: {
       attempt: 1,
       maxRetries: 3,
@@ -325,6 +371,63 @@ assert.deepEqual(transportRetrySnapshot.control.retryStatus, {
   maxRetries: 3,
   delayMs: 500,
 })
+
+for (const [description, decode] of [
+  [
+    'unknown agent status',
+    () =>
+      decodeConversationSnapshot({
+        ...snapshot,
+        agentSessions: [
+          {
+            childSessionId: 'child',
+            agentName: 'worker',
+            task: 'test',
+            status: 'future',
+          },
+        ],
+      }),
+  ],
+  [
+    'non-object tool arguments',
+    () =>
+      decodeConversationDelta({
+        kind: 'patchArguments',
+        blockId: 'tool-1',
+        arguments: '[]',
+        argumentsJson: [],
+      }),
+  ],
+  [
+    'recap without its required source',
+    () =>
+      decodeConversationBlock({
+        kind: 'recap',
+        id: 'recap-1',
+        text: 'summary',
+      }),
+  ],
+  [
+    'compact summary without token counts',
+    () =>
+      decodeConversationBlock({
+        kind: 'compactSummary',
+        id: 'compact-1',
+        summary: 'summary',
+        trigger: 'manual',
+      }),
+  ],
+  [
+    'snapshot without agent sessions',
+    () =>
+      decodeConversationSnapshot({
+        ...snapshot,
+        agentSessions: undefined,
+      }),
+  ],
+]) {
+  assert.throws(decode, ProtocolDecodeError, description)
+}
 
 assert.deepEqual(
   decodeConversationDelta({ kind: 'resetBlock', blockId: 'assistant-1' }),

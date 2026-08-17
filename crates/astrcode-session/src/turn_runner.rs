@@ -4,7 +4,7 @@
 //! 分发扩展钩子事件，并将事件流式传输给客户端。
 //! Agent 是无状态的短暂对象，处理完一个回合后即被丢弃。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use astrcode_context::token_budget::{
     PromptTokenSnapshot, compact_threshold_tokens, request_max_output_tokens,
@@ -13,37 +13,39 @@ use astrcode_core::{
     event::{DurableEventPayload, LiveEventPayload},
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRequest, LlmRole, LlmTokenUsage,
-        LlmTokenUsageSource, provider_visible_messages, token_estimate,
+        LlmTokenUsageSource, provider_visible_messages, provider_visible_shared_messages,
+        token_estimate,
     },
     tool::ToolDefinition,
     types::*,
 };
 use astrcode_extension_sdk::extension::{
-    ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
-    ProviderResult,
+    ContinueAfterStopResult, LifecycleEvent, ProviderEvent, ProviderRequestId, ProviderResult,
+    internal::{
+        RuntimeLifecycleContext, runtime_continue_after_stop_context,
+        runtime_lifecycle_for_step_start, runtime_provider_settlement_context,
+    },
 };
-use astrcode_session_projection::SessionReadModel;
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     compaction::{
-        CompactCircuitBreaker, CompactionHost, PreparedProviderHistory, plan_auto_compaction,
-        prepare_provider_history, run_reactive_compaction,
+        CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
+        run_reactive_compaction,
     },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     projection_context::context_snapshot,
     session::Session,
-    steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
-    tool_deduplicator::ToolCallDeduplicator,
+    session_runtime_services::RuntimeGenerationView,
+    steer::absorbable_inputs_for_turn,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
     tool_types::ExecuteToolBatch,
     turn_context::{
         SharedTurnContext, TurnError, end_turn_with_error_typed, on_step_end_best_effort,
     },
-    turn_publish::{ExtensionEvents, TurnEvents},
+    turn_publish::{TurnEventBridge, TurnEvents},
     turn_stages::{PreparedProviderRequest, TurnState},
 };
 
@@ -57,7 +59,7 @@ pub(crate) async fn drive_agent(
     turn_id: &TurnId,
 ) -> (Result<TurnOutput, TurnError>, bool) {
     let publisher = Arc::new(TurnEvents::new(agent.session().clone(), turn_id.clone()));
-    let output = agent.process_prompt(user_text, turn_id, &publisher).await;
+    let output = agent.process_prompt(user_text, &publisher).await;
     (output, publisher.emitted_error())
 }
 
@@ -65,23 +67,28 @@ pub(crate) async fn drive_agent(
 pub(crate) struct TurnLoop {
     session: Session,
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+    runtime_generation: RuntimeGenerationView,
     cancellation_token: CancellationToken,
     extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
     tools: ToolCalls,
-    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
 }
 
 /// Step 阶段间共享的 hook/publisher/lifecycle 上下文。
 struct StepHooks<'a> {
     extension_runner: &'a dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-    lifecycle_ctx: &'a astrcode_extension_sdk::extension::LifecycleContext,
+    lifecycle_ctx: &'a RuntimeLifecycleContext,
     publisher: &'a Arc<TurnEvents>,
 }
 
+/// 连续相同 `input_tokens` 达到该步数时告警(frozen provider 视图检测)。
+const FROZEN_INPUT_TOKENS_STREAK_WARN: u32 = 3;
+
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
-    messages: Vec<LlmMessage>,
+    request_id: ProviderRequestId,
+    messages: Vec<Arc<LlmMessage>>,
     context_window: usize,
+    acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
 
 impl TurnLoop {
@@ -93,19 +100,28 @@ impl TurnLoop {
         self.cancellation_token.clone()
     }
 
-    fn max_parallel_tool_calls(&self) -> usize {
-        self.session.runtime_services().max_parallel_tool_calls()
-    }
-
     fn shared(&self) -> &SharedTurnContext {
         self.tools.shared()
+    }
+
+    fn compaction_host<'a>(
+        &'a self,
+        extension_runner: &'a dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+    ) -> CompactionHost<'a> {
+        CompactionHost {
+            session: &self.session,
+            llm: &self.llm,
+            context_assembler: self.runtime_generation.context_assembler(),
+            hook_call: self.shared().hook_call_context(),
+            extension_runner,
+            breaker: self.session.runtime().compact_circuit_breaker(),
+        }
     }
 
     async fn recover_context_overflow(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &mut TurnState,
-        turn_id: &TurnId,
         publisher: &TurnEvents,
     ) -> Result<bool, TurnError> {
         if state.reactive_compact_used() {
@@ -113,63 +129,56 @@ impl TurnLoop {
         }
 
         state.mark_reactive_compact_used();
-        let shared = self.shared().clone();
-        let host = CompactionHost {
-            session: &self.session,
-            llm: &self.llm,
-            shared: &shared,
-            extension_runner,
-            breaker: &self.compact_circuit_breaker,
-        };
-        run_reactive_compaction(&host, state, turn_id, publisher).await
+        let host = self.compaction_host(extension_runner);
+        run_reactive_compaction(&host, state, publisher).await
     }
 
     pub(crate) fn new_with_llm(
         session: Session,
-        session_state: &SessionReadModel,
-        tool_selection: astrcode_core::tool::SessionToolSelection,
-        session_store_dir: Option<std::path::PathBuf>,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+        turn: TurnToolContext,
         tool_registry: Arc<crate::ToolRegistry>,
         extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
+        runtime_generation: RuntimeGenerationView,
     ) -> Result<Self, TurnError> {
-        let runtime_services = session.runtime_services();
-        let cancellation_token = CancellationToken::new();
-        let turn =
-            TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
+        let cancellation_token = turn.shared.cancellation_token.clone();
         let tools = ToolCalls::new(
             turn,
             tool_registry,
             Arc::clone(&extension_hooks),
             session.clone(),
             cancellation_token.clone(),
+            runtime_generation.max_parallel_tool_calls(),
         );
-        let context_settings = runtime_services.context_assembler().settings();
-        let compact_circuit_breaker = Mutex::new(CompactCircuitBreaker::new(
-            context_settings.compact_circuit_breaker_threshold,
-            Duration::from_secs(context_settings.compact_circuit_breaker_cooldown_secs),
-        ));
+        let context_settings = runtime_generation.context_assembler().settings();
+        session
+            .runtime()
+            .compact_circuit_breaker()
+            .lock()
+            .configure(
+                context_settings.compact_circuit_breaker_threshold,
+                std::time::Duration::from_secs(
+                    context_settings.compact_circuit_breaker_cooldown_secs,
+                ),
+            );
         Ok(Self {
             session,
             llm,
+            runtime_generation,
             cancellation_token,
             extension_hooks,
             tools,
-            compact_circuit_breaker,
         })
     }
 
     pub(crate) async fn process_prompt(
         &mut self,
         user_text: &str,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let extension_runner = Arc::clone(&self.extension_hooks);
-        let event_bridge = ExtensionEvents::start(Arc::clone(publisher), self.tools.shared_mut());
-        let result = self
-            .process_prompt_inner(user_text, turn_id, publisher)
-            .await;
+        let event_bridge = TurnEventBridge::start(Arc::clone(publisher), self.tools.shared_mut());
+        let result = self.process_prompt_inner(user_text, publisher).await;
         if result.is_err() {
             self.finalize_turn_on_error(extension_runner.as_ref()).await;
         }
@@ -194,7 +203,7 @@ impl TurnLoop {
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
     ) {
         if let Err(hook_error) = extension_runner
-            .emit_lifecycle(ExtensionEvent::TurnEnd, self.shared().lifecycle_ctx())
+            .emit_lifecycle(LifecycleEvent::TurnEnd, self.shared().lifecycle_ctx())
             .await
         {
             tracing::warn!(error = %hook_error, "TurnEnd lifecycle hook failed after turn error");
@@ -204,7 +213,6 @@ impl TurnLoop {
     async fn process_prompt_inner(
         &mut self,
         user_text: &str,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let all_tools = self.tools.list_definitions_with_prompt_metadata();
@@ -212,26 +220,29 @@ impl TurnLoop {
 
         let lifecycle_ctx = self.shared().lifecycle_ctx();
         let (turn_start_res, prompt_submit_res) = tokio::join!(
-            extension_runner.emit_lifecycle(ExtensionEvent::TurnStart, lifecycle_ctx.clone()),
+            extension_runner.emit_lifecycle(LifecycleEvent::TurnStart, lifecycle_ctx.clone()),
             extension_runner
-                .emit_lifecycle(ExtensionEvent::UserPromptSubmit, lifecycle_ctx.clone()),
+                .emit_lifecycle(LifecycleEvent::UserPromptSubmit, lifecycle_ctx.clone()),
         );
         turn_start_res?;
         if let Err(e) = prompt_submit_res {
             return end_turn_with_error_typed(e);
         }
 
-        let mut state = TurnState::new(all_tools);
-        match publisher.snapshot_model().await {
-            Ok(model) => state.set_synced_user_message_count(count_visible_user_messages(&model)),
-            Err(error) => {
-                // 降级为 0 会让首 step 把全部历史 user 消息误判为 mid-turn 新增，必须可观测。
-                tracing::warn!(
-                    error = %error,
-                    "failed to snapshot model for mid-turn user message tracking; \
-                     treating all user messages as unsynced"
-                );
-            },
+        let initial_model = publisher.snapshot_model().await;
+        let mut state = TurnState::new(
+            all_tools,
+            initial_model
+                .as_ref()
+                .ok()
+                .and_then(|model| model.execution.active_step.as_ref()),
+        );
+        if let Err(error) = &initial_model {
+            // 拿不到快照就丢失 active_step 恢复信息,必须可观测。
+            tracing::warn!(
+                error = %error,
+                "failed to snapshot model at turn start; resuming without active step state"
+            );
         }
 
         // Step
@@ -242,7 +253,6 @@ impl TurnLoop {
                     &mut state,
                     extension_runner.as_ref(),
                     &lifecycle_ctx,
-                    turn_id,
                     publisher,
                     user_text,
                 )
@@ -261,23 +271,33 @@ impl TurnLoop {
         &mut self,
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
-        turn_id: &TurnId,
+        lifecycle_ctx: &RuntimeLifecycleContext,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
-        state.begin_step();
+        let (step_index, attempt) = state.begin_step();
+        publisher
+            .durable(DurableEventPayload::StepStarted {
+                step_index,
+                attempt,
+            })
+            .await?;
         let result = self
-            .step_body(
-                state,
-                extension_runner,
-                lifecycle_ctx,
-                turn_id,
-                publisher,
-                user_text,
-            )
+            .step_body(state, extension_runner, lifecycle_ctx, publisher, user_text)
             .await;
         state.tool_deduplicator_mut().end_step();
+        if let Ok(outcome) = &result {
+            publisher
+                .durable(DurableEventPayload::StepCompleted {
+                    step_index,
+                    attempt,
+                    finish_reason: match outcome {
+                        StepOutcome::Continue => None,
+                        StepOutcome::Finished(output) => Some(output.finish_reason.clone()),
+                    },
+                })
+                .await?;
+        }
         result
     }
 
@@ -285,57 +305,51 @@ impl TurnLoop {
         &mut self,
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
-        turn_id: &TurnId,
+        lifecycle_ctx: &RuntimeLifecycleContext,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
-        let mid_turn_synced = self.sync_mid_turn_user_messages(publisher, state).await?;
-        let step_ctx = lifecycle_ctx.clone().for_step_start(mid_turn_synced);
+        let mid_turn_synced = self.sync_mid_turn_user_messages(publisher).await?;
+        let step_ctx = runtime_lifecycle_for_step_start(lifecycle_ctx.clone(), mid_turn_synced);
 
         extension_runner
-            .emit_lifecycle(ExtensionEvent::StepStart, step_ctx)
+            .emit_lifecycle(LifecycleEvent::StepStart, step_ctx)
             .await?;
 
         let visible_tools = state.visible_tools();
-        let prepared = match self
-            .prepare_stage(extension_runner, state, &visible_tools, turn_id, publisher)
-            .await
+        let prepared = match timed_stage(
+            "prepare",
+            self.prepare_stage(extension_runner, state, &visible_tools, publisher),
+        )
+        .await
         {
             Ok(prepared) => prepared,
             Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
                 return self
-                    .recover_or_fail(extension_runner, state, turn_id, publisher)
+                    .recover_or_fail(extension_runner, state, publisher)
                     .await;
             },
             Err(error) => return Err(error),
         };
 
-        // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
-        // visible_tools 传给 early exec context 供 prepare 使用。
+        // Provider 流只产生临时预览。工具在完整 assistant 消息和 durable intent
+        // 提交后执行，避免进程退出后无法判断副作用是否发生。
         let request = LlmRequestSnapshot {
+            request_id: prepared.request_id.clone(),
             messages: prepared.messages.clone(),
             context_window: prepared.llm.model_limits().max_input_tokens,
+            acknowledgements: prepared.acknowledgements.clone(),
         };
-        let dedup_for_early = state.tool_deduplicator_mut();
-        let outcome = match self
-            .llm_stage(
-                prepared,
-                &visible_tools,
-                publisher,
-                Some(dedup_for_early),
-                visible_tools.clone(),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
-                return self
-                    .recover_or_fail(extension_runner, state, turn_id, publisher)
-                    .await;
-            },
-            Err(error) => return Err(error),
-        };
+        let outcome =
+            match timed_stage("llm", self.llm_stage(prepared, &visible_tools, publisher)).await {
+                Ok(outcome) => outcome,
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                    return self
+                        .recover_or_fail(extension_runner, state, publisher)
+                        .await;
+                },
+                Err(error) => return Err(error),
+            };
 
         let hooks = StepHooks {
             extension_runner,
@@ -344,11 +358,18 @@ impl TurnLoop {
         };
         match outcome {
             StreamOutcome::Complete { .. } => {
-                self.complete_stage(&hooks, state, outcome, user_text, request)
-                    .await
+                timed_stage(
+                    "complete",
+                    self.complete_stage(&hooks, state, outcome, user_text, request),
+                )
+                .await
             },
             StreamOutcome::ToolCalls { .. } => {
-                self.tool_calls_stage(&hooks, state, outcome, request).await
+                timed_stage(
+                    "tool_calls",
+                    self.tool_calls_stage(&hooks, state, outcome, request),
+                )
+                .await
             },
         }
     }
@@ -386,8 +407,15 @@ impl TurnLoop {
                 })
                 .await?;
         }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
             .await?;
+        self.acknowledge_provider_request(
+            hooks.extension_runner,
+            hooks.publisher,
+            &request.request_id,
+            &request.acknowledgements,
+        )
+        .await?;
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
 
         if self
@@ -403,7 +431,7 @@ impl TurnLoop {
         }
 
         if self
-            .has_pending_mid_turn_user_messages(hooks.publisher, state)
+            .has_pending_mid_turn_user_messages(hooks.publisher)
             .await?
         {
             tracing::debug!("pending mid-turn user messages; running one more agent step");
@@ -414,6 +442,7 @@ impl TurnLoop {
         let output = self
             .postprocess_complete_stage(
                 hooks.extension_runner,
+                request.request_id,
                 user_text.to_string(),
                 state,
                 finish_reason,
@@ -434,7 +463,6 @@ impl TurnLoop {
             text,
             reasoning_content,
             tool_calls,
-            early_results,
             message_id,
             message_started,
             usage,
@@ -463,19 +491,10 @@ impl TurnLoop {
                 })
                 .await?;
         }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
             .await?;
 
-        let hook_messages = state.provider_response_messages(request.messages);
-        self.tools_stage(
-            hooks.extension_runner,
-            state,
-            &tool_calls,
-            early_results,
-            hooks.publisher,
-            hook_messages,
-        )
-        .await?;
+        self.tools_stage(hooks, request, state, &tool_calls).await?;
 
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
         Ok(StepOutcome::Continue)
@@ -486,11 +505,10 @@ impl TurnLoop {
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &mut TurnState,
-        turn_id: &TurnId,
         publisher: &TurnEvents,
     ) -> Result<StepOutcome, TurnError> {
         if self
-            .recover_context_overflow(extension_runner, state, turn_id, publisher)
+            .recover_context_overflow(extension_runner, state, publisher)
             .await?
         {
             Ok(StepOutcome::Continue)
@@ -504,46 +522,46 @@ impl TurnLoop {
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &TurnState,
         visible_tools: &[ToolDefinition],
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<PreparedProviderRequest, TurnError> {
-        let shared = self.shared().clone();
-        let host = CompactionHost {
-            session: &self.session,
-            llm: &self.llm,
-            shared: &shared,
-            extension_runner,
-            breaker: &self.compact_circuit_breaker,
-        };
+        let host = self.compaction_host(extension_runner);
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
-        let compaction_plan = plan_auto_compaction(&host, &snapshot, visible_tools).await;
+        let tools_tokens = state.tools_token_estimate();
+        let compaction_plan =
+            plan_auto_compaction(&host, &snapshot, visible_tools, tools_tokens).await;
 
-        let PreparedProviderHistory { snapshot, messages } =
-            prepare_provider_history(&host, state, snapshot, turn_id, compaction_plan, publisher)
-                .await?;
+        let PreparedProviderHistory { snapshot, messages } = prepare_provider_history(
+            &host,
+            state,
+            snapshot,
+            compaction_plan,
+            visible_tools,
+            publisher,
+        )
+        .await?;
 
         let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {
             tracing::debug!("injecting tool deduplication system-reminder");
-            messages.push(LlmMessage::user(reminder));
+            messages.push(Arc::new(LlmMessage::user(reminder)));
         }
-        let messages = self
-            .apply_before_provider_request_hook(extension_runner, messages)
+        let request_id = ProviderRequestId::new(uuid::Uuid::new_v4().to_string());
+        let (messages, acknowledgements) = self
+            .apply_before_provider_request_hook(extension_runner, request_id.clone(), messages)
             .await?;
         let model_limits = llm.model_limits();
         let model_context_window = model_limits.max_input_tokens;
         let token_snapshot = PromptTokenSnapshot {
             context_tokens: snapshot.estimate_input_tokens(
                 &messages,
-                visible_tools,
+                tools_tokens,
                 model_context_window,
             ),
             threshold_tokens: compact_threshold_tokens(
                 model_context_window,
-                self.session
-                    .runtime_services()
+                self.runtime_generation
                     .context_assembler()
                     .settings()
                     .compact_threshold_percent,
@@ -561,8 +579,10 @@ impl TurnLoop {
             )?;
         Ok(PreparedProviderRequest {
             llm,
+            request_id,
             messages,
             max_output_tokens,
+            acknowledgements,
         })
     }
 
@@ -571,8 +591,6 @@ impl TurnLoop {
         prepared: PreparedProviderRequest,
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
-        deduplicator: Option<&mut ToolCallDeduplicator>,
-        visible_tools: Vec<ToolDefinition>,
     ) -> Result<StreamOutcome, TurnError> {
         let request_messages = prepared.messages.clone();
         let rx = self
@@ -586,26 +604,7 @@ impl TurnLoop {
             .await?;
         let message_id = new_message_id();
 
-        // 构建 early exec context（需要 deduplicator 和 visible_tools）
-        let early_exec = deduplicator.map(|dedup| {
-            let max_parallel = self.max_parallel_tool_calls();
-            crate::llm_stream::EarlyExecContext {
-                pipeline: &self.tools,
-                visible_tools,
-                deduplicator: dedup,
-                max_parallel,
-            }
-        });
-
-        match consume_llm_stream(
-            rx,
-            publisher,
-            message_id,
-            &self.cancellation_token,
-            early_exec,
-        )
-        .await
-        {
+        match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
             Ok(outcome) => Ok(self
                 .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
                 .await),
@@ -615,13 +614,29 @@ impl TurnLoop {
     }
 
     /// 持久化 token usage（若 provider 提供了统计）。
+    ///
+    /// 同一会话连续多个 step `input_tokens` 恒定时打 frozen 告警——写入侧保证 durable
+    /// transcript 永远 provider-valid 之后,恒定不变通常意味着 provider 视图被冻结
+    /// (如上下文在同一位置被反复截断)。
     async fn persist_token_usage(
         &self,
         publisher: &TurnEvents,
         usage: Option<LlmTokenUsage>,
         model_context_window: usize,
+        state: &mut TurnState,
     ) -> Result<(), TurnError> {
         if let Some(usage) = usage {
+            if let Some(input_tokens) = usage.input_tokens {
+                let streak = state.record_step_input_tokens(input_tokens);
+                if streak >= FROZEN_INPUT_TOKENS_STREAK_WARN {
+                    tracing::warn!(
+                        target: "astrcode::perf",
+                        input_tokens,
+                        streak,
+                        "input_tokens identical across consecutive steps; provider view may be frozen"
+                    );
+                }
+            }
             publisher
                 .durable(DurableEventPayload::TokenUsageRecorded {
                     usage,
@@ -632,11 +647,39 @@ impl TurnLoop {
         Ok(())
     }
 
+    async fn acknowledge_provider_request(
+        &self,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        publisher: &TurnEvents,
+        request_id: &ProviderRequestId,
+        acknowledgements: &astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
+    ) -> Result<(), TurnError> {
+        if acknowledgements.is_empty() {
+            return Ok(());
+        }
+        publisher.sync_durable_events().await?;
+        let context = runtime_provider_settlement_context(
+            self.shared().hook_call_context(),
+            request_id.clone(),
+        );
+        if let Err(error) = extension_runner
+            .acknowledge_provider_request(context, acknowledgements.clone())
+            .await
+        {
+            tracing::warn!(
+                request_id = %request_id,
+                error = %error,
+                "provider cycle committed but one or more contribution acknowledgements failed"
+            );
+        }
+        Ok(())
+    }
+
     async fn with_usage_fallback(
         &self,
         mut outcome: StreamOutcome,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
     ) -> StreamOutcome {
         match &mut outcome {
@@ -654,10 +697,10 @@ impl TurnLoop {
     async fn fallback_token_usage(
         &self,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
-        let effective = self.session.runtime_services().read_effective();
+        let effective = self.runtime_generation.effective();
         let (input_tokens, source) = match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
             .await
@@ -693,6 +736,7 @@ impl TurnLoop {
             input_tokens,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
             output_tokens: None,
             reasoning_output_tokens: None,
             total_tokens: None,
@@ -702,23 +746,42 @@ impl TurnLoop {
 
     async fn tools_stage(
         &self,
-        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        hooks: &StepHooks<'_>,
+        request: LlmRequestSnapshot,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::StreamedToolCall],
-        early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
-        publisher: &Arc<TurnEvents>,
-        hook_messages: Vec<LlmMessage>,
     ) -> Result<(), TurnError> {
-        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
-            .await?;
+        let LlmRequestSnapshot {
+            request_id,
+            messages,
+            acknowledgements,
+            ..
+        } = request;
+        let hook_messages = state.provider_response_messages(messages);
+        self.dispatch_after_provider_response(
+            hooks.extension_runner,
+            request_id.clone(),
+            hook_messages,
+            state,
+        )
+        .await?;
 
         let visible_tools = state.visible_tools();
 
         let plan = self
             .tools
-            .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
+            .prepare_tool_batch(tool_calls, &visible_tools, state)
             .await?;
-        self.tools.declare_tool_batch(&plan, publisher).await?;
+        self.tools
+            .declare_tool_batch(&plan, hooks.publisher)
+            .await?;
+        self.acknowledge_provider_request(
+            hooks.extension_runner,
+            hooks.publisher,
+            &request_id,
+            &acknowledgements,
+        )
+        .await?;
 
         let discovered_tools = match self
             .tools
@@ -726,7 +789,7 @@ impl TurnLoop {
                 batch: plan,
                 tools: &visible_tools,
                 state,
-                publisher: Arc::clone(publisher),
+                publisher: Arc::clone(hooks.publisher),
             })
             .await
         {
@@ -742,44 +805,51 @@ impl TurnLoop {
     async fn postprocess_complete_stage(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        request_id: ProviderRequestId,
         user_text: String,
         state: &mut TurnState,
         finish_reason: String,
-        hook_messages: Vec<LlmMessage>,
+        hook_messages: Vec<Arc<LlmMessage>>,
     ) -> Result<TurnOutput, TurnError> {
-        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
+        self.dispatch_after_provider_response(extension_runner, request_id, hook_messages, state)
             .await?;
         let end_ctx = self
             .shared()
             .lifecycle_ctx_with_exchange(user_text, state.final_text().to_string());
         extension_runner
-            .emit_lifecycle(ExtensionEvent::TurnEnd, end_ctx)
+            .emit_lifecycle(LifecycleEvent::TurnEnd, end_ctx)
             .await?;
-        let (text, tool_results) = state.take_output_parts();
+        let text = state.take_output_text();
         Ok(TurnOutput {
             text,
             finish_reason,
-            tool_results,
         })
     }
 
     /// 运行 `BeforeRequest` 扩展钩子。返回值覆盖 LLM 请求的 messages。
     ///
-    /// `send_messages.clone()` 不可消除：`ProviderContext` 持有 `Vec<LlmMessage>` 所有权，
-    /// 而 `emit_provider` 需 `&self` 借用。消除 clone 是 extension-sdk 的 API 演进
-    /// （`ProviderContext.messages` 改 `Arc<Vec<LlmMessage>>` + copy-on-write），不在本任务范围。
+    /// `ProviderContext` 共享持有 `Vec<Arc<LlmMessage>>`，传入只需 `Arc` 指针拷贝；
+    /// 扩展的 Replace/Append 输出保持 owned 契约，在边界处包 `Arc`。
     async fn apply_before_provider_request_hook(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        send_messages: Vec<LlmMessage>,
-    ) -> Result<Vec<LlmMessage>, TurnError> {
-        match extension_runner
-            .emit_provider(
-                ProviderEvent::BeforeRequest,
-                self.shared().provider_ctx(send_messages.clone()),
+        request_id: ProviderRequestId,
+        send_messages: Vec<Arc<LlmMessage>>,
+    ) -> Result<
+        (
+            Vec<Arc<LlmMessage>>,
+            astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
+        ),
+        TurnError,
+    > {
+        let preparation = extension_runner
+            .prepare_provider_request(
+                self.shared()
+                    .provider_ctx(request_id, send_messages.clone()),
             )
-            .await?
-        {
+            .await?;
+        let (result, acknowledgements) = preparation.into_parts();
+        let messages = match result {
             ProviderResult::Block { reason } => Err(TurnError::ProviderBlocked { reason }),
             ProviderResult::ReplaceMessages { messages } => {
                 tracing::debug!(
@@ -787,7 +857,10 @@ impl TurnLoop {
                     "BeforeProviderRequest ReplaceMessages applies only to this LLM request (not \
                      durable)"
                 );
-                Ok(provider_visible_messages(messages))
+                Ok(provider_visible_messages(messages)
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect())
             },
             ProviderResult::AppendMessages { messages } => {
                 tracing::debug!(
@@ -796,17 +869,18 @@ impl TurnLoop {
                      durable)"
                 );
                 let mut combined = send_messages;
-                combined.extend(messages);
-                Ok(provider_visible_messages(combined))
+                combined.extend(messages.into_iter().map(Arc::new));
+                Ok(provider_visible_shared_messages(combined))
             },
             ProviderResult::Allow => Ok(send_messages),
-        }
+        }?;
+        Ok((messages, acknowledgements))
     }
 
     async fn start_provider_stream(
         &self,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        send_messages: Vec<LlmMessage>,
+        send_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
         max_output_tokens: usize,
         publisher: &TurnEvents,
@@ -839,10 +913,11 @@ impl TurnLoop {
     async fn dispatch_after_provider_response(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        messages: Vec<LlmMessage>,
+        request_id: ProviderRequestId,
+        messages: Vec<Arc<LlmMessage>>,
         state: &mut TurnState,
     ) -> Result<(), TurnError> {
-        let ctx = self.shared().provider_ctx(messages);
+        let ctx = self.shared().provider_ctx(request_id, messages);
         match extension_runner
             .emit_provider(ProviderEvent::AfterResponse, ctx)
             .await?
@@ -865,7 +940,7 @@ impl TurnLoop {
         }
         extension_runner
             .emit_lifecycle(
-                ExtensionEvent::AfterProviderResponse,
+                LifecycleEvent::AfterProviderResponse,
                 self.shared().lifecycle_ctx(),
             )
             .await?;
@@ -880,38 +955,46 @@ impl TurnLoop {
         }
     }
 
-    /// 每个 agent step 开始前：重载读模型，返回自上次 step 以来新增的 durable user 消息条数。
-    async fn sync_mid_turn_user_messages(
-        &self,
-        publisher: &TurnEvents,
-        state: &mut TurnState,
-    ) -> Result<u32, TurnError> {
+    /// 每个 agent step 开始前：把归属本 turn 的 accepted 输入吸收为 durable `UserMessage`。
+    ///
+    /// 吸收点位于上一轮工具结果配对落盘之后，因此插话永远不会进入未结算的工具轮次;
+    /// 返回值（吸收条数）随 `LifecycleEvent::StepStart` 作为 `mid_turn_user_messages_synced`
+    /// 派发。
+    async fn sync_mid_turn_user_messages(&self, publisher: &TurnEvents) -> Result<u32, TurnError> {
         let model = publisher.snapshot_model().await?;
-        let current = count_visible_user_messages(&model);
-        let previous = state.synced_user_message_count();
-        let synced = current.saturating_sub(previous) as u32;
+        let absorbable: Vec<_> = absorbable_inputs_for_turn(&model, publisher.turn_id())
+            .map(|input| (input.accepted_seq, input.input.clone()))
+            .collect();
+        let synced = absorbable.len() as u32;
+        for (accepted_seq, input) in absorbable {
+            publisher
+                .durable(DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: input.text,
+                    attachments: input.attachments,
+                    accepted_seq: Some(accepted_seq),
+                })
+                .await?;
+        }
         if synced > 0 {
             tracing::debug!(
                 synced,
-                previous,
-                current,
-                "mid-turn user messages synced into context for next step"
+                "mid-turn user messages absorbed into transcript at step boundary"
             );
         }
-        state.set_synced_user_message_count(current);
         Ok(synced)
     }
 
+    /// 是否存在归属本 turn、尚未吸收的 accepted 输入（complete step 据此再跑一个 step
+    /// 完成吸收，而不是把输入留到 turn 结束后由队列启动）。
     async fn has_pending_mid_turn_user_messages(
         &self,
         publisher: &TurnEvents,
-        state: &TurnState,
     ) -> Result<bool, TurnError> {
         let model = publisher.snapshot_model().await?;
-        Ok(has_pending_mid_turn_user_messages(
-            &model,
-            state.synced_user_message_count(),
-        ))
+        Ok(absorbable_inputs_for_turn(&model, publisher.turn_id())
+            .next()
+            .is_some())
     }
 
     async fn should_continue_after_stop(
@@ -921,14 +1004,13 @@ impl TurnLoop {
         finish_reason: &str,
         state: &mut TurnState,
     ) -> Result<bool, TurnError> {
-        let ctx = ContinueAfterStopContext {
-            session_id: self.shared().session_id.to_string(),
-            working_dir: self.shared().working_dir.clone(),
-            model: self.shared().model_selection(),
-            assistant_text: assistant_text.to_string(),
-            finish_reason: finish_reason.to_string(),
-            continuations_this_turn: state.continue_after_stop_count(),
-        };
+        let call = self.shared().hook_call_context();
+        let ctx = runtime_continue_after_stop_context(
+            call,
+            assistant_text,
+            finish_reason,
+            state.continue_after_stop_count(),
+        );
         let decision = extension_runner.emit_continue_after_stop(ctx).await?;
         if decision == ContinueAfterStopResult::ContinueOneStep {
             state.record_continue_after_stop();
@@ -947,6 +1029,19 @@ fn extract_last_assistant_text(messages: &[LlmMessage]) -> Option<String> {
         .map(|message| message.joined_text(""))
 }
 
+/// turn 各阶段耗时采样,供性能回归排查;`astrcode::perf` target,默认 debug 级不开启。
+async fn timed_stage<T>(stage: &'static str, future: impl std::future::Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let output = future.await;
+    tracing::debug!(
+        target: "astrcode::perf",
+        stage,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "turn stage timing"
+    );
+    output
+}
+
 fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
     LlmContent::join_text(messages.iter().flat_map(|message| &message.content), "")
 }
@@ -955,7 +1050,6 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
 pub struct TurnOutput {
     pub text: String,
     pub finish_reason: String,
-    pub tool_results: Vec<astrcode_core::tool::ToolResult>,
 }
 
 /// 单个 agent step 的结果：`Continue` 进入下一 step，`Finished` 结束 turn。

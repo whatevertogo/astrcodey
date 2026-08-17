@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use astrcode_context::{
-    CompactResult, ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher,
-    PostCompactEnrichInput, PostCompactEnricher, PreparedContext,
-    context_assembler::LlmContextAssembler,
+    ContextAssembler, ContextPrepareInput, PreparedContext, context_assembler::LlmContextAssembler,
 };
 use astrcode_core::{
     config::{
@@ -14,8 +12,8 @@ use astrcode_core::{
         DurableEvent, DurableEventPayload, Event, PersistedSystemPrompt, SessionStarted,
         StoredEvent, SystemPromptSource,
     },
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::{SessionToolSelection, ToolDefinition},
+    llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits},
+    tool::SessionToolSelection,
     types::SessionId,
 };
 use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, TurnHooks};
@@ -48,10 +46,9 @@ pub(crate) struct UnusedLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for UnusedLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         unreachable!("test does not call the LLM")
     }
@@ -127,16 +124,6 @@ impl ContextAssembler for NoopContextAssembler {
     }
 }
 
-/// 追加标记文本的 post-compact enricher 桩。
-pub(crate) struct CountingPostCompactEnricher;
-
-#[async_trait::async_trait]
-impl PostCompactEnricher for CountingPostCompactEnricher {
-    async fn enrich(&self, compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {
-        compaction.summary.push_str(" enriched");
-    }
-}
-
 /// 事件观察者桩：转发到 mpsc 通道供断言。
 pub(crate) struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
 
@@ -162,13 +149,11 @@ pub(crate) fn test_runtime_services_with_hooks(
     turn_hooks: Arc<dyn TurnHooks>,
 ) -> Arc<crate::SessionRuntimeServices> {
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    Arc::new(crate::SessionRuntimeServices::new(
+    Arc::new(crate::SessionRuntimeServices::new_with_context_assembler(
         llm.clone(),
         llm,
         test_effective_config(ContextSettings::default()),
         crate::SessionExtensionPorts::with_turn_hooks(turn_hooks),
         Arc::new(NoopContextAssembler::new(ContextSettings::default())),
-        Arc::new(NoopPostCompactEnricher),
-        Arc::new(NoopRuntimePorts),
     ))
 }

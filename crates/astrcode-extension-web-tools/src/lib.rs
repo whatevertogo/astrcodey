@@ -11,17 +11,19 @@ mod preapproved;
 mod url_guard;
 mod web_search;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError, Registrar,
-        ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, Registrar, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
-    llm::LlmProvider,
-    network::OutboundNetworkService,
+    host::{HOST_NETWORK_MAX_TIMEOUT_MS, ModelClient, NetworkClient},
     tool::{
-        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
+        HostResource, ResourceAccess, ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan,
+        ToolResult, tool_metadata,
     },
 };
 use parking_lot::{Mutex, RwLock};
@@ -49,6 +51,12 @@ fn web_search_description() -> String {
     )
 }
 
+fn host_timeout_ms(timeout: Duration) -> u64 {
+    timeout
+        .as_millis()
+        .clamp(1, u128::from(HOST_NETWORK_MAX_TIMEOUT_MS)) as u64
+}
+
 const FETCH_URL_DESCRIPTION: &str =
     "Fetch content from a specified URL and process it for the given prompt.\n\nWhen NOT to \
      use:\n- Authenticated or private URLs (Google Docs, Confluence, Jira, internal \
@@ -70,8 +78,8 @@ struct WebToolsExtension {
 
 struct WebToolsShared {
     config: WebToolsConfig,
-    small_llm: Option<Arc<dyn LlmProvider>>,
-    outbound_network: Option<Arc<dyn OutboundNetworkService>>,
+    small_llm: Option<ModelClient>,
+    outbound_network: Option<NetworkClient>,
     fetch_cache: Arc<Mutex<FetchUrlCache>>,
 }
 
@@ -102,51 +110,55 @@ impl WebToolsShared {
     }
 }
 
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    load_config(config).map(|_| ())
+}
+
 #[async_trait::async_trait]
 impl Extension for WebToolsExtension {
-    fn id(&self) -> &str {
-        config::EXTENSION_ID
+    fn manifest(&self) -> ExtensionManifest {
+        manifest(config::EXTENSION_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::NetworkClient)
+            .capability(ExtensionCapability::SmallModel)
+            .build()
     }
 
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::NetworkClient,
-            ExtensionCapability::SmallModel,
-        ]
+    fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
+        validate_config(config)
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let network = ctx
+            .host()
+            .network()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        let models = ctx.host().models();
+        let small_llm = models
+            .small_available()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?
+            .then_some(models);
         let mut shared = self.shared.write();
-        shared.update_config(load_config(&ctx.config));
-        shared.small_llm = ctx
-            .host_services()
-            .and_then(|services| services.small_llm.clone());
-        shared.outbound_network = ctx
-            .host_services()
-            .and_then(|services| services.outbound_network.clone());
-        if shared.outbound_network.is_none() {
-            return Err(ExtensionError::Internal(
-                "outbound network service is unavailable".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        self.shared.write().update_config(load_config(&config));
+        shared.update_config(load_config(ctx.config())?);
+        shared.small_llm = small_llm;
+        shared.outbound_network = Some(network);
         Ok(())
     }
 
     fn register(&self, reg: &mut Registrar) {
         let shared = Arc::clone(&self.shared);
         reg.tool(
-            web_search_tool_definition(),
+            ExtensionToolDefinition::from_definition(web_search_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL),
             Arc::new(WebSearchToolHandler {
                 shared: shared.clone(),
             }),
         );
         reg.tool(
-            fetch_url_tool_definition(),
+            ExtensionToolDefinition::from_definition(fetch_url_tool_definition())
+                .with_execution_policy(ToolExecutionPolicy::PARALLEL),
             Arc::new(FetchUrlToolHandler { shared }),
         );
     }
@@ -158,23 +170,20 @@ struct WebSearchToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for WebSearchToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Network))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        _working_dir: &str,
-        _ctx: &ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != config::WEB_SEARCH_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
 
-        let args = serde_json::from_value::<WebSearchArgs>(arguments).map_err(|error| {
-            ExtensionError::Internal(format!(
-                "invalid args for {}: {error}",
-                config::WEB_SEARCH_TOOL_NAME
-            ))
-        })?;
+        let args = ctx.arguments::<WebSearchArgs>()?;
         let query = args.query.trim().to_string();
         let (config, network) = {
             let shared = self.shared.read();
@@ -216,23 +225,23 @@ struct FetchUrlToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for FetchUrlToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::new([
+            ResourceAccess::host(HostResource::Network),
+            ResourceAccess::host(HostResource::Model),
+        ]))
+    }
+
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        _working_dir: &str,
-        _ctx: &ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != config::FETCH_URL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
 
-        let args = serde_json::from_value::<FetchUrlArgs>(arguments).map_err(|error| {
-            ExtensionError::Internal(format!(
-                "invalid args for {}: {error}",
-                config::FETCH_URL_TOOL_NAME
-            ))
-        })?;
+        let args = ctx.arguments::<FetchUrlArgs>()?;
         let requested_url = args.url.trim().to_string();
         let prompt = args.prompt.trim().to_string();
         let (config, cache, network, small_llm) = {
@@ -249,7 +258,7 @@ impl ToolHandler for FetchUrlToolHandler {
 
         match run_fetch_url(&config, &cache, network, small_llm, args).await {
             Ok(FetchUrlResult::Content(outcome)) => {
-                let content = render_fetch_content(&outcome);
+                let content = render_fetch_content(&outcome, config.max_output_chars);
                 Ok(ToolResult::text(
                     content,
                     false,
@@ -266,7 +275,7 @@ impl ToolHandler for FetchUrlToolHandler {
                 .into())
             },
             Ok(FetchUrlResult::Redirect(outcome)) => Ok(ToolResult::text(
-                render_fetch_redirect(&outcome),
+                render_fetch_redirect(&outcome, config.max_output_chars),
                 false,
                 tool_metadata([
                     ("url", json!(requested_url)),
@@ -325,7 +334,6 @@ fn web_search_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
     }
 }
 
@@ -350,6 +358,20 @@ fn fetch_url_tool_definition() -> ToolDefinition {
         }),
         strict: true,
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Parallel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_timeout_stays_within_the_wire_contract() {
+        assert_eq!(host_timeout_ms(Duration::ZERO), 1);
+        assert_eq!(host_timeout_ms(Duration::from_secs(30)), 30_000);
+        assert_eq!(
+            host_timeout_ms(Duration::from_secs(u64::MAX)),
+            HOST_NETWORK_MAX_TIMEOUT_MS
+        );
     }
 }

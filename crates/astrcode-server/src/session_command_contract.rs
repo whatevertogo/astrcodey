@@ -1,28 +1,24 @@
-use astrcode_core::types::{SessionId, TurnId};
+use astrcode_core::types::TurnId;
+use astrcode_extension_sdk::extension::SessionCommandIntent;
 
 use crate::{session_manager::SessionManagerError, turn_scheduler::TurnScheduleError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandInfo {
     pub name: String,
+    pub extension_id: String,
     pub description: String,
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    pub source: CommandSource,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    Builtin,
-    Extension,
-    Skill,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CommandList {
     pub commands: Vec<CommandInfo>,
+    pub keybindings: Vec<astrcode_extension_sdk::extension::Keybinding>,
+    pub status_items: Vec<astrcode_extension_sdk::extension::StatusItem>,
 }
 
 /// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。
@@ -37,6 +33,34 @@ pub enum CommandInvocation {
     Display { content: String, is_error: bool },
     Handled { message: String },
     Started { turn_id: TurnId },
+}
+
+#[derive(Debug)]
+pub(crate) enum CommandOutcome {
+    Invocation(CommandInvocation),
+    SessionCommand(SessionCommandIntent),
+}
+
+impl CommandOutcome {
+    pub(crate) fn into_noninteractive(self) -> Result<CommandInvocation, HandlerError> {
+        match self {
+            Self::Invocation(invocation) => Ok(invocation),
+            Self::SessionCommand(SessionCommandIntent::SelectModel) => {
+                Err(HandlerError::InvalidRequest(
+                    "interactive model selection is only available on interactive transports"
+                        .into(),
+                ))
+            },
+            Self::SessionCommand(SessionCommandIntent::CompactSession { .. }) => Err(
+                HandlerError::InvalidRequest("compact command was not executed by the host".into()),
+            ),
+        }
+    }
+
+    pub(crate) fn into_prompt_submission(self) -> Result<PromptSubmission, HandlerError> {
+        self.into_noninteractive()
+            .map(CommandInvocation::into_prompt_submission)
+    }
 }
 
 impl CommandInvocation {
@@ -55,12 +79,6 @@ impl CommandInvocation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManualCompactOutcome {
-    Compacted { session_id: SessionId },
-    Skipped { message: String },
-}
-
 /// Session command application error.
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerError {
@@ -76,16 +94,12 @@ pub enum HandlerError {
     UnknownCommand(String),
     #[error("Cannot compact while a turn is running")]
     CompactBlocked,
-    #[error("Compaction skipped: {0}")]
-    CompactionSkipped(String),
     #[error(transparent)]
     SessionManager(#[from] SessionManagerError),
     #[error(transparent)]
     Session(astrcode_session::SessionError),
     #[error(transparent)]
     Turn(astrcode_session::TurnError),
-    #[error(transparent)]
-    Compact(astrcode_context::CompactError),
     #[error("LLM error: {0}")]
     Llm(#[source] astrcode_core::llm::LlmError),
     #[error(transparent)]
@@ -95,6 +109,8 @@ pub enum HandlerError {
     /// Command actor 通道已关闭，服务不可用。
     #[error("Command actor is unavailable")]
     ActorUnavailable,
+    #[error("Config publication failed: {0}")]
+    ConfigPublication(String),
     /// 验证失败或状态不满足前置条件。
     #[error("Invalid request: {0}")]
     InvalidRequest(String),

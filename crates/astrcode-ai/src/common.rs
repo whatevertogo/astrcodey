@@ -35,6 +35,14 @@ pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
         || usage.total_tokens.is_some()
 }
 
+pub(crate) fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 /// 根据 `LlmClientConfig` 构建 reqwest client。
 ///
 /// 配置无效时返回 [`LlmError::Transport`]，不在 silently 降级到无 timeout 的默认 client。
@@ -436,7 +444,7 @@ impl SseStreamSummary {
                  Content-Type: {}, bytes: {}, preview: {}",
                 self.content_type.as_deref().unwrap_or("<missing>"),
                 self.bytes_read,
-                &self.body_preview[..self.body_preview.floor_char_boundary(256)],
+                utf8_prefix(&self.body_preview, 256),
             )));
         }
         Ok(())
@@ -491,16 +499,16 @@ pub(crate) async fn consume_sse_lines(
         if body_preview.is_empty() && !bytes.is_empty() {
             body_preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_string();
         }
-        if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
-            if !consume_decoded_lines(&mut line_reader, &text, &mut on_line)? {
-                return Ok(None);
-            }
-        }
-    }
-    if let Some(tail) = decoder.finish() {
-        if !consume_decoded_lines(&mut line_reader, &tail, &mut on_line)? {
+        if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)?
+            && !consume_decoded_lines(&mut line_reader, &text, &mut on_line)?
+        {
             return Ok(None);
         }
+    }
+    if let Some(tail) = decoder.finish()
+        && !consume_decoded_lines(&mut line_reader, &tail, &mut on_line)?
+    {
+        return Ok(None);
     }
     if line_reader.flush().is_some_and(|line| !on_line(&line)) {
         return Ok(None);
@@ -729,6 +737,13 @@ mod tests {
     }
 
     #[test]
+    fn utf8_prefix_respects_byte_limits_and_character_boundaries() {
+        assert_eq!(utf8_prefix("abc", 8), "abc");
+        assert_eq!(utf8_prefix("ab界", 4), "ab");
+        assert_eq!(utf8_prefix("界", 0), "");
+    }
+
+    #[test]
     fn transport_errors_redact_sensitive_query_values() {
         let endpoint = redacted_endpoint("https://api.example.com/v1/models/m?alt=sse&key=secret");
 
@@ -838,7 +853,10 @@ mod tests {
 
     fn test_request(addr: String) -> HttpPostRequest {
         HttpPostRequest {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build local test client"),
             endpoint: addr,
             headers: vec![],
             body: serde_json::json!({}),

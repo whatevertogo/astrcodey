@@ -1,7 +1,5 @@
 //! Session 生命周期与对话快照路由。
 
-use std::collections::BTreeSet;
-
 use astrcode_core::{
     tool::{SessionApiError, SessionToolSelection},
     types::SessionId,
@@ -9,11 +7,13 @@ use astrcode_core::{
 use astrcode_protocol::http::{
     CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
     CommandInvokeRequest, CommandInvokeResponse, CompactSessionRequest, CompactSessionResponse,
-    ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, CreateSessionRequest,
+    ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, ConversationCursorDto,
+    ConversationItemsPageResponseDto, ConversationTimelineCursorDto, CreateSessionRequest,
     CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse,
     SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto, ToolApprovalRequest,
     ToolSelectionDto,
 };
+use astrcode_session::compaction::ManualCompactionOutcome;
 use astrcode_session_projection::SessionSummary;
 use axum::{
     Json,
@@ -24,21 +24,33 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::{
-    HttpState, bad_request_response, conflict_response, handler_error_response,
-    internal_error_response, not_found_response,
-    projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
+    HttpState, bad_request_response, conflict_response,
+    conversation_timeline::{
+        ConversationTimelineError, DEFAULT_PAGE_ITEMS, MAX_PAGE_BYTES, MAX_PAGE_ITEMS, PageBudget,
+        TimelineCursor,
+    },
+    handler_error_response, internal_error_response, not_found_response,
+    projection::{
+        session_title_from_working_dir,
+        snapshot::{conversation_state_to_dto, conversation_to_dto, decorate_timeline_items},
+    },
 };
 use crate::{
     protocol_mapping::{command_info_to_http_dto, keybinding_to_dto, status_item_to_dto},
-    session_command_contract::{
-        CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
-    },
+    session_command_contract::{CommandInvocation, HandlerError, PromptSubmission},
 };
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::http) struct DeleteProjectParams {
     working_dir: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::http) struct ConversationItemsParams {
+    before: Option<String>,
+    limit: Option<usize>,
 }
 
 pub(in crate::http) async fn create_session(
@@ -105,18 +117,7 @@ fn map_tool_selection(selection: ToolSelectionDto) -> Result<SessionToolSelectio
 }
 
 fn normalized_tool_names(names: Vec<String>) -> Result<Vec<String>, String> {
-    names
-        .into_iter()
-        .map(|name| {
-            let name = name.trim();
-            if name.is_empty() {
-                Err("tool names must not be empty".to_string())
-            } else {
-                Ok(name.to_owned())
-            }
-        })
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map(|names| names.into_iter().collect())
+    astrcode_core::tool::validated_tool_names(names).map_err(|error| error.to_string())
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {
@@ -147,6 +148,90 @@ pub(in crate::http) async fn conversation_snapshot(
         },
         Err(error) => not_found_response("session_not_found", error),
     }
+}
+
+pub(in crate::http) async fn conversation_state(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let session_id = SessionId::from(session_id);
+    match state
+        .app
+        .runtime()
+        .session_manager()
+        .read_model(&session_id)
+        .await
+    {
+        Ok(snapshot) => {
+            let streaming = state.app.event_bus().streaming_snapshot(&session_id);
+            Json(conversation_state_to_dto(&snapshot, streaming.as_ref())).into_response()
+        },
+        Err(error) => not_found_response("session_not_found", error),
+    }
+}
+
+pub(in crate::http) async fn conversation_items(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<ConversationItemsParams>,
+) -> Response {
+    let session_id = SessionId::from(session_id);
+    let before = match params.before.map(TimelineCursor::parse).transpose() {
+        Ok(cursor) => cursor,
+        Err(error) => return bad_request_response("invalid_timeline_cursor", error),
+    };
+    let snapshot = match state
+        .app
+        .runtime()
+        .session_manager()
+        .read_model(&session_id)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return not_found_response("session_not_found", error),
+    };
+    let mut page = match state
+        .conversation_timeline
+        .page_before(
+            &session_id,
+            before.as_ref(),
+            PageBudget {
+                max_items: params
+                    .limit
+                    .unwrap_or(DEFAULT_PAGE_ITEMS)
+                    .clamp(1, MAX_PAGE_ITEMS),
+                max_bytes: MAX_PAGE_BYTES,
+            },
+        )
+        .await
+    {
+        Ok(page) => page,
+        Err(ConversationTimelineError::InvalidCursor) => {
+            return bad_request_response(
+                "invalid_timeline_cursor",
+                "invalid conversation timeline cursor",
+            );
+        },
+        Err(ConversationTimelineError::Storage(astrcode_storage::StorageError::NotFound(
+            error,
+        ))) => return not_found_response("session_not_found", error),
+        Err(error) => return internal_error_response("conversation_timeline_failed", error),
+    };
+    decorate_timeline_items(&mut page.items, &snapshot, before.is_none());
+
+    Json(ConversationItemsPageResponseDto {
+        items: page.items,
+        older_cursor: page
+            .older_cursor
+            .map(|cursor| ConversationTimelineCursorDto {
+                value: cursor.into_string(),
+            }),
+        has_older: page.has_older,
+        snapshot_cursor: ConversationCursorDto {
+            value: snapshot.cursor(),
+        },
+    })
+    .into_response()
 }
 
 pub(in crate::http) async fn inject_message(
@@ -356,19 +441,13 @@ pub(in crate::http) async fn list_commands(
         .await
     {
         Ok(command_list) => {
-            let keybindings = state
-                .app
-                .runtime()
-                .extension_runner()
-                .collect_keybindings()
+            let keybindings = command_list
+                .keybindings
                 .into_iter()
                 .map(keybinding_to_dto)
                 .collect();
-            let status_items = state
-                .app
-                .runtime()
-                .extension_runner()
-                .collect_status_items()
+            let status_items = command_list
+                .status_items
                 .into_iter()
                 .map(status_item_to_dto)
                 .collect();
@@ -399,17 +478,15 @@ pub(in crate::http) async fn compact_session(
         .compact_session(&session_id, request.keep_recent_turns)
         .await
     {
-        Ok(ManualCompactOutcome::Compacted { session_id }) => Json(CompactSessionResponse {
-            accepted: true,
-            deferred: false,
-            session_id: Some(session_id.into_string()),
-            message: "compact accepted".into(),
-        })
-        .into_response(),
-        Ok(ManualCompactOutcome::Skipped { message }) => Json(CompactSessionResponse {
-            accepted: false,
-            deferred: false,
-            session_id: None,
+        Ok(ManualCompactionOutcome::Compacted { messages_removed }) => {
+            Json(CompactSessionResponse {
+                compacted: true,
+                message: format!("compact completed; {messages_removed} messages removed"),
+            })
+            .into_response()
+        },
+        Ok(ManualCompactionOutcome::Skipped { message }) => Json(CompactSessionResponse {
+            compacted: false,
             message,
         })
         .into_response(),
@@ -456,10 +533,7 @@ pub(in crate::http) async fn fork_session(
 ) -> Response {
     tracing::info!(session_id = %session_id, "POST fork session");
     let source_id = SessionId::from(session_id);
-    let at_cursor = request
-        .storage_seq
-        .map(|seq| seq.to_string())
-        .or(request.turn_id);
+    let at_cursor = request.storage_seq.map(|seq| seq.to_string());
     match state
         .app
         .session_commands()

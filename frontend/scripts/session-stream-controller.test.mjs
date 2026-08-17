@@ -129,8 +129,6 @@ async function flushMicrotasks() {
             phase: 'idle',
             canSubmitPrompt: true,
             canRequestCompact: true,
-            compactPending: false,
-            compacting: false,
           },
         },
       })

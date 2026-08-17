@@ -211,7 +211,7 @@ impl App {
         }
     }
 
-    fn sync_slash_filter(&mut self) {
+    pub(super) fn sync_slash_filter(&mut self) {
         let input = self.composer.text().to_string();
         if input.starts_with('/') {
             let filter = input
@@ -225,11 +225,6 @@ impl App {
         } else if self.show_slash_palette {
             self.close_slash();
         }
-    }
-
-    /// Public alias for use from the main loop (mod.rs).
-    pub fn sync_slash_filter_pub(&mut self) {
-        self.sync_slash_filter();
     }
 
     // ─── Transcript helpers ───────────────────────────────────────────────────
@@ -376,18 +371,18 @@ impl App {
     }
 
     pub fn session_picker_up(&mut self) {
-        if let Some(picker) = &mut self.session_picker {
-            if picker.selected > 0 {
-                picker.selected -= 1;
-            }
+        if let Some(picker) = &mut self.session_picker
+            && picker.selected > 0
+        {
+            picker.selected -= 1;
         }
     }
 
     pub fn session_picker_down(&mut self) {
-        if let Some(picker) = &mut self.session_picker {
-            if picker.selected + 1 < picker.items.len() {
-                picker.selected += 1;
-            }
+        if let Some(picker) = &mut self.session_picker
+            && picker.selected + 1 < picker.items.len()
+        {
+            picker.selected += 1;
         }
     }
 
@@ -414,18 +409,18 @@ impl App {
     }
 
     pub fn ui_picker_up(&mut self) {
-        if let Some(picker) = &mut self.ui_picker {
-            if picker.selected > 0 {
-                picker.selected -= 1;
-            }
+        if let Some(picker) = &mut self.ui_picker
+            && picker.selected > 0
+        {
+            picker.selected -= 1;
         }
     }
 
     pub fn ui_picker_down(&mut self) {
-        if let Some(picker) = &mut self.ui_picker {
-            if picker.selected + 1 < picker.items.len() {
-                picker.selected += 1;
-            }
+        if let Some(picker) = &mut self.ui_picker
+            && picker.selected + 1 < picker.items.len()
+        {
+            picker.selected += 1;
         }
     }
 
