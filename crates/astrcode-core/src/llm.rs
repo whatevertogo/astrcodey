@@ -456,17 +456,9 @@ fn provider_visible_entries<E: ProviderVisibleEntry>(messages: Vec<E>) -> Vec<E>
         .filter(|entry| entry.message().has_provider_visible_content())
         .collect();
     normalize_tool_call_entries(&mut messages);
-    // 写入侧(accepted→absorbed 管线 + turn repair)健康时,这里的截断只对
-    // 崩溃尾部/日志损坏触发;触发即意味着写入侧违规,必须可见。
-    let before_truncate = messages.len();
+    // 工具执行期间与崩溃修复前,assistant tool call 可以是合法的未结算尾部。
+    // Provider 请求不应暴露该尾部,但它本身不代表持久化或写入侧损坏。
     truncate_incomplete_tool_entries(&mut messages);
-    if messages.len() < before_truncate {
-        tracing::warn!(
-            dropped = before_truncate - messages.len(),
-            "provider normalization dropped incomplete tool-round entries; transcript write-side \
-             invariant violated"
-        );
-    }
     messages
 }
 
