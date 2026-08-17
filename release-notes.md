@@ -1,97 +1,63 @@
-## Unreleased
+## v0.3.15
 
-### ⚠️ Breaking changes
-
-- workspace 升级到 Rust 2024 edition，MSRV 为 Rust 1.88。源码保持 stable-compatible；仓库
-  `rust-toolchain.toml`、默认 CI 作业与 release 固定 `nightly-2026-07-27`，用于复现格式化、lint
-  和构建结果，独立 MSRV 作业显式使用 `1.88.0`。源码构建者需使用 Rust 1.88 或更高版本，
-  贡献者默认使用该 pinned toolchain。
-- 扩展作者 API 已收敛为 `ExtensionCallContext`、专用 handler context、`Registrar` 和类型化
-  `ExtensionHost` 领域客户端；旧 context、事件名与裸宿主服务入口不再保留兼容垫片。
-- 删除 SDK capability 历史 helper 和未被授权流程使用的 `grant_name` 平行目录；能力线缆名
-  只由 `ExtensionCapability::{as_str, parse}` 定义，operation 授权只由
-  `HostOperationSpec.required` 定义。reserved prefix 与 session-control 子动作在所属边界解析。
-  bundled session domain 类型不再从
-  `astrcode_extension_sdk::session` 重复导出，统一从 `astrcode_extension_sdk::tool` 导入；
-  S5R session DTO 仍保留在 `astrcode_extension_sdk::session`。
-- S5R 协议升级到 3.0，不兼容 1.0/2.0 worker。磁盘扩展需要迁移握手 manifest、handler context、
-  custom event 声明/订阅和 typed host API 后重新构建。
-- S5R 3.0 改为 Host-first 两阶段握手：Host 发送预期扩展 ID 与完整 operation 支持目录，Worker
-  直接返回 typed manifest；Registrar 与跨扩展冲突校验通过后，Host 再发送 `activate`。
-  删除 generic metadata、handler catalog、双向 capability catalog 及旧字段 alias。支持目录只
-  传输由共享 contract 定义的 operation 名，不重复传输描述、能力和流式属性；它表示 Host 版本
-  实现，不代表授权、调用上下文或 backend 可用。Host/Worker 角色由字段位置与类型状态表达，
-  `PeerInfo.role` 已删除。Worker 的取消令牌可读取首个 `cancel.reason`，后续清理不会覆盖原因。
-- custom-event capability 使用 `emit_custom_events` / `consume_custom_events`；模型客户端以
-  `*_chat_events` 返回渐进式 `ModelStream`，以 `*_chat_collected` 明确返回完成后的最终内容和
-  有序 chunks；删除名称与行为不一致的 `*_chat_stream`。
-- `ExtensionHttpRoute` 回归纯 wire DTO；路由格式、匹配和冲突检测统一由注册边界执行，删除
-  作者侧可绕开注册流程单独调用的 `validate()` 策略入口。
-
-- memory 扩展的数据目录统一为 `~/.astrcode/extension_data/astrcode.memory/`，项目记忆
-  放在其 `projects/<key>/` 子目录。不自动读取或迁移旧目录；升级前需手动备份并
-  将需要的文件移到新目录。
-- channels 扩展删除 Telegram 配置的 `workingDir`；由于配置严格拒绝未知字段，
-  升级前必须删除该字段。工作目录统一由宿主按调用上下文归因。
-- mode 持久化状态不再接受 `currentMode` / `previousMode` /
-  `pendingTransitionContext` 别名；todo 持久化 schema 升级为 v2，条目必须显式包含
-  `executor`。两者均不保留旧格式读取分支。
-- S5R 3.0 完成协议重命名：事件名 `extension_event` 改为 `custom_event`，
-  capability `emit_events` / `consume_events` 改为 `emit_custom_events` /
-  `consume_custom_events`，wire DTO 同步更名为 `ConversationDeltaDto::CustomEvent`、
-  `ClientNotification::GlobalCustomEvent` 等。这是 breaking change，前端与 stdio
-  客户端必须同步升级。
-- S5R envelope、manifest、handler input 和全部 host-operation DTO 统一为 `snake_case`；
-  原 custom-event / extension-HTTP manifest payload 的 `eventType`、`extensionId`、
-  `pathParams` 等字段改为 `event_type`、`extension_id`、`path_params`。HTTP/前端 DTO 的
-  `camelCase` 约定不变，server 在该边界显式映射。
-- S5R wire 错误码在 3.0 冻结前收敛同义项：不支持的能力统一使用
-  `unsupported`，无效调用者输入统一使用 `invalid_input`；不再生产
-  `not_supported`、`invalid_parameter` 或 `invalid_arguments`。
-- S5R session control 不再接受 worker 自报归因：`HostCreateSessionRequest` 删除
-  `working_dir`、`tool_call_id`，`HostSubmitTurnRequest` 删除 `tool_call_id`；宿主从当前
-  `parent_invoke_id` 对应的可信调用上下文注入 working directory 与 tool-call 归因。
-- 事件日志不可降级：新版本写出的 `custom_event` durable 事件在旧二进制上 replay
-  会失败。升级后如需回退，须先处理包含新事件的 session 日志。
-- `TranscriptRewritten.source_fingerprint` 现在是必填持久化字段；缺少该字段的过渡期
-  session 日志会在 replay 时被拒绝，不再跳过并发指纹校验。
-- turn custom-event ingress 改为容量 256 的有界队列。异步 `emit` 会背压并等待发布回执；
-  同步释放路径使用的 `try_emit` 在队列满时返回 `Full`。Session 生命周期事件（包括
-  `SessionShutdown` 补偿）会在 30 秒预算内等待 extension runtime 稳定，补偿调用方记录
-  超时并继续其余清理。
-- S5R 3.0 握手只强制 `nested_invoke_v1`；`model_stream_v1` 与 `custom_event_v1` 改为按需
-  协商。未协商的流式调用返回 `unsupported_feature`；声明 custom event 或
-  subscription 却未协商 `custom_event_v1` 的 worker 在发布注册前被拒绝。
+Released: 2026-08-17
 
 ### ✨ Features
 
-- bundled 与 S5R 扩展共用类型化 host 契约、稳定错误码和同一宿主分发目录。
-- S5R manifest 中的 capability、tool mode、hook event/mode 和 handler id 均由
-  contract enum/newtype 表达；未知值在握手边界直接拒绝。
-- custom event 支持发布回执、持久化 consumer checkpoint、顺序重试和
-  authenticated consumer 管理接口。
-
-### ⚡ Performance
-
-- durable projection 的普通 append 批次不再每次深拷贝完整 read model；先做无副作用
-  校验，event payload 在 prepare → journal → projection 间只移动不克隆；日志提交后
-  仅在旧快照仍被持有时 copy-on-write。transcript rewrite 的提交前校验只维护
-  system prompt 与 provider transcript，不再构建完整候选 read model。
-
-## v0.3.14
-
-Released: 2026-08-10
-
-### ✨ Features
-
-- feat(extensions): 支持回收会话查询与重新激活 (0844d0f1)
-- feat: 添加 assistantRunCompletedReply 函数并更新相关组件以支持会话分叉功能 (b1356b64)
-- feat(extensions): 加固扩展运行时生命周期与并发调度 (e7d2f781)
+- feat: 优化持久化文件写入逻辑，使用独立临时文件以支持并发替换 (57d031ce)
+- feat: refine provider normalization logic for tool entries during execution (3ad9e094)
+- feat: enhance message list handling with pagination and action block management (3b47e4d3)
+- feat: optimize event handling and transcript management in streaming (a979d4ce)
+- feat: implement conversation timeline with pagination and state management (5ecb6e69)
+- feat(storage): add performance baseline documentation for astrcode-storage (befaee17)
+- feat: introduce per-tool execution timeout policy (327e955c)
+- feat: update cold open benchmark to support multiple event counts (8b712a9f)
+- feat: implement session ownership lease and session projection (a20a7d65)
+- feat: Final cleanliness pass for PR #47 (275fea1e)
+- feat(tests): enhance extension integration tests with planning context and resource lease (c9c07e58)
+- feat: add S5R Phase-0 cleanliness audit documentation (674e7a14)
+- feat: enhance early tool execution and session management (64b7bcc7)
+- feat: 更新 DurableEventPayload 的序列化逻辑以兼容旧日志格式 (08f18eb0)
+- feat: 更新 CustomEventConsumerStatus 和 DTO，调整 quarantined_events 类型为 u64 (600a907c)
+- feat: 更新 S5R 3.0 协议，添加效果常量并优化文档 (93b5a09d)
+- feat: update extension protocol to S5R 3.0 and improve documentation (e2fd26a4)
+- feat: Introduce event consumer state management and custom event handling (24b75dc3)
+- feat: Enhance event emission system with new EventPublishReceipt and error handling (d7795ff1)
 
 ### 🐛 Bug Fixes
 
-- fix(llm): 安全重试中断的流式响应 (2b935f63)
-- fix: update rand import to use RngExt for improved functionality (c5505ff6)
+- fix: update parameter type for extension command context and request handling (d5ccdc87)
+- fix(extensions): harden S5R lifecycle and clarify ownership (5a0ece23)
+- fix(extensions): 收紧 S5R 运行时边界 (86c0dffc)
+- fix: 修正持久化自定义事件处理中的变量命名 (ddd4c19a)
+
+### 🔧 Refactors
+
+- refactor: 收敛跨模块重复实现与遗留契约 (1a951cfd)
+- Refactor LlmMessage handling to use Arc for shared ownership (564a9fbb)
+- Refactor session storage and message handling for improved performance (fe1756d2)
+- refactor: rename SessionEventPublisher to SessionEventSink and update related documentation (9919f897)
+- Refactor and clean up extension worker and manifest handling (9c1ed550)
+- refactor(extensions): 收敛作者契约与宿主分发 (f5d4da30)
+- refactor(extensions): 移除 host 能力 JSON Schema 发布 (abbac3c6)
+- refactor(wire): 统一跨线缆错误码为单点定义的 WireErrorCode (0bf9dda4)
+- refactor(extensions): 统一宿主线缆契约与运行时边界 (50c599df)
+- Refactor session context handling and tool execution (3cddb7a0)
+- refactor(extensions): 统一扩展作者接口与宿主能力 (64635f22)
+
+### 📝 Other
+
+- Add extension gap analysis document comparing astrcodey and deepseek-harness capabilities (395437ca)
+- Add in-memory transport and comprehensive tests for frame handling and handshake protocol (6a5036ce)
+- clean (0b0461d9)
+- all (808f0ad8)
+- clean (df671e21)
+- better (5851e2de)
+- Update AstrCodey runtime and extension integration (3c0cbf39)
+
+### Pull Requests
+
+- #47
 
 ### Contributors
 
@@ -99,4 +65,4 @@ Released: 2026-08-10
 
 ---
 
-**Install:** `npm install -g @whatevertogo/astrcode@0.3.14`
+**Install:** `npm install -g @whatevertogo/astrcode@0.3.15`
