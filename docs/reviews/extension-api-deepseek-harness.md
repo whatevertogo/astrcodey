@@ -2,6 +2,56 @@
 
 > 来源：`/Users/whatevertogo/githubown/deepseek-harness`(TypeScript monorepo)。签名均逐字照抄源码；为可读性省略了 JSDoc 注释与私有成员（私有成员在 `private` 标注后略去）。每个条目注明文件路径。
 
+## 修订记录(2026-08-18,对照 master 47f9438)
+
+> 本次对照 deepseek-harness master `47f9438` 重新调查。既有 11 节(§1–§11)的签名抽查全部仍然有效,未发现已收录的 API 被删除,可继续作为签名参考直接使用。但文档撰写后 deepseek 侧新增了大量子系统,以下是本文档**未覆盖**的扩展面,按域分组,每条注明位置。deepseek 官方另有一份「feature → mechanism」扩展点地图(`docs/cookbook/extension-cookbook.md:101-129`),可作为权威对照基准。
+
+**1. vendor 加载/分发体系(整组缺失)**
+
+- `ctx.loader`:cordis.yml 声明式插件树读写,支持 `!!js` 表达式、overlay/patch 层叠、`Group`/`Include` 组合(`vendor/loader/src/index.ts:65`)。
+- `ctx.hmr`:文件监听热重载,`hmr/change`、`hmr/reload` 事件(`vendor/hmr/src/index.ts:86`)。
+- `ctx.timer`:`ctx.timeout/interval/throttle/debounce`(`vendor/timer/src/index.ts:11`)。
+- 包分发:npm bundle + `--profile`(packages/bundle:base/headless/web-app 三档)。
+
+**2. MCP client(文档一字未提 MCP)**
+
+- `packages/mcp/mcp-client`:每个插件实例连一个 MCP server(stdio 或 streamable-http),对端工具以 `mcp__<server>__<tool>` 名字注册进 `ctx.tools`;无 MCP server 暴露面。
+
+**3. Claude Code / Codex hooks.json 桥(`packages/hooks/`)**
+
+- `hook-protocol`:共享的 matcher/执行/结果合并/durable 事件库;`hooks-claude-code`、`hooks-codex` 原样执行旧 hooks.json 命令钩子并映射到原生扩展点(SessionStart→`agent/session-start`、UserPromptSubmit→`agent/pre-step`、PreToolUse→`tools/pre-execute`、PostToolUse→`tools/post-execute`、Stop→`agent/turn-stopping`、SubagentStart/Stop→`subagent/start|end`,`hooks/hooks-claude-code/src/index.ts:206-295`)。
+
+**4. Typert RPC 体系**
+
+- `TypertRemoteService` + `@Remote('name')` 装饰器把宿主服务方法投影成类型化 RPC(`packages/typert/protocol/src/types.ts`);宿主侧网关 `ctx.typertGateway`/`ctx.apiProxy`(`api/gateway/src/types.ts:49`),client 侧 `ctx.remote.*`。§6 commands 与 §9 goals 签名里出现的 `TypertRemoteService` 字样即属此体系,文档当时未把它当作独立 API 面。
+
+**5. 新增 ctx 服务(约 25 个,按域归并)**
+
+- agent/会话:`ctx.agentLoop`(声明式配置启动 + `agent-loop/config-start-failed` 事件,`core/agent-loop/src/index.ts:160-185`)、`ctx.sessionPersistence`(locate/create/append/load/listSnapshots,:84-240)、`ctx.sessionProjections`(fold 式投影 + change feed,:171)、`ctx.sessionQuery`(SQL 查询历史会话与事件,SQLite 派生索引,:81-307)、`ctx.sessionTitle`(可注册 provider)、`ctx.sessionTelemetry`(OTel 后端 seam)、`ctx.sessionReferenceResolver`。
+- 交互/权限:`ctx.userQuestions`(ask_user 的 UI provider seam,`registerProvider/ask`,:51)、`ctx.permissionPresets`(权限预设档位:current/selectFor/resolve/set,:159)。
+- 工具/数据:`ctx.attachments`(图片附件内容寻址存储,:29)、`ctx.spillStore`(超大工具输出外溢存储 + locator,:45)、`ctx.toolResultPruner`、`ctx.tokenMeter`(会话 token 计量/估算,:74)。
+- 沙箱/环境:`ctx.sandbox`(OS 级圈禁 seam:landlock/seatbelt/bwrap/windows-acl,`confine(argv, policy)` fail-closed,:158-175)、`ctx.sandboxPolicy`(部署默认 + per-session `sandbox/mode` durable 事件覆盖,:91)、`ctx.shellEnv`(注册可信 `DSH_*` 环境变量事实,:21)、`ctx.e2b`(E2B 远程沙箱 owner,fs-e2b/subprocess-e2b 适配器把远端世界接进同一 seam,:74)。
+- 工作区/预设:`ctx.workspaceRegistry`(工作区实体 + 会话归档,:92)、`ctx.agentPresets`(整套 cordis.yml 组合热切换:list/resolve/mount/recompose/copy/remove,:82-485)。
+- 其他:`ctx.invariants`(运行时不变量注册表)、`ctx.storageDomain`、`ctx.webServer`(:59-139)、`ctx.directoryPicker`、`ctx.messageFeedback`、`ctx.clientModules` 等。
+
+**6. client UI slots 体系(`packages/client/*`)**
+
+- `SlotRegistry.register()` + `declare module '@deepseek-ai/dsh-client-ui-slots' { interface SlotMap }` 声明合并;single/list/chain 三种槽、root/session scope、store 轴、`slots/changed` 事件(`client/runtime/src/client/slots.ts:93`);`dsh.client` 双面包:package.json 声明 → 宿主扫描 → `/plugins/<id>/client.js` 动态加载(`client/modules/src/index.ts:35`);另有 locale/theme/conversation/layout/inputTriggers 等 client 侧服务族。§11 的 `ConversationNodeDefinition` 描述经抽查仍准确。
+
+**7. 子系统级新增(代表性列举)**
+
+- sandbox 组(含 windows-acl)、schedule(durable cron/一次性提醒,基于 session 事件日志 fold,`schedule/schedule/src/index.ts:40`)、session-query 组(SQL 查询 + 导出)、spill/attachment/workspace/feedback 组、jobs 组(文档 §9 只有抽象签名)、preset 组、guard 组(timeout-policy/repeat-tool-reminder)、context 组(time/tmux/agent-instructions/session-reference)、host 组、e2b 组、acp、bundle/boot。
+- subagent 外部委派 provider:codex/claude-code/ACP/dsh-sdk 均有现成 `SubagentProvider`(文档 §9 只收录了抽象接口)。
+- LLM:`llm-pi-ai`、`llm-retry`(request-error 接管示范插件);storage-json/sqlite 后端;session-title/telemetry 各 provider;Python SDK(`python/sdk`,以子进程方式驱动 runtime)。
+
+**8. 新事件(文档未收录,代表性列举)**
+
+- `llm/adapters-updated`、`goal/changed`、`domain/changed`、`hmr/*`、`loader/*`、`agent-loop/config-start-failed`、`agent-preset/selected`、`session-telemetry/record`、`cordis/request-run-resolved`、`cordis/dynamic-retract`、`slots/changed`、`connection/reset`、`slash/input-*`、`command/executed` 等。
+
+**就地修正**
+
+- §10:`packages/extensions/` 下另有 `cordis-client-runner`、`tool-cordis`、`ui-cordis` 三个包,§10 只收录了 host-runner 系(已在该节标题下加注)。
+
 ## 1. `vendor/cordis/` — Context 核心 API
 
 ### `vendor/cordis/src/context.ts`
@@ -2152,6 +2202,8 @@ export class PlanModeController extends Service {
 ---
 
 ## 10. `packages/extensions/` — 自修改 API
+
+> 2026-08-18 注：本节只收录 host-runner 系；同目录另有 `cordis-client-runner`(client half 渲染)、`tool-cordis`(把动态插件能力包成模型可见工具)、`ui-cordis` 三个包未收录，详见文首修订记录。
 
 ### `packages/extensions/cordis-host-runner/src/index.ts`:`ctx.dynamicCordisRunner`
 

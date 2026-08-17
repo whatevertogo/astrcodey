@@ -44,7 +44,7 @@
 
 ## 扩展能力对齐(deepseek-harness 对照,2026-08 缺口分析)
 
-> 完整分析见 `docs/reviews/extension-gap-analysis.md`。P0 已完成(queue_or_start/defer_context、per-tool execution timeout、presentation intent、Python s5r SDK);以下为 P1(纯新增)与 P2(大工程/需架构决策)。
+> 完整分析见 `docs/reviews/extension-gap-analysis.md`。原 P0 已完成(queue_or_start/defer_context、per-tool execution timeout、presentation intent、Python s5r SDK);2026-08-18 重核新增一组 P0(LLM 请求改写链、session fork、托管 KV/settings、approval seam、around-execute 等,见分析文档「当前缺口清单」节),下列为 P1(纯新增)与 P2(大工程/需架构决策)备忘。
 
 ### P1 — 纯新增能力
 
