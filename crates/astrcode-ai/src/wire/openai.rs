@@ -5,7 +5,7 @@
 //! wrappers stay thin and only connect config/model state to these pieces.
 
 pub(crate) mod body;
-pub mod parser;
+pub(crate) mod parser;
 pub(crate) mod serialization;
 pub(crate) mod transport;
 

@@ -1,15 +1,14 @@
-//! Provider-specific validation for strict tool schemas.
-//!
-//! Strict tool use is opt-in at both the tool and provider-profile levels. This module validates
-//! only declarations that will actually be sent, so legacy profiles keep their previous behavior.
+//! 各 provider strict 工具 schema 的限额与合规校验。
 
 use std::collections::{HashMap, HashSet};
 
-use astrcode_core::{
-    llm::LlmError,
-    tool::{ToolDefinition, ToolOrigin},
-};
+use astrcode_core::{llm::LlmError, tool::ToolDefinition};
 use serde_json::{Map, Value};
+
+use super::{
+    StrictToolProvider,
+    traverse::{child_path, is_object_schema_object, is_union_schema, visit_child_schemas},
+};
 
 const OPENAI_MAX_OBJECT_PROPERTIES: usize = 5_000;
 const OPENAI_MAX_NESTING_DEPTH: usize = 10;
@@ -17,278 +16,11 @@ const OPENAI_MAX_SCHEMA_STRING_CHARS: usize = 120_000;
 const OPENAI_MAX_ENUM_VALUES: usize = 1_000;
 const OPENAI_LARGE_ENUM_THRESHOLD: usize = 250;
 const OPENAI_MAX_LARGE_ENUM_STRING_CHARS: usize = 15_000;
-const ANTHROPIC_MAX_STRICT_TOOLS: usize = 20;
-const ANTHROPIC_MAX_OPTIONAL_PARAMETERS: usize = 24;
-const ANTHROPIC_MAX_UNION_PARAMETERS: usize = 16;
+pub(super) const ANTHROPIC_MAX_STRICT_TOOLS: usize = 20;
+pub(super) const ANTHROPIC_MAX_OPTIONAL_PARAMETERS: usize = 24;
+pub(super) const ANTHROPIC_MAX_UNION_PARAMETERS: usize = 16;
 
-/// 三种遍历器共享的子 schema 关键字清单：数组形态与对象形态各一组。
-const CHILD_SCHEMA_KEYWORDS: [&str; 4] = ["anyOf", "oneOf", "allOf", "prefixItems"];
-const DEFINITION_KEYWORDS: [&str; 3] = ["$defs", "definitions", "patternProperties"];
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum StrictToolProvider {
-    OpenAi,
-    Anthropic,
-}
-
-/// Compile first-party tool schemas to the strict JSON Schema dialect used by the provider.
-///
-/// Tool definitions keep their natural runtime contract: optional Rust fields remain optional and
-/// validation constraints remain available to the executor. Provider strict dialects differ,
-/// though. OpenAI requires every object property to appear in `required`, while Anthropic permits
-/// optional properties but rejects several validation-only keywords. Compiling at this boundary
-/// avoids duplicating provider-specific schemas in every tool implementation.
-pub(crate) fn prepare_strict_tools(
-    tools: &mut [ToolDefinition],
-    supports_strict_tool_use: bool,
-    provider: StrictToolProvider,
-) -> Result<(), LlmError> {
-    if !supports_strict_tool_use {
-        return Ok(());
-    }
-
-    match provider {
-        StrictToolProvider::OpenAi => {
-            for tool in tools.iter_mut().filter(|tool| tool.strict) {
-                compile_openai_tool_schema(&mut tool.parameters);
-            }
-        },
-        StrictToolProvider::Anthropic => {
-            prepare_anthropic_tools(tools)?;
-        },
-    }
-    validate_strict_tools(tools, supports_strict_tool_use, provider)
-}
-
-fn compile_openai_tool_schema(schema: &mut Value) {
-    // OpenAI forbids a root `anyOf`. First-party executors remain authoritative for cross-field
-    // invariants (for example edit's single-edit versus batch-edit shape), while the compiled
-    // schema still constrains every field name and value type.
-    if schema.get("anyOf").is_some_and(is_required_only_root_union)
-        && let Some(object) = schema.as_object_mut()
-    {
-        object.remove("anyOf");
-    }
-    compile_openai_schema(schema);
-}
-
-fn is_required_only_root_union(union: &Value) -> bool {
-    union.as_array().is_some_and(|branches| {
-        !branches.is_empty()
-            && branches.iter().all(|branch| {
-                branch.as_object().is_some_and(|object| {
-                    object.len() == 1
-                        && object.get("required").is_some_and(|required| {
-                            required.as_array().is_some_and(|names| {
-                                !names.is_empty() && names.iter().all(Value::is_string)
-                            })
-                        })
-                })
-            })
-    })
-}
-
-fn prepare_anthropic_tools(tools: &mut [ToolDefinition]) -> Result<(), LlmError> {
-    let mut candidates = tools
-        .iter()
-        .enumerate()
-        .filter(|(_, tool)| tool.strict)
-        .map(|(index, tool)| {
-            let mut candidate = tool.clone();
-            compile_anthropic_schema(
-                &mut candidate.parameters,
-                candidate.origin == ToolOrigin::Bundled,
-            );
-            (index, candidate)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|(index, tool)| (tool_origin_priority(tool.origin), *index));
-
-    let mut accepted = Vec::new();
-    let mut downgraded = Vec::new();
-    for (index, mut candidate) in candidates {
-        validate_anthropic_tool(&candidate)?;
-        if accepted.len() < ANTHROPIC_MAX_STRICT_TOOLS {
-            let stats = {
-                let mut trial = accepted.iter().collect::<Vec<_>>();
-                trial.push(&candidate);
-                collect_anthropic_schema_stats(&trial)?
-            };
-            let optional_overflow = stats
-                .optional_parameters
-                .saturating_sub(ANTHROPIC_MAX_OPTIONAL_PARAMETERS);
-            if optional_overflow > 0 {
-                let promoted_unions =
-                    promote_optional_parameters(&mut candidate.parameters, optional_overflow, true);
-                let remaining = optional_overflow.saturating_sub(promoted_unions);
-                let union_capacity =
-                    ANTHROPIC_MAX_UNION_PARAMETERS.saturating_sub(stats.union_parameters);
-                promote_optional_parameters(
-                    &mut candidate.parameters,
-                    remaining.min(union_capacity),
-                    false,
-                );
-            }
-
-            let mut trial = accepted.iter().collect::<Vec<_>>();
-            trial.push(&candidate);
-            if validate_anthropic_tools(&trial).is_ok() {
-                tools[index] = candidate.clone();
-                accepted.push(candidate);
-                continue;
-            }
-        }
-        tools[index].strict = false;
-        downgraded.push(tools[index].name.clone());
-    }
-
-    if !downgraded.is_empty() {
-        tracing::warn!(
-            tool_names = ?downgraded,
-            "Anthropic strict-tool request limits exceeded; sending overflow tools without \
-             provider-side strict mode"
-        );
-    }
-    Ok(())
-}
-
-fn promote_optional_parameters(
-    schema: &mut Value,
-    maximum: usize,
-    existing_unions_only: bool,
-) -> usize {
-    if maximum == 0 {
-        return 0;
-    }
-    let Some(object) = schema.as_object_mut() else {
-        return 0;
-    };
-    // 校验（validate_anthropic_tool）已保证 `required` 为数组或缺失；此处仅防御。
-    let Some(required) = required_array(object) else {
-        return 0;
-    };
-    let promoted =
-        promote_properties_to_required(object, required, maximum, |_, property_schema| {
-            is_union_schema(property_schema) == existing_unions_only
-        });
-    if promoted == maximum {
-        return promoted;
-    }
-
-    visit_child_schemas_mut_count(object, maximum - promoted, |child, remaining| {
-        promote_optional_parameters(child, remaining, existing_unions_only)
-    }) + promoted
-}
-
-/// 提取 `required` 数组；`None` 表示该键存在但类型错误——调用方应保留原值，
-/// 让后续校验以"`required` must be an array"拒绝，而不是用默认值掩盖损坏。
-fn required_array(object: &Map<String, Value>) -> Option<Vec<Value>> {
-    match object.get("required") {
-        None => Some(Vec::new()),
-        Some(Value::Array(values)) => Some(values.clone()),
-        Some(_) => None,
-    }
-}
-
-/// 将对象属性提升进 `required`（对提升的属性做 nullable 包裹），返回提升数量。
-///
-/// `required` 缺失视为空数组；`properties` 存在时写回提升后的 `required` 数组。
-fn promote_properties_to_required(
-    object: &mut Map<String, Value>,
-    mut required: Vec<Value>,
-    maximum: usize,
-    mut should_promote: impl FnMut(&str, &Value) -> bool,
-) -> usize {
-    let mut required_names = required
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
-    let Some(Value::Object(properties)) = object.get_mut("properties") else {
-        return 0;
-    };
-    let mut promoted = 0;
-    for (name, property_schema) in properties {
-        if promoted == maximum {
-            break;
-        }
-        if required_names.contains(name) {
-            continue;
-        }
-        if !should_promote(name, property_schema) {
-            continue;
-        }
-        make_nullable(property_schema);
-        required_names.insert(name.clone());
-        required.push(Value::String(name.clone()));
-        promoted += 1;
-    }
-    object.insert("required".into(), Value::Array(required));
-    promoted
-}
-
-/// 遍历所有子 schema；回调返回 `false` 时提前停止。三种遍历器共享的骨架。
-fn for_each_child_schema_mut(
-    schema: &mut Map<String, Value>,
-    mut visit: impl FnMut(&mut Value) -> bool,
-) -> bool {
-    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
-        for child in properties.values_mut() {
-            if !visit(child) {
-                return false;
-            }
-        }
-    }
-    if let Some(items) = schema.get_mut("items")
-        && !visit(items)
-    {
-        return false;
-    }
-    for keyword in CHILD_SCHEMA_KEYWORDS {
-        if let Some(Value::Array(children)) = schema.get_mut(keyword) {
-            for child in children {
-                if !visit(child) {
-                    return false;
-                }
-            }
-        }
-    }
-    for keyword in DEFINITION_KEYWORDS {
-        if let Some(Value::Object(definitions)) = schema.get_mut(keyword) {
-            for child in definitions.values_mut() {
-                if !visit(child) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-fn visit_child_schemas_mut_count(
-    schema: &mut Map<String, Value>,
-    maximum: usize,
-    mut visit: impl FnMut(&mut Value, usize) -> usize,
-) -> usize {
-    let mut visited = 0;
-    for_each_child_schema_mut(schema, |child| {
-        if visited == maximum {
-            return false;
-        }
-        visited += visit(child, maximum - visited);
-        visited < maximum
-    });
-    visited
-}
-
-fn tool_origin_priority(origin: ToolOrigin) -> u8 {
-    match origin {
-        ToolOrigin::Bundled => 0,
-        ToolOrigin::Extension => 1,
-    }
-}
-
-fn validate_strict_tools(
+pub(super) fn validate_strict_tools(
     tools: &[ToolDefinition],
     supports_strict_tool_use: bool,
     provider: StrictToolProvider,
@@ -307,132 +39,6 @@ fn validate_strict_tools(
         StrictToolProvider::Anthropic => validate_anthropic_tools(&strict_tools)?,
     }
     Ok(())
-}
-
-fn compile_openai_schema(schema: &mut Value) {
-    visit_child_schemas_mut(schema, compile_openai_schema);
-
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    // `required` 类型损坏时保留原值，由 validate_strict_tools 以类型化错误拒绝。
-    let Some(required) = required_array(object) else {
-        return;
-    };
-    promote_properties_to_required(object, required, usize::MAX, |_, _| true);
-    if is_object_schema_object(object) {
-        object.insert("additionalProperties".into(), Value::Bool(false));
-    }
-}
-
-fn compile_anthropic_schema(schema: &mut Value, elide_validation_constraints: bool) {
-    visit_child_schemas_mut(schema, |child| {
-        compile_anthropic_schema(child, elide_validation_constraints);
-    });
-
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    if elide_validation_constraints {
-        for keyword in [
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "multipleOf",
-            "minLength",
-            "maxLength",
-            "maxItems",
-            "uniqueItems",
-        ] {
-            object.remove(keyword);
-        }
-        if object
-            .get("minItems")
-            .and_then(Value::as_u64)
-            .is_some_and(|minimum| minimum > 1)
-        {
-            object.remove("minItems");
-        }
-    }
-    if is_object_schema_object(object) {
-        object.insert("additionalProperties".into(), Value::Bool(false));
-    }
-}
-
-fn is_object_schema_object(object: &Map<String, Value>) -> bool {
-    object.contains_key("properties")
-        || match object.get("type") {
-            Some(Value::String(kind)) => kind == "object",
-            Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
-            _ => false,
-        }
-}
-
-fn make_nullable(schema: &mut Value) {
-    let Some(object) = schema.as_object_mut() else {
-        wrap_nullable(schema);
-        return;
-    };
-
-    if object.contains_key("const") {
-        wrap_nullable(schema);
-        return;
-    }
-    if let Some(Value::Array(values)) = object.get_mut("enum")
-        && !values.iter().any(Value::is_null)
-    {
-        values.push(Value::Null);
-    }
-    if let Some(schema_type) = object.get_mut("type") {
-        match schema_type {
-            Value::String(kind) if kind != "null" => {
-                *schema_type = Value::Array(vec![
-                    Value::String(kind.clone()),
-                    Value::String("null".into()),
-                ]);
-            },
-            Value::Array(kinds) if !kinds.iter().any(|kind| kind.as_str() == Some("null")) => {
-                kinds.push(Value::String("null".into()));
-            },
-            _ => {},
-        }
-        return;
-    }
-    if let Some(Value::Array(branches)) = object.get_mut("anyOf") {
-        if !branches.iter().any(is_null_schema) {
-            branches.push(serde_json::json!({"type": "null"}));
-        }
-        return;
-    }
-
-    wrap_nullable(schema);
-}
-
-/// 将 schema 包裹为 `anyOf: [原值, {"type": "null"}]`。
-fn wrap_nullable(schema: &mut Value) {
-    let original = std::mem::take(schema);
-    *schema = serde_json::json!({"anyOf": [original, {"type": "null"}]});
-}
-
-fn is_null_schema(schema: &Value) -> bool {
-    schema
-        .get("type")
-        .is_some_and(|schema_type| match schema_type {
-            Value::String(kind) => kind == "null",
-            Value::Array(kinds) => kinds.iter().any(|kind| kind == "null"),
-            _ => false,
-        })
-}
-
-fn visit_child_schemas_mut(schema: &mut Value, mut visit: impl FnMut(&mut Value)) {
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    for_each_child_schema_mut(object, |child| {
-        visit(child);
-        true
-    });
 }
 
 fn validate_openai_tool(tool: &ToolDefinition) -> Result<(), LlmError> {
@@ -671,12 +277,12 @@ fn schema_literal_chars(value: &Value) -> usize {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct AnthropicSchemaStats {
-    optional_parameters: usize,
-    union_parameters: usize,
+pub(super) struct AnthropicSchemaStats {
+    pub(super) optional_parameters: usize,
+    pub(super) union_parameters: usize,
 }
 
-fn validate_anthropic_tools(strict_tools: &[&ToolDefinition]) -> Result<(), LlmError> {
+pub(super) fn validate_anthropic_tools(strict_tools: &[&ToolDefinition]) -> Result<(), LlmError> {
     if strict_tools.len() > ANTHROPIC_MAX_STRICT_TOOLS {
         let tool = strict_tools[ANTHROPIC_MAX_STRICT_TOOLS];
         return Err(schema_error(
@@ -715,11 +321,11 @@ fn validate_anthropic_tools(strict_tools: &[&ToolDefinition]) -> Result<(), LlmE
     Ok(())
 }
 
-fn validate_anthropic_tool(tool: &ToolDefinition) -> Result<(), LlmError> {
+pub(super) fn validate_anthropic_tool(tool: &ToolDefinition) -> Result<(), LlmError> {
     collect_anthropic_schema_stats(&[tool]).map(|_| ())
 }
 
-fn collect_anthropic_schema_stats(
+pub(super) fn collect_anthropic_schema_stats(
     strict_tools: &[&ToolDefinition],
 ) -> Result<AnthropicSchemaStats, LlmError> {
     let mut stats = AnthropicSchemaStats::default();
@@ -1141,17 +747,6 @@ fn is_tool_parameters_object(schema: &Value) -> bool {
         .is_some_and(|object| object.get("type").and_then(Value::as_str) == Some("object"))
 }
 
-fn is_union_schema(schema: &Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    object.contains_key("anyOf")
-        || object
-            .get("type")
-            .and_then(Value::as_array)
-            .is_some_and(|types| types.len() > 1)
-}
-
 fn contains_keyword(value: &Value, keyword: &str) -> bool {
     match value {
         Value::Object(object) => {
@@ -1165,45 +760,6 @@ fn contains_keyword(value: &Value, keyword: &str) -> bool {
     }
 }
 
-fn visit_child_schemas(
-    schema: &Map<String, Value>,
-    path: &str,
-    mut visit: impl FnMut(&Value, &str) -> Result<(), LlmError>,
-) -> Result<(), LlmError> {
-    if let Some(Value::Object(properties)) = schema.get("properties") {
-        for (name, child) in properties {
-            let child_path = child_path(&child_path(path, "properties"), name);
-            visit(child, &child_path)?;
-        }
-    }
-    if let Some(items) = schema.get("items") {
-        visit(items, &child_path(path, "items"))?;
-    }
-    for keyword in CHILD_SCHEMA_KEYWORDS {
-        if let Some(Value::Array(children)) = schema.get(keyword) {
-            for (index, child) in children.iter().enumerate() {
-                visit(
-                    child,
-                    &format!("{}/{keyword}/{index}", path.trim_end_matches('/')),
-                )?;
-            }
-        }
-    }
-    for keyword in DEFINITION_KEYWORDS {
-        if let Some(Value::Object(definitions)) = schema.get(keyword) {
-            for (name, child) in definitions {
-                let child_path = child_path(&child_path(path, keyword), name);
-                visit(child, &child_path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn child_path(parent: &str, segment: &str) -> String {
-    format!("{parent}/{}", segment.replace('~', "~0").replace('/', "~1"))
-}
-
 fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
     LlmError::Unsupported {
         message: format!("strict tool `{}` schema at `{path}`: {message}", tool.name),
@@ -1212,23 +768,9 @@ fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use astrcode_core::tool::ToolOrigin;
-    use astrcode_extension_sdk::extension::Registrar;
     use serde_json::json;
 
-    use super::*;
-
-    fn tool(name: &str, parameters: Value) -> ToolDefinition {
-        ToolDefinition {
-            name: name.into(),
-            description: String::new(),
-            parameters,
-            strict: true,
-            origin: ToolOrigin::Bundled,
-        }
-    }
+    use super::{super::tool, *};
 
     #[test]
     fn validates_diverse_provider_schema_rules() {
@@ -1680,204 +1222,6 @@ mod tests {
                     .expect_err("aggregate limit should be rejected")
                     .to_string()
                     .contains(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn compiles_natural_optional_schema_for_each_strict_dialect() {
-        let natural_schema = json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "minLength": 1},
-                "mode": {"type": "string", "enum": ["fast", "thorough"]},
-                "options": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 1}
-                    }
-                }
-            },
-            "required": ["query"]
-        });
-
-        let mut openai_tools = vec![tool("search", natural_schema.clone())];
-        prepare_strict_tools(&mut openai_tools, true, StrictToolProvider::OpenAi)
-            .expect("natural schema should compile for OpenAI");
-        let openai = &openai_tools[0].parameters;
-        assert_eq!(openai["required"], json!(["query", "mode", "options"]));
-        assert_eq!(
-            openai["properties"]["mode"]["enum"],
-            json!(["fast", "thorough", null])
-        );
-        assert_eq!(
-            openai["properties"]["options"]["type"],
-            json!(["object", "null"])
-        );
-        assert_eq!(
-            openai["properties"]["options"]["required"],
-            json!(["limit"])
-        );
-        assert_eq!(
-            openai["properties"]["options"]["properties"]["limit"]["type"],
-            json!(["integer", "null"])
-        );
-        assert_eq!(openai["additionalProperties"], false);
-        assert_eq!(
-            openai["properties"]["options"]["additionalProperties"],
-            false
-        );
-
-        let mut anthropic_tools = vec![tool("search", natural_schema)];
-        prepare_strict_tools(&mut anthropic_tools, true, StrictToolProvider::Anthropic)
-            .expect("natural schema should compile for Anthropic");
-        let anthropic = &anthropic_tools[0].parameters;
-        assert_eq!(anthropic["required"], json!(["query"]));
-        assert!(anthropic["properties"]["options"]["type"].is_string());
-        assert!(anthropic["properties"]["query"].get("minLength").is_none());
-        assert!(
-            anthropic["properties"]["options"]["properties"]["limit"]
-                .get("minimum")
-                .is_none()
-        );
-        assert_eq!(anthropic["additionalProperties"], false);
-        assert_eq!(
-            anthropic["properties"]["options"]["additionalProperties"],
-            false
-        );
-
-        let mut capped_tools = (0..=ANTHROPIC_MAX_STRICT_TOOLS)
-            .map(|index| {
-                tool(
-                    &format!("tool{index}"),
-                    json!({"type": "object", "properties": {}}),
-                )
-            })
-            .collect::<Vec<_>>();
-        capped_tools[0].origin = ToolOrigin::Extension;
-        prepare_strict_tools(&mut capped_tools, true, StrictToolProvider::Anthropic)
-            .expect("Anthropic overflow should degrade deterministically");
-        assert!(!capped_tools[0].strict);
-        assert!(capped_tools[1..].iter().all(|definition| definition.strict));
-
-        let mut structural_union = vec![tool(
-            "structuralUnion",
-            json!({
-                "type": "object",
-                "properties": {"value": {}},
-                "anyOf": [
-                    {"properties": {"value": {"type": "string"}}},
-                    {"properties": {"value": {"type": "integer"}}}
-                ]
-            }),
-        )];
-        assert!(
-            prepare_strict_tools(&mut structural_union, true, StrictToolProvider::OpenAi)
-                .expect_err("structural root unions must not be silently weakened")
-                .to_string()
-                .contains("$/anyOf")
-        );
-
-        let mut external_constraint = vec![tool(
-            "externalConstraint",
-            json!({
-                "type": "object",
-                "properties": {"count": {"type": "integer", "minimum": 1}}
-            }),
-        )];
-        external_constraint[0].origin = ToolOrigin::Extension;
-        assert!(
-            prepare_strict_tools(
-                &mut external_constraint,
-                true,
-                StrictToolProvider::Anthropic
-            )
-            .expect_err("third-party constraints must not be silently removed")
-            .to_string()
-            .contains("$/properties/count/minimum")
-        );
-    }
-
-    #[test]
-    fn compiles_all_first_party_non_mcp_tool_schemas() {
-        let mut definitions = Vec::new();
-        let states = astrcode_bundled_extensions::bundled_extension_ids()
-            .into_iter()
-            .map(|id| (id.to_string(), true))
-            .collect::<BTreeMap<_, _>>();
-        for extension in astrcode_bundled_extensions::bundled_extensions(&states) {
-            let manifest = extension.manifest();
-            if manifest.id() == "astrcode-mcp" {
-                continue;
-            }
-            let mut registrar = Registrar::new();
-            extension.register(&mut registrar);
-            let (_, registrations) = registrar
-                .finish(manifest)
-                .expect("bundled extension registrations should match its manifest");
-            definitions.extend(
-                registrations
-                    .tools()
-                    .iter()
-                    .map(|registration| registration.definition().clone()),
-            );
-        }
-        let mut openai_definitions = definitions.clone();
-        prepare_strict_tools(&mut openai_definitions, true, StrictToolProvider::OpenAi)
-            .expect("all first-party schemas should compile for OpenAI");
-        assert!(
-            openai_definitions
-                .iter()
-                .all(|definition| definition.strict)
-        );
-
-        let mut anthropic_bundled = definitions
-            .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Bundled)
-            .cloned()
-            .collect::<Vec<_>>();
-        for definition in &mut anthropic_bundled {
-            compile_anthropic_schema(&mut definition.parameters, true);
-        }
-        let bundled_refs = anthropic_bundled.iter().collect::<Vec<_>>();
-        let bundled_stats = collect_anthropic_schema_stats(&bundled_refs)
-            .expect("compiled bundled tools should be valid Anthropic schemas");
-
-        prepare_strict_tools(&mut definitions, true, StrictToolProvider::Anthropic)
-            .expect("all first-party schemas should compile or deterministically degrade");
-        let downgraded_bundled = definitions
-            .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Bundled && !definition.strict)
-            .map(|definition| definition.name.as_str())
-            .collect::<Vec<_>>();
-        assert!(
-            !downgraded_bundled.is_empty(),
-            "Anthropic's strict aggregate limits should downgrade overflow from optional={}, \
-             unions={}",
-            bundled_stats.optional_parameters,
-            bundled_stats.union_parameters,
-        );
-        let accepted = definitions
-            .iter()
-            .filter(|definition| definition.strict)
-            .collect::<Vec<_>>();
-        validate_anthropic_tools(&accepted)
-            .expect("the accepted first-party strict subset must satisfy aggregate limits");
-        for coding_tool in [
-            "read",
-            "read_tool_result",
-            "write",
-            "edit",
-            "patch",
-            "glob",
-            "grep",
-            "shell",
-        ] {
-            assert!(
-                definitions
-                    .iter()
-                    .any(|definition| definition.name == coding_tool && definition.strict),
-                "bundled coding tool {coding_tool} should remain in the prioritized strict subset"
             );
         }
     }

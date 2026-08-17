@@ -9,7 +9,7 @@ use astrcode_core::{
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix},
+    common::{DoneOnce, TextDeltaAccumulator, send_event, token_usage_has_value, utf8_prefix},
     stream_decoder::clean_json_fragment,
 };
 
@@ -38,21 +38,21 @@ struct ResponseToolCallPartial {
 /// 标准 OpenAI 格式的流累积器。
 #[derive(Default)]
 pub(crate) struct StandardAccumulator {
-    text: String,
+    text: TextDeltaAccumulator,
     tool_calls: BTreeMap<u64, ToolCallPartial>,
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
-    done_sent: bool,
+    done: DoneOnce,
     finish_reason: Option<String>,
     cache_usage_reported: bool,
     /// 累计的 reasoning 文本，用于 diff 提取增量。
-    reasoning_accumulated: String,
+    reasoning_accumulated: TextDeltaAccumulator,
     saw_tool_call: bool,
 }
 
 impl StandardAccumulator {
     #[cfg(test)]
     pub fn text(&self) -> &str {
-        &self.text
+        self.text.accumulated()
     }
 
     pub(crate) fn has_started_tool_call(&self) -> bool {
@@ -205,7 +205,7 @@ impl StandardAccumulator {
             for choice in choices {
                 if let Some(delta) = choice.get("delta") {
                     if let Some(content) = delta["content"].as_str()
-                        && let Some(incremental) = stream_text_delta(&mut self.text, content)
+                        && let Some(incremental) = self.text.push(content)
                     {
                         send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                     }
@@ -214,8 +214,7 @@ impl StandardAccumulator {
                         .or_else(|| delta.get("reasoning"))
                         .or_else(|| delta.get("thinking"))
                         .and_then(|value| value.as_str())
-                        && let Some(incremental) =
-                            stream_text_delta(&mut self.reasoning_accumulated, reasoning)
+                        && let Some(incremental) = self.reasoning_accumulated.push(reasoning)
                     {
                         send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                     }
@@ -227,9 +226,7 @@ impl StandardAccumulator {
                             .filter_map(|d| d.get("text").and_then(|t| t.as_str()))
                             .collect::<Vec<_>>()
                             .join("");
-                        if let Some(incremental) =
-                            stream_text_delta(&mut self.reasoning_accumulated, &latest)
-                        {
+                        if let Some(incremental) = self.reasoning_accumulated.push(&latest) {
                             send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                         }
                     }
@@ -262,15 +259,14 @@ impl StandardAccumulator {
         match event_type {
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str()
-                    && let Some(incremental) = stream_text_delta(&mut self.text, delta)
+                    && let Some(incremental) = self.text.push(delta)
                 {
                     send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                 }
             },
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if let Some(delta) = event["delta"].as_str()
-                    && let Some(incremental) =
-                        stream_text_delta(&mut self.reasoning_accumulated, delta)
+                    && let Some(incremental) = self.reasoning_accumulated.push(delta)
                 {
                     send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                 }
@@ -418,15 +414,9 @@ impl StandardAccumulator {
                 partial.completed = true;
                 send_event(tx, LlmEvent::ToolCallCompleted { call_id });
             },
-            "response.completed" if !self.done_sent => {
+            "response.completed" if !self.done.sent() => {
                 self.emit_pending_tool_completions(tx);
-                self.done_sent = true;
-                send_event(
-                    tx,
-                    LlmEvent::Done {
-                        finish_reason: "stop".into(),
-                    },
-                );
+                self.done.emit(tx, "stop");
             },
             _ => {
                 tracing::debug!("Ignoring unknown OpenAI Responses event type: {event_type}");
@@ -435,15 +425,11 @@ impl StandardAccumulator {
     }
 
     pub(crate) fn done_sent(&self) -> bool {
-        self.done_sent
+        self.done.sent()
     }
 
     fn finish_reason(&self) -> Option<&str> {
         self.finish_reason.as_deref()
-    }
-
-    fn mark_done(&mut self) {
-        self.done_sent = true;
     }
 
     fn emit_pending_tool_completions(&mut self, tx: &mpsc::UnboundedSender<LlmEvent>) {
@@ -500,13 +486,12 @@ pub(crate) fn emit_done_once(
     accumulator: &mut StandardAccumulator,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) {
-    if accumulator.done_sent() {
+    if accumulator.done.sent() {
         return;
     }
     accumulator.emit_pending_tool_completions(tx);
-    accumulator.mark_done();
     let finish_reason = accumulator.finish_reason().unwrap_or("stop").to_string();
-    send_event(tx, LlmEvent::Done { finish_reason });
+    accumulator.done.emit(tx, finish_reason);
 }
 
 fn process_sse_data(
@@ -566,7 +551,7 @@ fn emit_stream_error(
         return false;
     }
 
-    accumulator.mark_done();
+    accumulator.done.suppress();
     send_event(
         tx,
         LlmEvent::Error {

@@ -10,8 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        HttpPostRequest, base_headers, build_client, ensure_header, report_stream_error,
-        retry_policy_from_config,
+        ConnectionSnapshot, HttpPostRequest, build_client, ensure_header, report_stream_error,
     },
     strict_tools::{StrictToolProvider, prepare_strict_tools},
     wire::anthropic as anthropic_wire,
@@ -62,11 +61,7 @@ impl AnthropicProvider {
                 .effective_output_cap(max_output_tokens),
             supports_strict_tool_use: self.config.supports_strict_tool_use,
             thinking: &self.config.thinking,
-            thinking_capability: self
-                .config
-                .thinking_configured
-                .then_some(self.config.thinking_capability.as_ref())
-                .flatten(),
+            thinking_capability: self.config.effective_thinking_capability(),
         }
     }
 
@@ -93,15 +88,15 @@ impl AnthropicProvider {
         anthropic_wire::build_count_tokens_body(self.wire_config(None), messages, tools)
     }
 
-    /// count_tokens（JSON）路径用的基础请求头：用户自定义头 + 鉴权 + Anthropic 版本。
-    fn headers(&self) -> Vec<(String, String)> {
-        let mut headers = base_headers(&self.config);
+    /// count_tokens（JSON）路径用的连接快照：基础头 + 重试策略，附 Anthropic 版本头。
+    fn count_snapshot(&self) -> ConnectionSnapshot {
+        let mut snapshot = ConnectionSnapshot::from_config(&self.config);
         ensure_header(
-            &mut headers,
+            &mut snapshot.headers,
             "anthropic-version",
             anthropic_wire::body::ANTHROPIC_API_VERSION,
         );
-        headers
+        snapshot
     }
 }
 
@@ -125,16 +120,14 @@ impl LlmProvider for AnthropicProvider {
         let request_body = self.build_request_body(&messages, &tools, max_output_tokens, true)?;
         let endpoint = self.endpoint();
         let client = self.client.clone();
-        let config = self.config.clone();
-        let retry = retry_policy_from_config(&self.config);
+        let snapshot = ConnectionSnapshot::from_config(&self.config);
 
         tokio::spawn(async move {
             let result = anthropic_wire::transport::stream_request(
                 client,
                 endpoint,
-                config,
+                snapshot,
                 request_body,
-                retry,
                 tx.clone(),
             )
             .await;
@@ -154,12 +147,13 @@ impl LlmProvider for AnthropicProvider {
             self.config.supports_strict_tool_use,
             StrictToolProvider::Anthropic,
         )?;
+        let snapshot = self.count_snapshot();
         let value = HttpPostRequest {
             client: self.client.clone(),
             endpoint: self.count_tokens_endpoint(),
-            headers: self.headers(),
+            headers: snapshot.headers,
             body: self.build_count_tokens_body(&messages, &tools),
-            retry: retry_policy_from_config(&self.config),
+            retry: snapshot.retry,
         }
         .json()
         .await?;
@@ -203,6 +197,7 @@ impl LlmProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{ScriptedLlmServer, http_json_response};
 
     #[tokio::test]
     async fn generate_rejects_invalid_strict_schema_before_transport() {
@@ -242,5 +237,49 @@ mod tests {
             Err(LlmError::Unsupported { message })
                 if message.contains("strict tool `bounded` schema at `$`")
         ));
+    }
+
+    fn count_tokens_provider(base_url: String) -> AnthropicProvider {
+        AnthropicProvider::new(
+            LlmClientConfig {
+                base_url,
+                max_retries: 1,
+                retry_base_delay_ms: 1,
+                ..LlmClientConfig::default()
+            },
+            "claude-test".into(),
+            1024,
+            8192,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn count_input_tokens_parses_provider_response() {
+        let server =
+            ScriptedLlmServer::spawn(vec![http_json_response(r#"{"input_tokens":17}"#)]).await;
+        let provider = count_tokens_provider(server.base_url().into());
+
+        let count = provider
+            .count_input_tokens(vec![Arc::new(LlmMessage::user("hi"))], vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(count.input_tokens, 17);
+        server.assert_consumed();
+    }
+
+    #[tokio::test]
+    async fn count_input_tokens_rejects_response_missing_input_tokens() {
+        let server =
+            ScriptedLlmServer::spawn(vec![http_json_response(r#"{"output_tokens":3}"#)]).await;
+        let provider = count_tokens_provider(server.base_url().into());
+
+        let result = provider
+            .count_input_tokens(vec![Arc::new(LlmMessage::user("hi"))], vec![])
+            .await;
+
+        assert!(matches!(result, Err(LlmError::StreamParse { .. })));
+        server.assert_consumed();
     }
 }

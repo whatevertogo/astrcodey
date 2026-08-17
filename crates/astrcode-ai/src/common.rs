@@ -46,7 +46,7 @@ pub(crate) fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
 /// 根据 `LlmClientConfig` 构建 reqwest client。
 ///
 /// 配置无效时返回 [`LlmError::Transport`]，不在 silently 降级到无 timeout 的默认 client。
-pub fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmError> {
+pub(crate) fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
         // reqwest resets read_timeout whenever bytes arrive. Keep this idle-timeout
@@ -106,40 +106,91 @@ pub(crate) fn base_headers(config: &LlmClientConfig) -> Vec<(String, String)> {
     headers
 }
 
-/// 从流式片段中提取应向前端发送的增量文本。
+/// 累积/增量文本去重器。
 ///
 /// 部分兼容 provider（如 glm Anthropic/OpenAI 网关）会在 SSE 中发送**累积全文**而非
-/// 纯增量；若直接 append 会导致前缀重复。本函数同时兼容纯增量与累积两种格式。
-///
-/// 代价：判定累积前缀需 `fragment.starts_with(accumulated)`，单次为 O(accumulated.len())。
-/// 对持续发送累积全文的 provider，长流（尤其长 reasoning）整体为 O(N²)。这是为兼容累积流
-/// 而接受的已知成本；若后续 profiling 表明成为瓶颈，可在确认流为纯增量后跳过前缀检查。
-pub fn stream_text_delta(accumulated: &mut String, fragment: &str) -> Option<String> {
-    if fragment.is_empty() {
-        return None;
-    }
-    if accumulated.is_empty() {
-        accumulated.push_str(fragment);
-        return Some(fragment.to_string());
-    }
-    if fragment.starts_with(accumulated.as_str()) {
-        if fragment.len() <= accumulated.len() {
+/// 纯增量；若直接 append 会导致前缀重复。本类型同时兼容两种格式：流被确认为纯增量后
+/// 跳过前缀比较（每片段 O(1)）；累积式 provider 保留前缀 diff——其 O(N²) 成本由
+/// 全文协议本身决定，无法在接收端消除。
+#[derive(Debug, Default)]
+pub(crate) struct TextDeltaAccumulator {
+    accumulated: String,
+    /// 见过一个无法用累积前缀解释的真增量片段后置位，之后跳过前缀检查直接 append。
+    incremental_confirmed: bool,
+}
+
+impl TextDeltaAccumulator {
+    /// 喂入一个文本片段，返回应向下游发送的增量；重复或完全过期的片段返回 `None`。
+    pub(crate) fn push(&mut self, fragment: &str) -> Option<String> {
+        if fragment.is_empty() {
             return None;
         }
-        let incremental = fragment[accumulated.len()..].to_string();
-        accumulated.clear();
-        accumulated.push_str(fragment);
-        return Some(incremental);
+        if self.accumulated.is_empty() || self.incremental_confirmed {
+            self.accumulated.push_str(fragment);
+            return Some(fragment.to_string());
+        }
+        if fragment.starts_with(self.accumulated.as_str()) {
+            if fragment.len() <= self.accumulated.len() {
+                return None;
+            }
+            let incremental = fragment[self.accumulated.len()..].to_string();
+            self.accumulated.clear();
+            self.accumulated.push_str(fragment);
+            return Some(incremental);
+        }
+        if self.accumulated.starts_with(fragment) {
+            return None;
+        }
+        self.incremental_confirmed = true;
+        self.accumulated.push_str(fragment);
+        Some(fragment.to_string())
     }
-    if accumulated.starts_with(fragment) {
-        return None;
+
+    #[cfg(test)]
+    pub(crate) fn accumulated(&self) -> &str {
+        &self.accumulated
     }
-    accumulated.push_str(fragment);
-    Some(fragment.to_string())
+}
+
+/// 流式响应的 `Done` 事件守卫：一次流至多发一个 `Done`。
+///
+/// 两个 wire parser 共用同一实现，「Done 之后不再有事件」的不变式只有一份。
+#[derive(Debug, Default)]
+pub(crate) struct DoneOnce {
+    sent: bool,
+}
+
+impl DoneOnce {
+    pub(crate) fn sent(&self) -> bool {
+        self.sent
+    }
+
+    /// 不发送 `Done` 但封存守卫（流内错误之后不再补发 `Done`）。
+    pub(crate) fn suppress(&mut self) {
+        self.sent = true;
+    }
+
+    /// 尚未发送时发出 `Done` 并置位；已发送则不再重复。返回事件通道是否仍开放。
+    pub(crate) fn emit(
+        &mut self,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+        finish_reason: impl Into<String>,
+    ) -> bool {
+        if self.sent {
+            return true;
+        }
+        self.sent = true;
+        send_event(
+            tx,
+            LlmEvent::Done {
+                finish_reason: finish_reason.into(),
+            },
+        )
+    }
 }
 
 /// 向 LLM 事件通道发送事件；接收端已 drop 时返回 `false`。
-pub fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool {
+pub(crate) fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool {
     match tx.send(event) {
         Ok(()) => true,
         Err(_) => {
@@ -150,7 +201,10 @@ pub fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool
 }
 
 /// 流式请求失败时向通道发送 `Error` 事件。
-pub fn report_stream_error(result: Result<(), LlmError>, tx: &mpsc::UnboundedSender<LlmEvent>) {
+pub(crate) fn report_stream_error(
+    result: Result<(), LlmError>,
+    tx: &mpsc::UnboundedSender<LlmEvent>,
+) {
     if let Err(error) = result {
         send_event(
             tx,
@@ -164,7 +218,7 @@ pub fn report_stream_error(result: Result<(), LlmError>, tx: &mpsc::UnboundedSen
 /// 从 `LlmClientConfig` 的公共字段构建重试策略。
 ///
 /// 三个 LLM provider 使用相同的重试参数推导逻辑，提取为公共函数避免重复。
-pub fn retry_policy_from_config(config: &LlmClientConfig) -> RetryPolicy {
+pub(crate) fn retry_policy_from_config(config: &LlmClientConfig) -> RetryPolicy {
     RetryPolicy {
         max_retries: config.max_retries,
         base_delay_ms: config.retry_base_delay_ms,
@@ -173,10 +227,30 @@ pub fn retry_policy_from_config(config: &LlmClientConfig) -> RetryPolicy {
     }
 }
 
+/// 单次请求的连接快照：请求发起时从 provider 配置一次性物化。
+///
+/// 鉴权头与重试策略永远来自同一代配置，in-flight 请求不受后续配置变更影响；
+/// 也避免每次请求整体 clone `LlmClientConfig`。
+pub(crate) struct ConnectionSnapshot {
+    /// 基础请求头：用户自定义头 + 鉴权头。协议头（`Accept`、`anthropic-version`）
+    /// 由各 wire transport 追加。
+    pub headers: Vec<(String, String)>,
+    pub retry: RetryPolicy,
+}
+
+impl ConnectionSnapshot {
+    pub(crate) fn from_config(config: &LlmClientConfig) -> Self {
+        Self {
+            headers: base_headers(config),
+            retry: retry_policy_from_config(config),
+        }
+    }
+}
+
 // ─── HTTP 重试 + SSE 流解析 ─────────────────────────────────────────────
 
 /// 带重试的 HTTP POST 请求参数。
-pub struct HttpPostRequest {
+pub(crate) struct HttpPostRequest {
     pub client: reqwest::Client,
     pub endpoint: String,
     pub headers: Vec<(String, String)>,
@@ -191,21 +265,64 @@ impl HttpPostRequest {
     /// `stream_replay_safe` 在流中出现工具调用后由协议层清除。已输出但仍可重放的纯文本/
     /// 思考流会在重试前通知下游清空临时状态；可能触发工具副作用后则不再重试。
     ///
-    /// 重试逻辑：
+    /// 重试只发生在本共享传输层——协议代码（parser/transport）一次调用即一次
+    /// provider 尝试，自身不重试。规则：
     /// - 传输层错误（DNS/TLS/连接重置）→ 按 `max_transport_retries` 重试
-    /// - 可重试 HTTP 状态码（408/429/500/502/503/504）→ 按 `max_retries` 重试
+    /// - 可重试 HTTP 状态码（经 [`LlmError::is_retryable`] 判定）→ 按 `max_retries` 重试
     /// - `on_success` 返回 `Transport` 错误，且流尚未消费或仍可安全重放 → 按传输层错误重试
     /// - 其他错误 → 直接返回
-    pub async fn run<F, Fut>(
+    pub(crate) async fn run<F, Fut>(
         &self,
         stream_started: &AtomicBool,
         stream_replay_safe: &AtomicBool,
         events: &mpsc::UnboundedSender<LlmEvent>,
-        mut on_success: F,
+        on_success: F,
     ) -> Result<(), LlmError>
     where
         F: FnMut(reqwest::Response) -> Fut,
         Fut: std::future::Future<Output = Result<(), LlmError>>,
+    {
+        self.request_with_retries(
+            Some(events),
+            Some((stream_started, stream_replay_safe)),
+            on_success,
+        )
+        .await
+    }
+
+    /// 发起带重试的 JSON POST 请求，返回 JSON 响应体。
+    pub(crate) async fn json(&self) -> Result<serde_json::Value, LlmError> {
+        self.request_with_retries(None, None, |response| async move {
+            let endpoint = response.url().to_string();
+            let text = response
+                .text()
+                .await
+                .map_err(|error| transport_error("read JSON response", &endpoint, error))?;
+            serde_json::from_str(&text).map_err(|error| {
+                LlmError::stream_parse(format!(
+                    "failed to parse LLM JSON response from {}: {error}",
+                    redacted_endpoint(&endpoint)
+                ))
+            })
+        })
+        .await
+    }
+
+    /// 共享的重试循环：流式（`run`）与 JSON（`json`）请求只差成功响应的处理方式，
+    /// 重试计数、退避与事件上报集中在这里，避免两处策略漂移。
+    ///
+    /// `stream_replay` 仅流式请求提供：成功响应之后、消费响应体期间的传输错误，
+    /// 只有在流尚未开始或输出仍可安全重放时才允许重试。JSON 请求无重放上下文，
+    /// 成功后的读取错误直接返回（与拆分前的历史行为一致）。
+    async fn request_with_retries<T, F, Fut>(
+        &self,
+        events: Option<&mpsc::UnboundedSender<LlmEvent>>,
+        stream_replay: Option<(&AtomicBool, &AtomicBool)>,
+        mut on_success: F,
+    ) -> Result<T, LlmError>
+    where
+        F: FnMut(reqwest::Response) -> Fut,
+        Fut: std::future::Future<Output = Result<T, LlmError>>,
     {
         let mut request_attempt = 0;
         let mut http_retry_attempt = 0;
@@ -230,13 +347,15 @@ impl HttpPostRequest {
                     transport_retry_attempt += 1;
                     if self.retry.should_retry_transport(transport_retry_attempt) {
                         let delay = self.retry.delay(transport_retry_attempt);
-                        send_retrying_event(
-                            events,
-                            None,
-                            transport_retry_attempt,
-                            self.retry.max_transport_retries,
-                            delay,
-                        );
+                        if let Some(events) = events {
+                            send_retrying_event(
+                                events,
+                                None,
+                                transport_retry_attempt,
+                                self.retry.max_transport_retries,
+                                delay,
+                            );
+                        }
                         retry_reported = true;
                         tracing::warn!(
                             "LLM request failed with transport error (attempt \
@@ -253,20 +372,23 @@ impl HttpPostRequest {
 
             let status = response.status();
             if status.is_success() {
-                if retry_reported {
+                if retry_reported && let Some(events) = events {
                     send_event(events, LlmEvent::RetryRecovered);
                 }
                 match on_success(response).await {
-                    Ok(()) => return Ok(()),
+                    Ok(value) => return Ok(value),
                     Err(error) => {
-                        if let LlmError::Transport { message } = &error {
-                            let started = stream_started.load(Ordering::SeqCst);
-                            if !started || stream_replay_safe.load(Ordering::SeqCst) {
-                                transport_retry_attempt += 1;
-                                if !self.retry.should_retry_transport(transport_retry_attempt) {
-                                    return Err(error);
-                                }
-                                let delay = self.retry.delay(transport_retry_attempt);
+                        if let (LlmError::Transport { message }, Some((started, replay_safe))) =
+                            (&error, stream_replay)
+                            && (!started.load(Ordering::SeqCst)
+                                || replay_safe.load(Ordering::SeqCst))
+                        {
+                            transport_retry_attempt += 1;
+                            if !self.retry.should_retry_transport(transport_retry_attempt) {
+                                return Err(error);
+                            }
+                            let delay = self.retry.delay(transport_retry_attempt);
+                            if let Some(events) = events {
                                 send_retrying_event(
                                     events,
                                     None,
@@ -274,18 +396,18 @@ impl HttpPostRequest {
                                     self.retry.max_transport_retries,
                                     delay,
                                 );
-                                retry_reported = true;
-                                tracing::warn!(
-                                    "LLM stream read failed with transport error (attempt \
-                                     {transport_retry_attempt}/{}), retrying after {}ms: {message}",
-                                    self.retry.max_transport_retries,
-                                    delay.as_millis(),
-                                );
-                                stream_started.store(false, Ordering::SeqCst);
-                                stream_replay_safe.store(true, Ordering::SeqCst);
-                                tokio::time::sleep(delay).await;
-                                continue;
                             }
+                            retry_reported = true;
+                            tracing::warn!(
+                                "LLM stream read failed with transport error (attempt \
+                                 {transport_retry_attempt}/{}), retrying after {}ms: {message}",
+                                self.retry.max_transport_retries,
+                                delay.as_millis(),
+                            );
+                            started.store(false, Ordering::SeqCst);
+                            replay_safe.store(true, Ordering::SeqCst);
+                            tokio::time::sleep(delay).await;
+                            continue;
                         }
                         return Err(error);
                     },
@@ -293,78 +415,23 @@ impl HttpPostRequest {
             }
 
             http_retry_attempt += 1;
-            if self.retry.should_retry(http_retry_attempt, status.as_u16()) {
+            if http_retry_attempt <= self.retry.max_retries
+                && retry_classification(status.as_u16()).is_retryable()
+            {
                 let delay = self.retry.delay(http_retry_attempt);
-                send_retrying_event(
-                    events,
-                    Some(status.as_u16()),
-                    http_retry_attempt,
-                    self.retry.max_retries,
-                    delay,
-                );
+                if let Some(events) = events {
+                    send_retrying_event(
+                        events,
+                        Some(status.as_u16()),
+                        http_retry_attempt,
+                        self.retry.max_retries,
+                        delay,
+                    );
+                }
                 retry_reported = true;
                 tracing::warn!(
                     "LLM request failed with {status}, retrying (attempt {http_retry_attempt}/{}) \
                      after {}ms",
-                    self.retry.max_retries,
-                    delay.as_millis()
-                );
-                tokio::time::sleep(delay).await;
-                continue;
-            }
-
-            let retry_after_ms = parse_retry_after_ms(response.headers());
-            let text = read_http_error_body(response, &self.endpoint).await;
-            return Err(classify_error(status.as_u16(), retry_after_ms, &text));
-        }
-    }
-
-    /// 发起带重试的 JSON POST 请求，返回 JSON 响应体。
-    pub async fn json(&self) -> Result<serde_json::Value, LlmError> {
-        let mut http_retry_attempt = 0;
-        let mut transport_retry_attempt = 0;
-
-        loop {
-            let response = match self.send_once().await {
-                Ok(response) => response,
-                Err(error) => {
-                    transport_retry_attempt += 1;
-                    if self.retry.should_retry_transport(transport_retry_attempt) {
-                        let delay = self.retry.delay(transport_retry_attempt);
-                        tracing::warn!(
-                            "LLM JSON request failed with transport error (attempt \
-                             {transport_retry_attempt}/{}), retrying after {}ms: {error}",
-                            self.retry.max_transport_retries,
-                            delay.as_millis(),
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Err(error);
-                },
-            };
-
-            let status = response.status();
-            if status.is_success() {
-                let endpoint = response.url().to_string();
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|error| transport_error("read JSON response", &endpoint, error))?;
-                return serde_json::from_str(&text).map_err(|error| {
-                    LlmError::stream_parse(format!(
-                        "failed to parse LLM JSON response from {}: {error}",
-                        redacted_endpoint(&endpoint)
-                    ))
-                });
-            }
-
-            http_retry_attempt += 1;
-            if self.retry.should_retry(http_retry_attempt, status.as_u16()) {
-                let delay = self.retry.delay(http_retry_attempt);
-                tracing::warn!(
-                    "LLM JSON request failed with {status}, retrying (attempt \
-                     {http_retry_attempt}/{}) after {}ms",
                     self.retry.max_retries,
                     delay.as_millis()
                 );
@@ -393,6 +460,28 @@ impl HttpPostRequest {
     }
 }
 
+/// 仅按状态码做重试决策用的预分类；完整分类（读取响应体之后）见 [`classify_error`]。
+///
+/// 可重试性由 [`LlmError::is_retryable`] 单一来源决定。429 的配额类细分需要响应体，
+/// 重试决策时一律按 `RateLimited` 处理（与拆分前的历史行为一致）。
+fn retry_classification(status: u16) -> LlmError {
+    match status {
+        429 => LlmError::RateLimited {
+            status,
+            retry_after_ms: None,
+            message: String::new(),
+        },
+        status if (500..600).contains(&status) || status == 408 => LlmError::ServerError {
+            status,
+            message: String::new(),
+        },
+        _ => LlmError::ClientError {
+            status,
+            message: String::new(),
+        },
+    }
+}
+
 fn send_retrying_event(
     events: &mpsc::UnboundedSender<LlmEvent>,
     status: Option<u16>,
@@ -412,7 +501,7 @@ fn send_retrying_event(
 }
 
 /// 读取非 2xx 响应体；传输失败时记录并返回空串（仍附带 HTTP 状态码）。
-pub async fn read_http_error_body(response: reqwest::Response, endpoint: &str) -> String {
+pub(crate) async fn read_http_error_body(response: reqwest::Response, endpoint: &str) -> String {
     match response.text().await {
         Ok(text) => text,
         Err(error) => {
@@ -541,7 +630,7 @@ fn consume_decoded_lines(
 /// 4xx/5xx 的细分(鉴权/模型/参数/配额/限流/上下文溢出/内容过滤)依据状态码与
 /// 错误体关键词,与 vbot 的 provider 分类一致;`retry_after_ms` 来自 `Retry-After`
 /// 响应头(仅 429 限流时携带)。该分类与 [`LlmError::is_retryable`] 共同构成重试决策。
-pub fn classify_error(status: u16, retry_after_ms: Option<u64>, body: &str) -> LlmError {
+pub(crate) fn classify_error(status: u16, retry_after_ms: Option<u64>, body: &str) -> LlmError {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let error_value = parsed
         .as_ref()
@@ -589,7 +678,7 @@ pub fn classify_error(status: u16, retry_after_ms: Option<u64>, body: &str) -> L
 }
 
 /// 从 `Retry-After` 响应头解析退避毫秒数。仅支持 delta-seconds 形式(常见于 LLM API)。
-pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+pub(crate) fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
@@ -598,7 +687,7 @@ pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64>
         .and_then(|seconds| seconds.checked_mul(1000))
 }
 
-pub fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> LlmError {
+pub(crate) fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> LlmError {
     let source_chain = error_source_chain(&error);
     let endpoint = redacted_endpoint(endpoint);
     LlmError::transport(format!(
@@ -606,7 +695,7 @@ pub fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> Ll
     ))
 }
 
-pub fn stream_body_error(
+pub(crate) fn stream_body_error(
     endpoint: &str,
     status: u16,
     content_type: Option<&str>,
@@ -683,6 +772,68 @@ fn is_sensitive_query_key(key: &str) -> bool {
     )
 }
 
+/// 行为脚本式 HTTP 测试服务器（仅测试用）：脚本按 FIFO 消费，第 N 个请求
+/// 返回 `script[N-1]` 的完整 HTTP 响应字节；请求数超出脚本长度时返回 500。
+#[cfg(test)]
+pub(crate) struct ScriptedLlmServer {
+    base_url: String,
+    requests: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    script_len: usize,
+}
+
+#[cfg(test)]
+impl ScriptedLlmServer {
+    pub(crate) async fn spawn(script: Vec<Vec<u8>>) -> Self {
+        let script_len = script.len();
+        let script = std::sync::Arc::new(script);
+        let (base_url, requests) = spawn_test_server(move |count| {
+            match script.get((count - 1) as usize) {
+                Some(response) => response.clone(),
+                None => {
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                },
+            }
+        })
+        .await;
+        Self {
+            base_url,
+            requests,
+            script_len,
+        }
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub(crate) fn request_count(&self) -> u32 {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 断言脚本恰好被全部消费：少了说明测试少驱动了请求；多了会在响应阶段
+    /// 拿到 500,由上层断言先暴露。
+    pub(crate) fn assert_consumed(&self) {
+        let consumed = self.request_count() as usize;
+        assert_eq!(
+            consumed, self.script_len,
+            "scripted LLM server consumed {consumed} responses but script has {}",
+            self.script_len
+        );
+    }
+}
+
+/// 构造完整的 200 JSON HTTP 响应字节（自动补 Content-Length)。
+#[cfg(test)]
+pub(crate) fn http_json_response(body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: \
+         close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
 /// 极简 HTTP 测试服务器（仅测试用）：每收到一个请求调用 `respond(请求序号)` 并写入响应。
 #[cfg(test)]
 pub(crate) async fn spawn_test_server(
@@ -718,22 +869,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_text_delta_handles_cumulative_and_incremental_fragments() {
-        let mut accumulated = String::new();
-        assert_eq!(
-            stream_text_delta(&mut accumulated, "The"),
-            Some("The".into())
+    fn text_delta_accumulator_handles_cumulative_and_incremental_fragments() {
+        let mut accumulated = TextDeltaAccumulator::default();
+        assert_eq!(accumulated.push("The"), Some("The".into()));
+        assert_eq!(accumulated.push("The user"), Some(" user".into()));
+        assert_eq!(accumulated.push("The user"), None);
+        assert_eq!(accumulated.push(" asks"), Some(" asks".into()));
+        assert_eq!(accumulated.accumulated(), "The user asks");
+    }
+
+    #[test]
+    fn text_delta_accumulator_skips_prefix_checks_once_incremental() {
+        // 真增量确认后,后续与累积文本同前缀的片段也按增量 append。
+        let mut accumulated = TextDeltaAccumulator::default();
+        assert_eq!(accumulated.push("ab"), Some("ab".into()));
+        assert_eq!(accumulated.push("cd"), Some("cd".into()));
+        assert_eq!(accumulated.push("ab"), Some("ab".into()));
+        assert_eq!(accumulated.accumulated(), "abcdab");
+    }
+
+    #[test]
+    fn done_once_emits_at_most_one_done() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut done = DoneOnce::default();
+        assert!(!done.sent());
+        assert!(done.emit(&tx, "stop"));
+        assert!(done.sent());
+        assert!(done.emit(&tx, "length"), "重复 emit 不再发送,但通道仍开放");
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(events.as_slice(), [LlmEvent::Done { finish_reason }] if finish_reason == "stop"),
+            "unexpected events: {events:?}"
         );
-        assert_eq!(
-            stream_text_delta(&mut accumulated, "The user"),
-            Some(" user".into())
-        );
-        assert_eq!(stream_text_delta(&mut accumulated, "The user"), None);
-        assert_eq!(
-            stream_text_delta(&mut accumulated, " asks"),
-            Some(" asks".into())
-        );
-        assert_eq!(accumulated, "The user asks");
     }
 
     #[test]

@@ -6,13 +6,12 @@
 
 mod common;
 mod provider_catalog;
+mod providers;
 mod retry;
 mod stream_decoder;
 mod strict_tools;
 mod tool_result_wire;
 mod wire;
-
-pub mod providers;
 
 use std::sync::Arc;
 
@@ -20,8 +19,6 @@ use astrcode_core::{
     config::ProviderWireFormat,
     llm::{LlmClientConfig, LlmError, LlmProvider},
 };
-pub use providers::{anthropic::AnthropicProvider, openai::StandardProvider};
-pub use retry::RetryPolicy;
 
 /// 根据显式 wire format、连接配置和模型创建 LLM provider。
 pub fn create_provider(

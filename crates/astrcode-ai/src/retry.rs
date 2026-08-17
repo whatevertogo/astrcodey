@@ -1,17 +1,21 @@
 //! LLM API 调用的指数退避重试逻辑。
 //!
-//! 在遇到可重试的 HTTP 状态码（如 429 限流、5xx 服务端错误）时，
+//! 在遇到可重试错误（如 429 限流、5xx 服务端错误、瞬态传输失败）时，
 //! 按指数退避策略自动重试请求，并加入抖动以避免惊群效应。
+//!
+//! 「是否值得重试」的判定不在本模块：HTTP 状态码经
+//! [`LlmError::is_retryable`](astrcode_core::llm::LlmError::is_retryable)
+//! 分类判定（单一事实来源），本模块只负责退避计时与次数上限。
 
 use std::time::Duration;
 
 /// 单次退避延迟上限（毫秒），防止 `max_retries` 配置过大导致长时间挂起。
-pub const DEFAULT_MAX_DELAY_MS: u64 = 30_000;
+pub(crate) const DEFAULT_MAX_DELAY_MS: u64 = 30_000;
 
 /// 重试策略配置。
 ///
 /// 控制最大重试次数和基础退避延迟。
-pub struct RetryPolicy {
+pub(crate) struct RetryPolicy {
     /// 最大重试次数（HTTP 状态码触发）
     pub max_retries: u32,
     /// 基础退避延迟（毫秒），实际延迟为 base × 2^(attempt-1) ± 抖动
@@ -38,32 +42,18 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// 根据状态码和尝试次数判断是否应该重试。
-    ///
-    /// 仅对以下状态码进行重试：408（超时）、429（限流）、500/502/503/504（服务端错误）。
-    ///
-    /// 注意:重试发生在 HTTP 层、在错误分类为 [`LlmError`](astrcode_core::llm::LlmError)
-    /// 之前,因此本清单需与 [`LlmError::is_retryable`](astrcode_core::llm::LlmError::is_retryable)
-    /// (429→`RateLimited`、5xx/408→`ServerError`)同步维护——两处在语义上等价。
-    pub fn should_retry(&self, attempt: u32, status: u16) -> bool {
-        if attempt > self.max_retries {
-            return false;
-        }
-        matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
-    }
-
     /// 判断传输层错误（TLS、连接重置、DNS 临时失败等）是否应该重试。
     ///
-    /// 与 `should_retry` 使用独立的计数器，因为传输层错误通常是瞬态的，
+    /// 与 HTTP 状态码重试使用独立的计数器，因为传输层错误通常是瞬态的，
     /// 短暂重试即可恢复，不应消耗 HTTP 级别的重试配额。
-    pub fn should_retry_transport(&self, attempt: u32) -> bool {
+    pub(crate) fn should_retry_transport(&self, attempt: u32) -> bool {
         attempt <= self.max_transport_retries
     }
 
     /// 根据尝试次数计算指数退避延迟，并加入 ±25% 随机抖动。
     ///
     /// 加入抖动是为了在多个客户端同时重试时避免惊群效应。
-    pub fn delay(&self, attempt: u32) -> Duration {
+    pub(crate) fn delay(&self, attempt: u32) -> Duration {
         let exponential = self.base_delay_ms * 2u64.pow(attempt.saturating_sub(1));
         let base = exponential.min(self.max_delay_ms);
         let jitter = base / 4;
@@ -94,39 +84,6 @@ mod tests {
         assert_eq!(policy.max_retries, 5);
         assert_eq!(policy.base_delay_ms, 1_000);
         assert_eq!(policy.max_transport_retries, 2);
-    }
-
-    #[test]
-    fn should_retry_returns_true_for_retryable_status_codes() {
-        let policy = RetryPolicy::default();
-        for code in [408, 429, 500, 502, 503, 504] {
-            assert!(
-                policy.should_retry(1, code),
-                "expected {code} to be retryable"
-            );
-        }
-    }
-
-    #[test]
-    fn should_retry_returns_false_for_non_retryable_status_codes() {
-        let policy = RetryPolicy::default();
-        for code in [400, 401, 403, 404, 405, 409, 422] {
-            assert!(
-                !policy.should_retry(1, code),
-                "expected {code} to NOT be retryable"
-            );
-        }
-    }
-
-    #[test]
-    fn should_retry_returns_false_after_max_retries_exceeded() {
-        let policy = RetryPolicy::default();
-        // max_retries=5, attempt=6 is beyond limit
-        assert!(!policy.should_retry(6, 429));
-        assert!(!policy.should_retry(99, 500));
-        // attempt <= max_retries should still retry
-        assert!(policy.should_retry(1, 429));
-        assert!(policy.should_retry(5, 429));
     }
 
     #[test]
