@@ -831,9 +831,8 @@ impl LlmError {
 
     /// 连接期重试是否值得;流内失败按设计不重试(无中途恢复)。
     ///
-    /// 与 `astrcode-ai::retry::RetryPolicy::should_retry` 的状态码集合一致
-    /// (429→`RateLimited`、5xx/408→`ServerError`);重试发生在 HTTP 层、在错误分类之前,
-    /// 因此两处状态码清单需同步维护。
+    /// 这是「是否重试」的单一事实来源:`astrcode-ai` 的共享传输层将 HTTP 状态码
+    /// 预分类为本类型后调用本方法判定,不再有第二份状态码清单。
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::RateLimited { .. } | Self::Transport { .. } => true,
@@ -968,6 +967,14 @@ impl LlmClientConfig {
 
     pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
         self.openai_extras().and_then(|e| e.prompt_cache_retention)
+    }
+
+    /// wire 请求中生效的 thinking 能力;未显式配置 thinking 时为 `None`,
+    /// provider 必须省略 thinking 参数并使用模型默认值。
+    pub fn effective_thinking_capability(&self) -> Option<&ThinkingCapability> {
+        self.thinking_configured
+            .then_some(self.thinking_capability.as_ref())
+            .flatten()
     }
 }
 

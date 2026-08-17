@@ -331,6 +331,22 @@ mod tests {
     }
 
     #[test]
+    fn openai_wire_formats_map_to_internal_api_mode() {
+        assert_eq!(
+            ProviderWireFormat::OpenAiChatCompletions.openai_api_mode(),
+            Some(OpenAiApiMode::ChatCompletions)
+        );
+        assert_eq!(
+            ProviderWireFormat::OpenAiResponses.openai_api_mode(),
+            Some(OpenAiApiMode::Responses)
+        );
+        assert_eq!(
+            ProviderWireFormat::AnthropicMessages.openai_api_mode(),
+            None
+        );
+    }
+
+    #[test]
     fn thinking_config_uses_documented_camel_case_contract() {
         let thinking: crate::llm::thinking::ThinkingConfig = serde_json::from_str(
             r#"

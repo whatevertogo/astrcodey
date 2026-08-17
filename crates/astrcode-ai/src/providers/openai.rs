@@ -8,9 +8,7 @@ use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{
-        HttpPostRequest, base_headers, build_client, report_stream_error, retry_policy_from_config,
-    },
+    common::{ConnectionSnapshot, HttpPostRequest, build_client, report_stream_error},
     strict_tools::{StrictToolProvider, prepare_strict_tools},
     wire::openai as openai_wire,
 };
@@ -70,11 +68,7 @@ impl StandardProvider {
             supports_strict_tool_use: self.config.supports_strict_tool_use,
             prompt_cache_retention: self.config.prompt_cache_retention(),
             thinking: &self.config.thinking,
-            thinking_capability: self
-                .config
-                .thinking_configured
-                .then_some(self.config.thinking_capability.as_ref())
-                .flatten(),
+            thinking_capability: self.config.effective_thinking_capability(),
         }
     }
 
@@ -120,17 +114,15 @@ impl LlmProvider for StandardProvider {
         let endpoint = self.endpoint();
         let client = self.client.clone();
         let api_mode = self.api_mode;
-        let config = self.config.clone();
-        let retry = retry_policy_from_config(&self.config);
+        let snapshot = ConnectionSnapshot::from_config(&self.config);
 
         tokio::spawn(async move {
             let result = openai_wire::transport::stream_request(
                 client,
                 endpoint,
-                config,
+                snapshot,
                 body,
                 api_mode,
-                retry,
                 tx.clone(),
             )
             .await;
@@ -158,13 +150,13 @@ impl LlmProvider for StandardProvider {
             StrictToolProvider::OpenAi,
         )?;
 
-        let headers = base_headers(&self.config);
+        let snapshot = ConnectionSnapshot::from_config(&self.config);
         let value = HttpPostRequest {
             client: self.client.clone(),
             endpoint: self.input_tokens_endpoint(),
-            headers,
+            headers: snapshot.headers,
             body: self.build_responses_count_body(&messages, &tools),
-            retry: retry_policy_from_config(&self.config),
+            retry: snapshot.retry,
         }
         .json()
         .await?;
@@ -195,6 +187,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::common::{ScriptedLlmServer, http_json_response};
 
     fn provider(
         api_mode: OpenAiApiMode,
@@ -433,5 +426,59 @@ mod tests {
             None,
         );
         assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    fn count_tokens_provider(base_url: String) -> StandardProvider {
+        let config = LlmClientConfig {
+            base_url,
+            max_retries: 1,
+            retry_base_delay_ms: 1,
+            ..LlmClientConfig::default()
+        };
+        StandardProvider::new(
+            config,
+            OpenAiApiMode::Responses,
+            "gpt-test".into(),
+            1024,
+            8192,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn count_input_tokens_parses_provider_response() {
+        let server =
+            ScriptedLlmServer::spawn(vec![http_json_response(r#"{"input_tokens":42}"#)]).await;
+        let provider = count_tokens_provider(server.base_url().into());
+
+        let count = provider
+            .count_input_tokens(vec![Arc::new(LlmMessage::user("hi"))], vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(count.input_tokens, 42);
+        server.assert_consumed();
+    }
+
+    #[tokio::test]
+    async fn count_input_tokens_exhausts_retries_on_server_error() {
+        let server = ScriptedLlmServer::spawn(vec![
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        ])
+        .await;
+        let provider = count_tokens_provider(server.base_url().into());
+
+        let result = provider
+            .count_input_tokens(vec![Arc::new(LlmMessage::user("hi"))], vec![])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::ServerError { status: 500, .. })
+        ));
+        server.assert_consumed();
     }
 }

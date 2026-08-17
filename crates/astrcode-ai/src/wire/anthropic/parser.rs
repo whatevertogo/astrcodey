@@ -1,52 +1,22 @@
 //! Anthropic Messages SSE event state machine.
 //!
 //! 将解码后的 SSE 行（`event:`/`data:` 配对在此完成）规范化为
-//! [`LlmEvent`]。拥有「`Done` 至多发一次」守卫，以及与 OpenAI parser 共享的
-//! 累积/增量文本去重（复用 [`crate::common::stream_text_delta`]）。
+//! [`LlmEvent`]。`Done` 至多发一次的守卫与累积/增量文本去重分别复用
+//! [`crate::common::DoneOnce`] 与 [`crate::common::TextDeltaAccumulator`]，
+//! 与 OpenAI parser 共享同一实现。
 
 use std::collections::{HashMap, HashSet};
 
 use astrcode_core::llm::{LlmEvent, LlmTokenUsage, LlmTokenUsageSource};
 use tokio::sync::mpsc;
 
-use crate::common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix};
-
-/// 流式响应的 `Done` 事件守卫，保证至多发送一次 `Done`。
-#[derive(Debug, Default)]
-pub(crate) struct StreamEventSink {
-    done_sent: bool,
-}
-
-impl StreamEventSink {
-    pub(crate) fn done_sent(&self) -> bool {
-        self.done_sent
-    }
-
-    pub(crate) fn emit_done(
-        &mut self,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-        finish_reason: impl Into<String>,
-    ) -> bool {
-        if self.done_sent {
-            return true;
-        }
-        self.done_sent = true;
-        send_event(
-            tx,
-            LlmEvent::Done {
-                finish_reason: finish_reason.into(),
-            },
-        )
-    }
-
-    pub(crate) fn ensure_done(&mut self, tx: &mpsc::UnboundedSender<LlmEvent>) -> bool {
-        self.emit_done(tx, "stop")
-    }
-}
+use crate::common::{
+    DoneOnce, TextDeltaAccumulator, send_event, token_usage_has_value, utf8_prefix,
+};
 
 #[derive(Debug, Default)]
 pub(crate) struct AnthropicStreamState {
-    pub(crate) sink: StreamEventSink,
+    pub(crate) sink: DoneOnce,
     usage_reported: bool,
     usage: Option<LlmTokenUsage>,
     /// SSE content block index → actual tool call id。
@@ -87,8 +57,8 @@ fn block_index(event: &serde_json::Value, what: &str) -> Option<u64> {
 
 #[derive(Debug, Default)]
 struct BlockStreamState {
-    text: String,
-    thinking: String,
+    text: TextDeltaAccumulator,
+    thinking: TextDeltaAccumulator,
 }
 
 fn emit_block_stream_delta(
@@ -97,12 +67,12 @@ fn emit_block_stream_delta(
     fragment: &str,
     is_thinking: bool,
 ) -> bool {
-    let accumulated = if is_thinking {
+    let accumulator = if is_thinking {
         &mut state.thinking
     } else {
         &mut state.text
     };
-    let Some(incremental) = stream_text_delta(accumulated, fragment) else {
+    let Some(incremental) = accumulator.push(fragment) else {
         return true;
     };
     let event = if is_thinking {
@@ -297,12 +267,12 @@ fn handle_anthropic_event(
                 if !emit_anthropic_token_usage(tx, state) {
                     return false;
                 }
-                state.sink.emit_done(tx, stop_reason)
+                state.sink.emit(tx, stop_reason)
             } else {
                 true
             }
         },
-        "message_stop" => emit_anthropic_token_usage(tx, state) && state.sink.ensure_done(tx),
+        "message_stop" => emit_anthropic_token_usage(tx, state) && state.sink.emit(tx, "stop"),
         "error" => {
             let message = event
                 .pointer("/error/message")
@@ -427,19 +397,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_event_sink_emits_done_once() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut sink = StreamEventSink::default();
-        assert!(sink.emit_done(&tx, "stop"));
-        assert!(sink.emit_done(&tx, "stop"));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            LlmEvent::Done { finish_reason } if finish_reason == "stop"
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
     fn process_sse_line_resets_event_type_after_each_data_line() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut state = AnthropicStreamState::default();
@@ -509,7 +466,7 @@ mod tests {
             .filter(|event| matches!(event, LlmEvent::Done { .. }))
             .count();
         assert_eq!(done_count, 1);
-        assert!(state.sink.done_sent());
+        assert!(state.sink.sent());
     }
 
     #[test]
@@ -591,7 +548,7 @@ mod tests {
             .filter(|event| matches!(event, LlmEvent::Done { .. }))
             .count();
         assert_eq!(done_count, 1);
-        assert!(state.sink.done_sent());
+        assert!(state.sink.sent());
     }
 
     #[test]

@@ -4,26 +4,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use astrcode_core::{
     config::OpenAiApiMode,
-    llm::{LlmClientConfig, LlmError, LlmEvent},
+    llm::{LlmError, LlmEvent},
 };
 use tokio::sync::mpsc;
 
 use super::parser::{StandardAccumulator, emit_done_once, process_sse_line};
-use crate::{
-    common::{HttpPostRequest, base_headers, consume_sse_lines, ensure_header},
-    retry::RetryPolicy,
-};
+use crate::common::{ConnectionSnapshot, HttpPostRequest, consume_sse_lines, ensure_header};
 
 pub(crate) async fn stream_request(
     client: reqwest::Client,
     endpoint: String,
-    config: LlmClientConfig,
+    snapshot: ConnectionSnapshot,
     body: serde_json::Value,
     api_mode: OpenAiApiMode,
-    retry: RetryPolicy,
     tx: mpsc::UnboundedSender<LlmEvent>,
 ) -> Result<(), LlmError> {
-    let mut headers = base_headers(&config);
+    let mut headers = snapshot.headers;
     ensure_header(&mut headers, "Accept", "text/event-stream");
     let stream_started = AtomicBool::new(false);
     let stream_replay_safe = AtomicBool::new(true);
@@ -33,7 +29,7 @@ pub(crate) async fn stream_request(
         endpoint,
         headers,
         body,
-        retry,
+        retry: snapshot.retry,
     }
     .run(&stream_started, &stream_replay_safe, &tx, |response| {
         parse_stream(

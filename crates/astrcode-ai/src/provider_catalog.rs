@@ -55,27 +55,3 @@ pub(crate) fn build_provider(
     };
     Ok(provider)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn openai_wire_formats_map_to_internal_api_mode() {
-        assert!(
-            ProviderWireFormat::OpenAiChatCompletions
-                .openai_api_mode()
-                .is_some()
-        );
-        assert!(
-            ProviderWireFormat::OpenAiResponses
-                .openai_api_mode()
-                .is_some()
-        );
-        assert!(
-            ProviderWireFormat::AnthropicMessages
-                .openai_api_mode()
-                .is_none()
-        );
-    }
-}
