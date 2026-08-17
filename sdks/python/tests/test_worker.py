@@ -831,6 +831,40 @@ class BackgroundHostTest(unittest.IsolatedAsyncioTestCase):
         await dispose
         await host.shutdown()
 
+    async def test_dispose_root_rejects_bad_ack(self) -> None:
+        for output in ({"ok": False}, {"ok": True, "unexpected": 1}, {}):
+            with self.subTest(output=output):
+                worker = Worker(EXT_ID, "0.1.0")
+                host = FakeHost(
+                    worker, host_operations=[HostOperation.SESSION_ROOT_DISPOSE]
+                )
+                background = worker.background_host()
+                await host.handshake()
+                background_host = await asyncio.wait_for(background, timeout=5)
+
+                dispose = asyncio.create_task(
+                    background_host.root_sessions().dispose_root("root-1")
+                )
+                nested = await host.recv()
+                self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_DISPOSE)
+                self.assertIsNone(nested.parent_invoke_id)
+                self.assertEqual(nested.input, {"target_session_id": "root-1"})
+                await host.send(
+                    {
+                        "type": "result",
+                        "status": "success",
+                        "id": nested.id,
+                        "kind": "invoke",
+                        "output": output,
+                    }
+                )
+                with self.assertRaises(S5rError) as raised:
+                    await dispose
+                self.assertEqual(
+                    raised.exception.code, WireErrorCode.INVALID_RESPONSE
+                )
+                await host.shutdown()
+
     async def test_repeated_registration_supersedes_previous_future(self) -> None:
         worker = Worker(EXT_ID, "0.1.0")
         first = worker.background_host()
