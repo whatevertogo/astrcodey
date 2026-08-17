@@ -8,6 +8,9 @@
 *.profdata
 *.dSYM/
 
+# 本地一次性分析产物(AI agent 工作稿等)
+/artifacts/
+
 # Frontend (node)
 node_modules/
 /frontend/dist/
