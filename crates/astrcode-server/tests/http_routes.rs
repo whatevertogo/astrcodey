@@ -1,13 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::ContextSettings;
 use astrcode_core::{
@@ -2313,15 +2304,19 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 /// filesystem path for state persistence.
 struct TestEventStore {
     inner: InMemoryEventStore,
-    temp_dir: PathBuf,
+    temp_dir: tempfile::TempDir,
 }
 
 impl TestEventStore {
     fn new() -> Self {
         Self {
             inner: InMemoryEventStore::new(),
-            temp_dir: std::env::temp_dir(),
+            temp_dir: tempfile::tempdir().unwrap(),
         }
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.temp_dir.path().join("config.toml")
     }
 }
 
@@ -2398,7 +2393,7 @@ impl SessionPathResolver for TestEventStore {
     ) -> Result<Option<PathBuf>, StorageError> {
         // Verify the session exists, then return a subdirectory in temp.
         self.inner.session_read_model(session_id).await?;
-        Ok(Some(self.temp_dir.join(session_id.as_str())))
+        Ok(Some(self.temp_dir.path().join(session_id.as_str())))
     }
 
     async fn planned_session_store_dir(
@@ -2408,7 +2403,7 @@ impl SessionPathResolver for TestEventStore {
         _parent_session_id: Option<&SessionId>,
         _source_extension: Option<&str>,
     ) -> Result<Option<PathBuf>, StorageError> {
-        Ok(Some(self.temp_dir.join(session_id.as_str())))
+        Ok(Some(self.temp_dir.path().join(session_id.as_str())))
     }
 }
 
@@ -2509,7 +2504,9 @@ async fn runtime_with_extensions(
     llm_provider: Arc<dyn LlmProvider>,
     extensions: Vec<Arc<dyn Extension>>,
 ) -> Arc<ServerRuntime> {
-    runtime_with_event_store(llm_provider, Arc::new(TestEventStore::new()), extensions).await
+    let event_store = Arc::new(TestEventStore::new());
+    let config_path = event_store.config_path();
+    runtime_with_event_store(llm_provider, event_store, config_path, extensions).await
 }
 
 fn mock_llm_settings() -> LlmSettings {
@@ -2539,10 +2536,9 @@ fn mock_llm_settings() -> LlmSettings {
 async fn runtime_with_event_store(
     llm_provider: Arc<dyn LlmProvider>,
     event_store: Arc<dyn SessionStore>,
+    config_path: PathBuf,
     extensions: Vec<Arc<dyn Extension>>,
 ) -> Arc<ServerRuntime> {
-    static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
-
     let effective = EffectiveConfig {
         llm: mock_llm_settings(),
         small_llm: mock_llm_settings(),
@@ -2585,10 +2581,7 @@ async fn runtime_with_event_store(
     );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from(format!(
-                "target/test-config-{}.toml",
-                NEXT_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
-            )),
+            config_path,
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
