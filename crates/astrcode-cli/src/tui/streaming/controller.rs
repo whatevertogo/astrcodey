@@ -56,6 +56,11 @@ impl StreamController {
         &mut self.state
     }
 
+    /// 是否已收到过非空 delta。
+    pub fn has_seen_delta(&self) -> bool {
+        self.state.has_seen_delta
+    }
+
     fn commit_complete_lines(&mut self) -> bool {
         // Split on newlines, keep the last (possibly incomplete) chunk in pending.
         let text = std::mem::take(&mut self.pending);

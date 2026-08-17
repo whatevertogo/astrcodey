@@ -175,24 +175,16 @@ fn apply_event(app: &mut App, event: &Event) {
             tracing::debug!(message_id = %message_id, "stream_reset");
         },
         EventPayload::Live(LiveEventPayload::AssistantTextDelta { message_id, delta }) => {
-            // 第一次收到 text delta 时写入 StreamHeader
-            let is_first_delta = app
-                .find_message_mut(message_id.as_str())
-                .is_some_and(|msg| msg.body.is_empty());
-            if is_first_delta {
-                app.scrollback_queue
-                    .push(ScrollbackEntry::AssistantStreamHeader {
-                        message_id: message_id.to_string(),
-                    });
-                app.status_text = "Working".into();
-            }
-            if let Some(msg) = app.find_message_mut(message_id.as_str()) {
-                msg.body.append_text(delta);
-            }
-            if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str())
-                && ctrl.push_delta(delta)
-            {
-                // Lines are queued; commit_tick will drain them.
+            if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str()) {
+                // 第一次收到 text delta 时写入 StreamHeader
+                if !ctrl.has_seen_delta() {
+                    app.scrollback_queue
+                        .push(ScrollbackEntry::AssistantStreamHeader {
+                            message_id: message_id.to_string(),
+                        });
+                    app.status_text = "Working".into();
+                }
+                ctrl.push_delta(delta);
             }
             tracing::debug!(message_id = %message_id, len = delta.len(), "stream_chunk");
         },
@@ -1076,7 +1068,8 @@ mod tests {
         );
 
         assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].body.plain_text(), "fresh");
+        // 流式期间不再同步维护 transcript 正文,正文由完成事件一次性写入
+        assert!(app.messages[0].body.plain_text().is_empty());
         assert!(app.scrollback_queue.iter().any(|entry| matches!(
             entry,
             ScrollbackEntry::AssistantStreamHeader { message_id } if message_id == "msg-1"
