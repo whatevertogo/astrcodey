@@ -6,7 +6,7 @@ use astrcode_core::tool::FileObservationStore;
 use astrcode_extension_sdk::{
     host::{
         HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspacePatchChange,
-        HostWorkspacePatchChangeKind, normalize_unified_diff_path,
+        HostWorkspacePatchChangeKind, is_patch_metadata, normalize_unified_diff_path,
     },
     s5r::ErrorPayload,
 };
@@ -91,7 +91,7 @@ fn parse_patch(patch: &str) -> Result<Vec<FilePatch>, String> {
     let mut index = 0usize;
     while index < lines.len() {
         let line = lines[index];
-        if is_metadata(line) || line.is_empty() || line.starts_with('#') {
+        if is_patch_metadata(line) || line.is_empty() || line.starts_with('#') {
             index += 1;
             continue;
         }
@@ -415,22 +415,6 @@ fn hunk_counts(hunk: &Hunk) -> (usize, usize) {
             HunkLine::Delete(_) => (added, removed + 1),
             HunkLine::Context(_) => (added, removed),
         })
-}
-
-fn is_metadata(line: &str) -> bool {
-    [
-        "diff ",
-        "index ",
-        "old mode ",
-        "new mode ",
-        "new file mode ",
-        "deleted file mode ",
-        "rename ",
-        "similarity ",
-        "copy ",
-    ]
-    .iter()
-    .any(|prefix| line.starts_with(prefix))
 }
 
 fn invalid_patch(error: String) -> ErrorPayload {

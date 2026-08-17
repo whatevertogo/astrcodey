@@ -20,7 +20,7 @@ use astrcode_extension_sdk::{
     tool::ExecutionMode,
     wire::{
         FeatureName, HostInitialization, HostInitialized, InboundInvoke, InvocationResponse,
-        InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
+        InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport,
         protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
     },
 };
@@ -566,18 +566,7 @@ async fn run_with_cancellation(
 }
 
 fn invoke_error_to_extension_error(error: InvokeError) -> ExtensionError {
-    let payload = match error {
-        InvokeError::Local(payload) | InvokeError::Remote(payload) => payload,
-        InvokeError::DriverUnavailable => ErrorPayload::new(
-            WireErrorCode::HostNotReady,
-            "S5R 3.0 extension peer driver is not running",
-        ),
-        InvokeError::PeerClosed => ErrorPayload::new(
-            WireErrorCode::PeerClosed,
-            "S5R 3.0 extension peer closed before the invoke completed",
-        ),
-    };
-    ExtensionError::Host(HostError::from(payload))
+    ExtensionError::Host(HostError::from(ErrorPayload::from(error)))
 }
 
 async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHandle<()>) {

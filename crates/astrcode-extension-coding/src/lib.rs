@@ -24,6 +24,11 @@ const EXTENSION_ID: &str = "astrcode-coding";
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
 
+/// Shared `InvalidInput` error constructor so tool modules keep one consistent hint shape.
+pub(crate) fn invalid_input(message: impl Into<String>, hint: &str) -> ExtensionError {
+    ExtensionError::invalid_input(message, Some(hint.into()))
+}
+
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(CodingExtension::default())
 }

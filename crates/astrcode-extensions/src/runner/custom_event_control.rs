@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use astrcode_core::{event::DurableEventPayload, types::SessionId};
-use astrcode_extension_sdk::extension::{
-    CustomEventHandler, CustomEventSubscription, internal::custom_event_subscription_matches,
-};
+use astrcode_extension_sdk::extension::{CustomEventHandler, CustomEventSubscription};
 use astrcode_storage::{EventConsumerCheckpointReset, EventConsumerState, StorageError};
 
 use super::{
     ExtensionRunner,
     custom_event_delivery::{
-        CustomEventConsumerKey, CustomEventSession, MAX_CUSTOM_EVENT_CASCADE_DEPTH,
-        custom_event_consumer_id,
+        CustomEventConsumerKey, CustomEventSession, custom_event_consumer_id,
+        custom_event_matches_subscription,
     },
 };
 
@@ -189,14 +187,7 @@ impl ExtensionRunner {
                     DurableEventPayload::CustomEvent(event) => Some(event),
                     _ => None,
                 })
-                .filter(|event| {
-                    event.cascade_depth <= MAX_CUSTOM_EVENT_CASCADE_DEPTH
-                        && custom_event_subscription_matches(
-                            subscription,
-                            &event.extension_id,
-                            &event.event_type,
-                        )
-                })
+                .filter(|event| custom_event_matches_subscription(subscription, event))
                 .count(),
         )
         .unwrap_or(u64::MAX);

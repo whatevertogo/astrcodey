@@ -317,13 +317,14 @@ class Worker:
         return handler
 
     def _fixed_hook(self, event: str, handler: HookHandlerFn) -> HookHandlerFn:
-        self._insert_hook(event, handler)
-        self._hook_manifest.append({"on": event, "mode": FIXED_HOOK_MODES[event]})
-        return handler
+        return self._register_hook(event, FIXED_HOOK_MODES[event], handler)
 
     def _compact_hook(self, event: str, handler: HookHandlerFn) -> HookHandlerFn:
+        return self._register_hook(event, HookMode.BLOCKING, handler)
+
+    def _register_hook(self, event: str, mode: str, handler: HookHandlerFn) -> HookHandlerFn:
         self._insert_hook(event, handler)
-        self._hook_manifest.append({"on": event, "mode": HookMode.BLOCKING})
+        self._hook_manifest.append({"on": event, "mode": mode})
         return handler
 
     def _insert_hook(self, on: str, handler: HookHandlerFn) -> None:

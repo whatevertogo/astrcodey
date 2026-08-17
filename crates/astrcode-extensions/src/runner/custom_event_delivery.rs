@@ -10,7 +10,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventSender},
+    event::{CustomEventData, DurableEventPayload, Event, EventSender},
     types::SessionId,
 };
 use astrcode_extension_sdk::extension::{
@@ -43,6 +43,15 @@ pub(super) fn custom_event_consumer_id(
         "{extension_id}:{}:v{}",
         subscription.id, subscription.consumer_version
     )
+}
+
+/// True when the event is within the cascade budget and matches the subscription.
+pub(super) fn custom_event_matches_subscription(
+    subscription: &CustomEventSubscription,
+    event: &CustomEventData,
+) -> bool {
+    event.cascade_depth <= MAX_CUSTOM_EVENT_CASCADE_DEPTH
+        && custom_event_subscription_matches(subscription, &event.extension_id, &event.event_type)
 }
 
 #[derive(Clone)]
@@ -349,19 +358,20 @@ async fn reconcile_durable_custom_events_once(
             DurableEventPayload::CustomEvent(custom_event) => custom_event,
             _ => continue,
         };
-        if !custom_event_subscription_matches(
-            &consumer.subscription,
-            &custom_event.extension_id,
-            &custom_event.event_type,
-        ) {
-            continue;
-        }
-        if custom_event.cascade_depth > MAX_CUSTOM_EVENT_CASCADE_DEPTH {
-            tracing::warn!(
-                event_id = %stored.id,
-                cascade_depth = custom_event.cascade_depth,
-                "custom event cascade depth exceeded"
-            );
+        if !custom_event_matches_subscription(&consumer.subscription, custom_event) {
+            if custom_event.cascade_depth > MAX_CUSTOM_EVENT_CASCADE_DEPTH
+                && custom_event_subscription_matches(
+                    &consumer.subscription,
+                    &custom_event.extension_id,
+                    &custom_event.event_type,
+                )
+            {
+                tracing::warn!(
+                    event_id = %stored.id,
+                    cascade_depth = custom_event.cascade_depth,
+                    "custom event cascade depth exceeded"
+                );
+            }
             continue;
         }
 
@@ -676,11 +686,7 @@ impl ExtensionRunner {
         let view = self.turn_extension_view();
         let mut fully_admitted = true;
         for (extension_id, subscription, handler) in &view.index.custom_event {
-            if !custom_event_subscription_matches(
-                subscription,
-                &custom_event.extension_id,
-                &custom_event.event_type,
-            ) {
+            if !custom_event_matches_subscription(subscription, custom_event) {
                 continue;
             }
             let Some(lane) = self.custom_event_lane(

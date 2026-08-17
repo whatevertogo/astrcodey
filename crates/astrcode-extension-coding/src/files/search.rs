@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
@@ -6,11 +6,12 @@ use astrcode_extension_sdk::{
         HostWorkspaceGlobRequest, HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry,
         HostWorkspaceGrepMode, HostWorkspaceGrepRequest,
     },
+    hostpaths::resolve_path,
     tool::{ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
-use super::absolute_path;
+use crate::invalid_input;
 
 const DEFAULT_GLOB_MAX_RESULTS: usize = 100;
 const DEFAULT_GREP_MAX_MATCHES: usize = 250;
@@ -54,7 +55,7 @@ impl ToolHandler for GlobHandler {
         validate_glob(&args)?;
         let root = args.root.as_deref().unwrap_or(".");
         Ok(ToolPlan::new([ResourceAccess::search_file(
-            absolute_path(context.working_dir(), root),
+            resolve_path(context.working_dir(), Path::new(root)),
             true,
         )]))
     }
@@ -117,25 +118,6 @@ impl ToolHandler for GlobHandler {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum GrepOutputMode {
-    Content,
-    #[default]
-    FilesWithMatches,
-    Count,
-}
-
-impl GrepOutputMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Content => "content",
-            Self::FilesWithMatches => "files_with_matches",
-            Self::Count => "count",
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrepArgs {
@@ -163,7 +145,7 @@ struct GrepArgs {
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
-    output_mode: GrepOutputMode,
+    output_mode: HostWorkspaceGrepMode,
 }
 
 struct GrepHandler;
@@ -174,7 +156,10 @@ impl ToolHandler for GrepHandler {
         let args: GrepArgs = context.arguments()?;
         validate_grep(&args)?;
         Ok(ToolPlan::new([ResourceAccess::search_file(
-            absolute_path(context.working_dir(), args.path.as_deref().unwrap_or(".")),
+            resolve_path(
+                context.working_dir(),
+                Path::new(args.path.as_deref().unwrap_or(".")),
+            ),
             true,
         )]))
     }
@@ -201,7 +186,7 @@ impl ToolHandler for GrepHandler {
                 path_filters,
                 before_context: args.before_context,
                 after_context: args.after_context,
-                mode: args.output_mode.into(),
+                mode: args.output_mode,
             })
             .await?;
         let rendered = render_entries(&output.entries);
@@ -245,10 +230,7 @@ impl ToolHandler for GrepHandler {
                     "nextOffset".into(),
                     serde_json::json!(has_more.then_some(next_offset)),
                 ),
-                (
-                    "outputMode".into(),
-                    serde_json::json!(args.output_mode.as_str()),
-                ),
+                ("outputMode".into(), serde_json::json!(args.output_mode)),
             ]))
             .into())
     }
@@ -270,21 +252,30 @@ fn append_pagination_notice(content: &mut String, has_more: bool, next_offset: u
 
 fn validate_glob(args: &GlobArgs) -> Result<(), ExtensionError> {
     if args.pattern.trim().is_empty() {
-        return Err(invalid("pattern cannot be empty"));
+        return Err(invalid_input(
+            "pattern cannot be empty",
+            "narrow the search and follow the tool parameter schema",
+        ));
     }
     validate_page_size(args.max_results, "maxResults")
 }
 
 fn validate_grep(args: &GrepArgs) -> Result<(), ExtensionError> {
     if args.pattern.is_empty() {
-        return Err(invalid("pattern cannot be empty"));
+        return Err(invalid_input(
+            "pattern cannot be empty",
+            "narrow the search and follow the tool parameter schema",
+        ));
     }
     validate_page_size(args.max_matches, "maxMatches")?;
     if args.before_context > astrcode_extension_sdk::host::HOST_WORKSPACE_SEARCH_MAX_CONTEXT_LINES
         || args.after_context
             > astrcode_extension_sdk::host::HOST_WORKSPACE_SEARCH_MAX_CONTEXT_LINES
     {
-        return Err(invalid("beforeContext and afterContext must not exceed 20"));
+        return Err(invalid_input(
+            "beforeContext and afterContext must not exceed 20",
+            "narrow the search and follow the tool parameter schema",
+        ));
     }
     if args
         .glob
@@ -295,25 +286,22 @@ fn validate_grep(args: &GrepArgs) -> Result<(), ExtensionError> {
             .as_deref()
             .is_some_and(|file_type| file_type.trim().is_empty())
     {
-        return Err(invalid("glob and fileType must not be empty"));
+        return Err(invalid_input(
+            "glob and fileType must not be empty",
+            "narrow the search and follow the tool parameter schema",
+        ));
     }
     Ok(())
 }
 
 fn validate_page_size(value: Option<usize>, name: &str) -> Result<(), ExtensionError> {
     if value.is_some_and(|value| value == 0 || value > MAX_SEARCH_PAGE_SIZE) {
-        return Err(invalid(format!(
-            "{name} must be between 1 and {MAX_SEARCH_PAGE_SIZE}"
-        )));
+        return Err(invalid_input(
+            format!("{name} must be between 1 and {MAX_SEARCH_PAGE_SIZE}"),
+            "narrow the search and follow the tool parameter schema",
+        ));
     }
     Ok(())
-}
-
-fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::invalid_input(
-        message,
-        Some("narrow the search and follow the tool parameter schema".to_string()),
-    )
 }
 
 fn host_pattern(args: &GrepArgs) -> String {
@@ -326,16 +314,6 @@ fn host_pattern(args: &GrepArgs) -> String {
         format!("(?i){pattern}")
     } else {
         pattern
-    }
-}
-
-impl From<GrepOutputMode> for HostWorkspaceGrepMode {
-    fn from(mode: GrepOutputMode) -> Self {
-        match mode {
-            GrepOutputMode::Content => Self::Content,
-            GrepOutputMode::FilesWithMatches => Self::FilesWithMatches,
-            GrepOutputMode::Count => Self::Count,
-        }
     }
 }
 

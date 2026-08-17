@@ -55,15 +55,6 @@ pub(super) fn register(registrar: &mut Registrar) {
     }
 }
 
-fn absolute_path(working_dir: &std::path::Path, path: &str) -> std::path::PathBuf {
-    let path = std::path::Path::new(path);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        working_dir.join(path)
-    }
-}
-
 fn text_change_metadata(change: &HostWorkspaceTextChange) -> BTreeMap<String, Value> {
     let mut metadata = BTreeMap::from([("newBytes".into(), Value::from(change.new_bytes))]);
     if let Some(old_bytes) = change.old_bytes {

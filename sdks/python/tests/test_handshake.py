@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import unittest
 
-from memory import MemoryTransport
+from harness import FakeHostBase
 from s5r.errors import ProtocolError, S5rError, WireErrorCode
 from s5r.protocol import (
     FEATURE_CUSTOM_EVENT_V1,
     FEATURE_MODEL_STREAM_V1,
     FEATURE_NESTED_INVOKE_V1,
-    decode_message,
-    encode_message,
 )
 from s5r.worker import Worker
 
@@ -20,65 +17,11 @@ ALL_FEATURES = [FEATURE_NESTED_INVOKE_V1, FEATURE_MODEL_STREAM_V1, FEATURE_CUSTO
 EXT_ID = "test-extension"
 
 
-def initialize_msg(
-    extension_id: str = EXT_ID,
-    *,
-    protocol_version: str = "3.0",
-    supported: list[str] | None = None,
-    required: list[str] | None = None,
-    host_operations: list[str] | None = None,
-) -> dict:
-    return {
-        "type": "initialize",
-        "id": "init-1",
-        "protocol_version": protocol_version,
-        "host": {"name": "test-host"},
-        "extension_id": extension_id,
-        "supported_features": ALL_FEATURES if supported is None else supported,
-        "required_features": ALL_FEATURES if required is None else required,
-        "host_operations": [] if host_operations is None else host_operations,
-    }
-
-
-class Handshake:
+class Handshake(FakeHostBase):
     """Minimal fake host driver used by the worker tests."""
 
-    def __init__(self, worker: Worker, host_operations: list[str] | None = None):
-        self.host_transport, worker_transport = MemoryTransport.pair()
-        self.worker = worker
-        self.worker_task = asyncio.create_task(worker.serve(worker_transport))
-        self.host_operations = [] if host_operations is None else host_operations
-
-    async def send(self, message: dict) -> None:
-        await self.host_transport.write_frame(encode_message(message))
-
-    async def recv(self):
-        return decode_message(
-            await asyncio.wait_for(self.host_transport.read_frame(), timeout=5)
-        )
-
-    async def initialize(self, **kwargs):
-        await self.send(initialize_msg(host_operations=self.host_operations, **kwargs))
-        result = await self.recv()
-        assert result.kind == "initialize", result
-        return result
-
-    async def activate(self):
-        await self.send({"type": "activate", "id": "act-1", "config": None})
-        result = await self.recv()
-        assert result.kind == "activate", result
-        return result
-
-    async def handshake(self):
-        init = await self.initialize()
-        assert init.is_success, init.error
-        activate = await self.activate()
-        assert activate.is_success, activate.error
-        return init
-
-    async def shutdown(self) -> None:
-        self.host_transport.close_write()
-        await asyncio.wait_for(self.worker_task, timeout=5)
+    supported_features = ALL_FEATURES
+    required_features = ALL_FEATURES
 
 
 class HandshakeTest(unittest.IsolatedAsyncioTestCase):

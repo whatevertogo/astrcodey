@@ -23,7 +23,7 @@ use super::{
     InvokeContext, acknowledgement, dispatch, invalid_group_operation,
     path::canonicalize_host_path, process_handles::ProcessHandleStore, run_blocking_io,
 };
-use crate::process_supervision::SupervisedCommand;
+use crate::process_supervision::{SupervisedChild, SupervisedCommand};
 
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
@@ -247,11 +247,8 @@ impl ProcessRunner {
         if stdin.is_some() {
             process.stdin(Stdio::piped());
         }
-        configure_process(&mut process);
 
-        let mut child = SupervisedCommand::new(process)
-            .spawn()
-            .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))?;
+        let mut child = spawn_supervised(process)?;
         let mut child_stdin = child.take_stdin();
         let mut stdout = child.take_stdout().ok_or_else(|| {
             ErrorPayload::new(
@@ -475,6 +472,17 @@ pub(super) fn configure_process(command: &mut tokio::process::Command) {
     for (key, value) in NONINTERACTIVE_ENV {
         command.env(key, value);
     }
+}
+
+/// Configures and spawns a supervised child, mapping spawn failure to a wire payload.
+pub(super) fn spawn_supervised(
+    command: tokio::process::Command,
+) -> Result<SupervisedChild, ErrorPayload> {
+    let mut command = command;
+    configure_process(&mut command);
+    SupervisedCommand::new(command)
+        .spawn()
+        .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))
 }
 
 fn filter_safe_child_env(

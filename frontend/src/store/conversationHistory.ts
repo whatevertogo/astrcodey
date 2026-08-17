@@ -1,4 +1,10 @@
-import type { ConversationBlock } from '../services/types'
+import type {
+  AgentSessionLink,
+  ConversationBlock,
+  ConversationControlState,
+  ConversationItemsPage,
+  ConversationState,
+} from '../services/types'
 
 export const MAX_TIMELINE_PAGES = 8
 export const MAX_TIMELINE_BLOCKS = 1_300
@@ -22,6 +28,43 @@ export function latestTimelineWindow(
     blocks,
     pageBlockIds: [durable.map((block) => block.id)],
     detachedFromLatest: false,
+  }
+}
+
+export interface ConversationViewHydration {
+  blocks: ConversationBlock[]
+  transientBlockOwners: Record<string, string>
+  control: ConversationControlState | null
+  cursor: string
+  timelineOlderCursor: string | null
+  timelineHasOlder: boolean
+  timelineLoading: false
+  timelinePageBlockIds: string[][]
+  timelineDetachedFromLatest: false
+  activeSessionTitle: string | null
+  agentSessions: AgentSessionLink[]
+}
+
+export function buildConversationView(
+  state: ConversationState,
+  page: ConversationItemsPage
+): ConversationViewHydration {
+  const timeline = latestTimelineWindow(page.items, state.transientBlocks)
+  return {
+    blocks: timeline.blocks,
+    transientBlockOwners: {},
+    control: state.control,
+    cursor: earliestConversationCursor(
+      state.cursor.value,
+      page.snapshotCursor.value
+    ),
+    timelineOlderCursor: page.olderCursor?.value ?? null,
+    timelineHasOlder: page.hasOlder,
+    timelineLoading: false,
+    timelinePageBlockIds: timeline.pageBlockIds,
+    timelineDetachedFromLatest: false,
+    activeSessionTitle: state.sessionTitle,
+    agentSessions: state.agentSessions,
   }
 }
 

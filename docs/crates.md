@@ -756,14 +756,14 @@ feature 可选依赖它。
 主要模块：
 
 - `main.rs`：Tauri app builder，注册插件和 commands。
-- `commands.rs`：Tauri command。包含启动 sidecar server、窗口最小化/最大化/关闭、sidecar state、HTTP token/端口响应等。
+- `commands.rs`：Tauri command。包含启动 sidecar server、窗口最小化/最大化/关闭、sidecar state 和端口响应等。
 - `instance.rs`：单实例协调、锁文件、已有实例唤起/复用。
 - `paths.rs`：`~/.astrcode`、instance lock/info 路径。
 - `build.rs`：Tauri build hook。
 
 关键行为：
 
-- sidecar 模式运行 `astrcode-http-server`，动态选择本地端口和 auth token。
+- sidecar 模式运行 `astrcode-http-server`，动态选择本地端口。
 - 前端通过 HTTP API + SSE 与后端通信，并使用 `tauri-plugin-http` 绕过平台 webview 网络栈差异。
 - 用 `fs2` 文件锁和 instance info 管理单实例。
 

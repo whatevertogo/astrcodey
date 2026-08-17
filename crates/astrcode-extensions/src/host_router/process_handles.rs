@@ -22,9 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ExtensionInstanceId,
-    process::{configure_process, resolve_cwd, validated_timeout},
+    process::{resolve_cwd, spawn_supervised, validated_timeout},
 };
-use crate::process_supervision::{SupervisedChild, SupervisedCommand};
+use crate::process_supervision::SupervisedChild;
 
 const MAX_SESSION_PROCESSES: usize = 8;
 const MAX_SESSION_PROCESS_HANDLES: usize = 64;
@@ -285,10 +285,7 @@ impl ProcessHandleStore {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_process(&mut command);
-        let mut child = SupervisedCommand::new(command)
-            .spawn()
-            .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))?;
+        let mut child = spawn_supervised(command)?;
         let stdin = child.take_stdin().ok_or_else(|| {
             ErrorPayload::new(WireErrorCode::ProcessFailed, "child stdin pipe unavailable")
         })?;

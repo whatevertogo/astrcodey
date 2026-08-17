@@ -3,4 +3,4 @@
 /**
  * 本机运行中 server 的发现文件（`run.json`）。
  */
-export type RunInfoDto = { port: number, authToken: string, };
+export type RunInfoDto = { port: number, };

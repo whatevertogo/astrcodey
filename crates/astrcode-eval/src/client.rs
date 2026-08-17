@@ -16,12 +16,11 @@ use crate::EvalError;
 /// Eval 专用 HTTP 客户端。
 pub struct EvalClient {
     base_url: String,
-    token: String,
     http: reqwest::Client,
 }
 
 impl EvalClient {
-    pub fn new(base_url: &str, token: &str) -> Result<Self, EvalError> {
+    pub fn new(base_url: &str) -> Result<Self, EvalError> {
         let http = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -29,17 +28,15 @@ impl EvalClient {
             .map_err(|error| EvalError::Client(format!("build eval HTTP client: {error}")))?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            token: token.to_string(),
             http,
         })
     }
 
-    /// 检查 server 配置端点是否可认证访问。
+    /// 检查 server 配置端点是否可访问。
     pub async fn health_check(&self) -> Result<(), EvalError> {
         let response = self
             .http
             .get(format!("{}/api/config", self.base_url))
-            .bearer_auth(&self.token)
             .send()
             .await
             .map_err(|error| EvalError::Client(format!("health check request: {error}")))?;
@@ -52,7 +49,6 @@ impl EvalClient {
         let response = self
             .http
             .post(format!("{}/api/sessions", self.base_url))
-            .bearer_auth(&self.token)
             .json(&CreateSessionRequest {
                 working_dir: working_dir.to_string(),
                 tool_selection: None,
@@ -73,7 +69,6 @@ impl EvalClient {
                 "{}/api/sessions/{}/prompt",
                 self.base_url, session_id
             ))
-            .bearer_auth(&self.token)
             .json(&PromptRequest {
                 text: text.to_string(),
                 attachments: Vec::new(),
@@ -133,7 +128,6 @@ impl EvalClient {
                 "{}/api/sessions/{}/abort",
                 self.base_url, session_id
             ))
-            .bearer_auth(&self.token)
             .send()
             .await
             .map_err(|error| EvalError::Client(format!("abort session request: {error}")))?;
@@ -149,7 +143,6 @@ impl EvalClient {
                 "{}/api/sessions/{}/conversation",
                 self.base_url, session_id
             ))
-            .bearer_auth(&self.token)
             .send()
             .await
             .map_err(|error| {
@@ -234,7 +227,7 @@ mod tests {
             .unwrap();
         });
 
-        let client = EvalClient::new(&format!("http://{address}"), "token").unwrap();
+        let client = EvalClient::new(&format!("http://{address}")).unwrap();
         let error = client.abort("session-1").await.unwrap_err().to_string();
 
         assert!(error.contains("abort session"));

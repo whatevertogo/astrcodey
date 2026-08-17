@@ -409,34 +409,40 @@ export function decodeConversationStreamEnvelope(
   }
 }
 
-export function decodeConversationSnapshot(
-  value: unknown
-): ConversationSnapshot {
-  const object = decodeObject(value, 'conversation snapshot')
+function decodeConversationBase(object: JsonObject): {
+  sessionId: string
+  sessionTitle: string
+  cursor: ConversationCursor
+  control: ConversationControlState
+  agentSessions: AgentSessionLink[]
+} {
   return {
     sessionId: requiredString(object, 'sessionId'),
     sessionTitle: requiredString(object, 'sessionTitle'),
     cursor: decodeConversationCursor(object.cursor),
     control: decodeConversationControlState(object.control),
-    blocks: arrayField(object, 'blocks').map(decodeConversationBlock),
     agentSessions: arrayField(object, 'agentSessions').map(
       decodeAgentSessionLink
     ),
   }
 }
 
+export function decodeConversationSnapshot(
+  value: unknown
+): ConversationSnapshot {
+  const object = decodeObject(value, 'conversation snapshot')
+  return {
+    ...decodeConversationBase(object),
+    blocks: arrayField(object, 'blocks').map(decodeConversationBlock),
+  }
+}
+
 export function decodeConversationState(value: unknown): ConversationState {
   const object = decodeObject(value, 'conversation state')
   return {
-    sessionId: requiredString(object, 'sessionId'),
-    sessionTitle: requiredString(object, 'sessionTitle'),
-    cursor: decodeConversationCursor(object.cursor),
-    control: decodeConversationControlState(object.control),
+    ...decodeConversationBase(object),
     transientBlocks: arrayField(object, 'transientBlocks').map(
       decodeConversationBlock
-    ),
-    agentSessions: arrayField(object, 'agentSessions').map(
-      decodeAgentSessionLink
     ),
   }
 }

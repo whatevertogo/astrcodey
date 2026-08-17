@@ -28,8 +28,7 @@ import {
 } from '../components/Sidebar/projectFolderOrder'
 import type { AppState } from './types'
 import {
-  earliestConversationCursor,
-  latestTimelineWindow,
+  buildConversationView,
   prependTimelinePage,
 } from './conversationHistory'
 
@@ -46,44 +45,10 @@ const pendingAskUserPollScheduler: PendingAskUserPollScheduler = {
   cancel: (timer) => window.clearTimeout(timer as number),
 }
 
-function resetSessionView(): Partial<AppState> {
-  return {
-    activeSessionId: null,
-    activeSessionTitle: null,
-    blocks: [],
-    transientBlockOwners: {},
-    control: null,
-    cursor: null,
-    timelineOlderCursor: null,
-    timelineHasOlder: false,
-    timelineLoading: false,
-    timelinePageBlockIds: [],
-    timelineDetachedFromLatest: false,
-    compactSubmitting: false,
-    sessionStream: null,
-    sessionStreamStatus: 'disconnected',
-    sessionStreamError: null,
-    workingDir: null,
-    agentSessions: [],
-    pendingMessages: [],
-    // ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
-    composerDeliveryMode: 'queued',
-    slashCommands: [],
-    keybindings: [],
-    statusItems: {},
-    statusItemRevisions: {},
-    transientHint: null,
-  }
-}
-
-export const useAppStore = create<AppState>((set, get) => ({
-  serverPort: null,
-  connectionStatus: 'disconnected',
-  connectionError: null,
-  sessions: [],
+// ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
+const DEFAULT_SESSION_STATE = {
   activeSessionId: null,
   activeSessionTitle: null,
-  workingDir: null,
   blocks: [],
   transientBlockOwners: {},
   control: null,
@@ -97,21 +62,34 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessionStream: null,
   sessionStreamStatus: 'disconnected',
   sessionStreamError: null,
-  modelRefreshKey: 0,
+  workingDir: null,
   agentSessions: [],
+  pendingMessages: [],
+  composerDeliveryMode: 'queued',
+  slashCommands: [],
+  keybindings: [],
   statusItems: {},
   statusItemRevisions: {},
-  keybindings: [],
-  slashCommands: [],
-  extensions: [],
   transientHint: null,
-  pendingMessages: [],
+} as const satisfies Partial<AppState>
+
+function resetSessionView(): Partial<AppState> {
+  return { ...DEFAULT_SESSION_STATE }
+}
+
+export const useAppStore = create<AppState>((set, get) => ({
+  serverPort: null,
+  connectionStatus: 'disconnected',
+  connectionError: null,
+  sessions: [],
+  ...DEFAULT_SESSION_STATE,
+  modelRefreshKey: 0,
+  extensions: [],
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
   pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   askUserExtensionAvailable: null,
-  composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
   initServer: async () => {
@@ -123,11 +101,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         const { invoke } = await import('@tauri-apps/api/core')
         const result = await withTimeout(
-          invoke<{ port: number; token?: string }>('start_server'),
+          invoke<{ port: number }>('start_server'),
           15_000,
           '启动 AstrCode 服务超时，请关闭残留 astrcode-http-server 进程后重试'
         )
-        api.setServerPort(result.port, result.token)
+        api.setServerPort(result.port)
         set({ serverPort: result.port })
       } catch (err) {
         set({
@@ -138,12 +116,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     } else {
       api.initBaseUrl()
-      const envToken = (
-        import.meta as unknown as { env: Record<string, string> }
-      ).env?.VITE_AUTH_TOKEN
-      if (envToken) {
-        api.setAuthToken(envToken)
-      }
     }
 
     set({ connectionStatus: 'connected' })
@@ -267,35 +239,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const sessions = get().sessions
       const sessionItem = sessions.find((s) => s.sessionId === sessionId)
 
-      const timeline = latestTimelineWindow(
-        timelinePage.items,
-        conversationState.transientBlocks
-      )
-      const replayCursor = earliestConversationCursor(
-        conversationState.cursor.value,
-        timelinePage.snapshotCursor.value
-      )
+      const view = buildConversationView(conversationState, timelinePage)
       set({
-        blocks: timeline.blocks,
-        transientBlockOwners: {},
-        control: conversationState.control,
-        cursor: replayCursor,
-        timelineOlderCursor: timelinePage.olderCursor?.value ?? null,
-        timelineHasOlder: timelinePage.hasOlder,
-        timelineLoading: false,
-        timelinePageBlockIds: timeline.pageBlockIds,
-        timelineDetachedFromLatest: false,
-        activeSessionTitle: conversationState.sessionTitle,
+        ...view,
         workingDir: sessionItem?.workingDir ?? null,
-        agentSessions: conversationState.agentSessions,
       })
 
-      const sessionStream = startSessionStream(
-        sessionId,
-        replayCursor,
-        get,
-        set
-      )
+      const sessionStream = startSessionStream(sessionId, view.cursor, get, set)
       if (
         get().activeSessionId !== sessionId ||
         switchGeneration !== sessionSwitchGeneration
@@ -340,28 +290,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       ) {
         return null
       }
-      const timeline = latestTimelineWindow(
-        timelinePage.items,
-        conversationState.transientBlocks
-      )
-      const replayCursor = earliestConversationCursor(
-        conversationState.cursor.value,
-        timelinePage.snapshotCursor.value
-      )
-      set({
-        blocks: timeline.blocks,
-        transientBlockOwners: {},
-        control: conversationState.control,
-        cursor: replayCursor,
-        timelineOlderCursor: timelinePage.olderCursor?.value ?? null,
-        timelineHasOlder: timelinePage.hasOlder,
-        timelineLoading: false,
-        timelinePageBlockIds: timeline.pageBlockIds,
-        timelineDetachedFromLatest: false,
-        activeSessionTitle: conversationState.sessionTitle,
-        agentSessions: conversationState.agentSessions,
-      })
-      return replayCursor
+      const view = buildConversationView(conversationState, timelinePage)
+      set(view)
+      return view.cursor
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
       if (

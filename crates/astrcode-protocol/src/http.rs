@@ -23,7 +23,6 @@ pub use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct RunInfoDto {
     pub port: u16,
-    pub auth_token: String,
 }
 
 /// 新建会话请求。

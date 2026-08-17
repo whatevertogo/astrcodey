@@ -1,15 +1,16 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{
         HostWorkspaceApplyPatchRequest, HostWorkspacePatchChangeKind, analyze_unified_diff_paths,
     },
+    hostpaths::resolve_path,
     tool::{ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
-use super::absolute_path;
+use crate::invalid_input;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,13 +24,21 @@ pub(super) struct PatchHandler;
 impl ToolHandler for PatchHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: PatchArgs = context.arguments()?;
-        let paths = analyze_unified_diff_paths(&args.patch).map_err(invalid_patch)?;
+        let paths = analyze_unified_diff_paths(&args.patch).map_err(|error| {
+            invalid_input(
+                error.to_string(),
+                "provide a complete unified diff with ---/+++ file headers",
+            )
+        })?;
         let accesses = paths
             .into_iter()
             .flat_map(|paths| [paths.old_path, paths.new_path])
             .flatten()
             .map(|path| {
-                ResourceAccess::read_write_file(absolute_path(context.working_dir(), &path))
+                ResourceAccess::read_write_file(resolve_path(
+                    context.working_dir(),
+                    Path::new(&path),
+                ))
             });
         Ok(ToolPlan::new(accesses))
     }
@@ -90,13 +99,6 @@ impl ToolHandler for PatchHandler {
         }
         Ok(result.into())
     }
-}
-
-fn invalid_patch(error: impl std::fmt::Display) -> ExtensionError {
-    ExtensionError::invalid_input(
-        error.to_string(),
-        Some("provide a complete unified diff with ---/+++ file headers".to_string()),
-    )
 }
 
 const fn kind_name(kind: HostWorkspacePatchChangeKind) -> &'static str {

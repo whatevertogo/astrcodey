@@ -109,7 +109,7 @@ pub fn normalize_unified_diff_path(value: &str) -> Result<String, WorkspacePatch
         .to_owned())
 }
 
-fn is_patch_metadata(line: &str) -> bool {
+pub fn is_patch_metadata(line: &str) -> bool {
     [
         "diff ",
         "index ",

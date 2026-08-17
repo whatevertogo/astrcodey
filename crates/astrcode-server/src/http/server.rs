@@ -17,14 +17,14 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use super::{
     HttpState,
-    auth::{collect_allowed_origins, configured_auth_token},
+    auth::collect_allowed_origins,
     conversation_timeline::EventLogConversationTimeline,
     routes::{config, event_consumers, extensions, lifecycle, models, sessions},
     stream,
 };
 use crate::{bootstrap::ServerApp, server_event_bus::ServerEventBus};
 
-type RouterParts = (Router, String, Arc<ServerEventBus>);
+type RouterParts = (Router, Arc<ServerEventBus>);
 
 const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT_BYTES
     + astrcode_core::message_attachment::MAX_ATTACHMENTS
@@ -41,16 +41,12 @@ pub enum HttpServerError {
 }
 
 /// Build an axum router for the HTTP/SSE API.
-///
-/// Returns `(Router, auth_token)` — the token is retained for `run.json`/client
-/// compatibility but is no longer enforced by the server.
-pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
-    let (router, auth_token, _) = router_parts(server_app);
-    Ok((router, auth_token))
+pub fn router(server_app: Arc<ServerApp>) -> Result<Router, HttpServerError> {
+    let (router, _) = router_parts(server_app);
+    Ok(router)
 }
 
 fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
-    let auth_token = configured_auth_token();
     let event_bus = Arc::clone(server_app.event_bus());
     let conversation_timeline = Arc::new(EventLogConversationTimeline::new(Arc::clone(
         server_app.runtime().event_store(),
@@ -77,7 +73,7 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             header::CACHE_CONTROL,
         ]);
 
-    let protected_api = Router::new()
+    let management_api = Router::new()
         .route(
             "/api/sessions",
             post(sessions::create_session).get(sessions::list_sessions),
@@ -181,12 +177,12 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             astrcode_extension_sdk::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
         ));
     let app = Router::new()
-        .merge(protected_api)
+        .merge(management_api)
         .merge(public_extension_http)
         .layer(cors)
         .with_state(state);
 
-    (app, auth_token, event_bus)
+    (app, event_bus)
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.
@@ -194,13 +190,15 @@ pub async fn run_http_server(
     server_app: Arc<ServerApp>,
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            %addr,
+            "HTTP server has no authentication and is binding to a non-loopback address"
+        );
+    }
     server_app.initialize().await;
     let shutdown_token = server_app.runtime().shutdown_token().clone();
-    let (app, auth_token) = router(Arc::clone(&server_app))?;
-    tracing::info!(
-        "HTTP auth is disabled; legacy client token: {}",
-        masked_token(&auth_token)
-    );
+    let app = router(Arc::clone(&server_app))?;
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
         tracing::error!("failed to bind HTTP server at {addr}: {error}");
@@ -208,7 +206,7 @@ pub async fn run_http_server(
     })?;
     let local_addr = listener.local_addr()?;
     let local_port = local_addr.port();
-    write_run_info(local_port, &auth_token);
+    write_run_info(local_port);
     tracing::info!("HTTP server ready at http://{local_addr}");
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -217,29 +215,24 @@ pub async fn run_http_server(
         })
         .await;
     server_app.shutdown().await;
-    remove_run_info_if_current(local_port, &auth_token);
+    remove_run_info_if_current(local_port);
     result?;
     Ok(())
 }
 
 /// 将运行时端口写入 `~/.astrcode/run.json`，供前端 dev server 发现后端地址。
-///
-/// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
-fn write_run_info(port: u16, auth_token: &str) {
+fn write_run_info(port: u16) {
     let dir = astrcode_core::config::defaults::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
         return;
     }
     let path = dir.join("run.json");
-    write_run_info_at(&path, port, auth_token);
+    write_run_info_at(&path, port);
 }
 
-fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
-    let run_info = RunInfoDto {
-        port,
-        auth_token: auth_token.into(),
-    };
+fn write_run_info_at(path: &Path, port: u16) {
+    let run_info = RunInfoDto { port };
     let Ok(content) = serde_json::to_string(&run_info) else {
         tracing::error!("failed to serialize run.json");
         return;
@@ -274,32 +267,21 @@ fn replace_run_info(path: &Path, content: &[u8]) -> io::Result<()> {
 }
 
 /// 退出时清理 `run.json`。
-fn remove_run_info_if_current(port: u16, auth_token: &str) {
+fn remove_run_info_if_current(port: u16) {
     let path = astrcode_core::config::defaults::astrcode_dir().join("run.json");
-    remove_run_info_if_current_at(&path, port, auth_token);
+    remove_run_info_if_current_at(&path, port);
 }
 
-fn remove_run_info_if_current_at(path: &Path, port: u16, auth_token: &str) {
+fn remove_run_info_if_current_at(path: &Path, port: u16) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
     let Ok(run_info) = serde_json::from_str::<RunInfoDto>(&content) else {
         return;
     };
-    let matches_current = run_info.port == port && run_info.auth_token == auth_token;
-    if matches_current {
+    if run_info.port == port {
         let _ = std::fs::remove_file(path);
     }
-}
-
-fn masked_token(token: &str) -> String {
-    let chars: Vec<_> = token.chars().collect();
-    if chars.len() <= 8 {
-        return "<redacted>".into();
-    }
-    let prefix: String = chars.iter().take(4).collect();
-    let suffix: String = chars.iter().skip(chars.len().saturating_sub(4)).collect();
-    format!("{prefix}...{suffix}")
 }
 
 #[cfg(test)]
@@ -324,11 +306,10 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        write_run_info_at(&path, 2222, "new-token");
+        write_run_info_at(&path, 2222);
         let content = fs::read_to_string(&path).unwrap();
         let run_info: RunInfoDto = serde_json::from_str(&content).unwrap();
         assert_eq!(run_info.port, 2222);
-        assert_eq!(run_info.auth_token, "new-token");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
         #[cfg(unix)]
         {
@@ -352,10 +333,10 @@ mod tests {
                 .starts_with(RUN_INFO_TEMPFILE_PREFIX)
         }));
 
-        remove_run_info_if_current_at(&path, 1111, "old-token");
+        remove_run_info_if_current_at(&path, 1111);
         assert!(path.exists());
 
-        remove_run_info_if_current_at(&path, 2222, "new-token");
+        remove_run_info_if_current_at(&path, 2222);
         assert!(!path.exists());
     }
 }

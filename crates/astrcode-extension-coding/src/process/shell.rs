@@ -18,8 +18,9 @@ use astrcode_extension_sdk::{
 };
 use serde::Deserialize;
 
+use crate::invalid_input;
+
 const AUTO_BACKGROUND_AFTER_MS: u64 = 30_000;
-const MAX_TIMEOUT_SECS: u64 = 600;
 const MAX_FOREGROUND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -243,32 +244,51 @@ fn validate(args: &ShellArgs) -> Result<(), ExtensionError> {
     let shell_id = normalized_id(args.shell_id.as_deref());
     if shell_id.is_some() {
         if !args.command.trim().is_empty() {
-            return Err(invalid("cannot specify both shellId and command"));
+            return Err(invalid_input(
+                "cannot specify both shellId and command",
+                "provide either a command to start or a shellId to poll",
+            ));
         }
         if args.run_in_background {
-            return Err(invalid("cannot specify both shellId and runInBackground"));
+            return Err(invalid_input(
+                "cannot specify both shellId and runInBackground",
+                "provide either a command to start or a shellId to poll",
+            ));
         }
         if args.cwd.is_some() || args.timeout.is_some() || args.stdin.is_some() {
-            return Err(invalid(
+            return Err(invalid_input(
                 "cwd, timeout, and stdin apply only when starting a command",
+                "provide either a command to start or a shellId to poll",
             ));
         }
     } else if args.command.trim().is_empty() {
-        return Err(invalid("command cannot be empty"));
+        return Err(invalid_input(
+            "command cannot be empty",
+            "provide either a command to start or a shellId to poll",
+        ));
     } else if args.block_until_ms.is_some() {
-        return Err(invalid("blockUntilMs requires an existing shellId"));
+        return Err(invalid_input(
+            "blockUntilMs requires an existing shellId",
+            "provide either a command to start or a shellId to poll",
+        ));
     }
     if args
         .timeout
-        .is_some_and(|timeout| !(1..=MAX_TIMEOUT_SECS).contains(&timeout))
+        .is_some_and(|timeout| !(1..=crate::MAX_SHELL_TIMEOUT_SECS).contains(&timeout))
     {
-        return Err(invalid("timeout must be between 1 and 600 seconds"));
+        return Err(invalid_input(
+            "timeout must be between 1 and 600 seconds",
+            "provide either a command to start or a shellId to poll",
+        ));
     }
     if args
         .block_until_ms
         .is_some_and(|wait| wait > astrcode_extension_sdk::host::HOST_PROCESS_MAX_WAIT_MS)
     {
-        return Err(invalid("blockUntilMs must not exceed 600000"));
+        return Err(invalid_input(
+            "blockUntilMs must not exceed 600000",
+            "provide either a command to start or a shellId to poll",
+        ));
     }
     Ok(())
 }
@@ -281,11 +301,14 @@ fn prepare_shell_command(
     let has_pipeline = has_pipeline_operator(shell, &command);
     let pipefail = supports_pipefail(shell);
     if has_pipeline && !pipefail {
-        return Err(invalid(format!(
-            "strict pipeline status cannot be enforced by shell '{}'; run without a pipeline or \
-             select bash/zsh",
-            shell.name
-        )));
+        return Err(invalid_input(
+            format!(
+                "strict pipeline status cannot be enforced by shell '{}'; run without a pipeline \
+                 or select bash/zsh",
+                shell.name
+            ),
+            "provide either a command to start or a shellId to poll",
+        ));
     }
     let command = if pipefail {
         format!("set -o pipefail\n{command}")
@@ -554,13 +577,6 @@ fn background_result(
         ("droppedBytes".into(), serde_json::json!(dropped_bytes)),
         ("intent".into(), serde_json::json!(intent)),
     ]))
-}
-
-fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::invalid_input(
-        message,
-        Some("provide either a command to start or a shellId to poll".to_string()),
-    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

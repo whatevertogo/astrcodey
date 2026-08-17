@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use astrcode_extension_sdk::{
     WireErrorCode,
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{HOST_WORKSPACE_MAX_FILE_BYTES, HostWorkspaceReadOutput, HostWorkspaceReadRequest},
+    hostpaths::resolve_path,
     tool::{
         ReadToolInlinePayload, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin,
         ToolPlan, ToolResult,
@@ -11,7 +12,7 @@ use astrcode_extension_sdk::{
 };
 use serde::Deserialize;
 
-use super::absolute_path;
+use crate::invalid_input;
 
 const DEFAULT_MAX_CHARS: usize = 20_000;
 const MAX_RETURNED_CHARS: usize = 30_000;
@@ -37,9 +38,9 @@ impl ToolHandler for ReadHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: ReadArgs = context.arguments()?;
         validate(&args)?;
-        Ok(ToolPlan::new([ResourceAccess::read_file(absolute_path(
+        Ok(ToolPlan::new([ResourceAccess::read_file(resolve_path(
             context.working_dir(),
-            &args.path,
+            Path::new(&args.path),
         ))]))
     }
 
@@ -186,25 +187,27 @@ fn slice_chars(value: &str, offset: usize, max: usize) -> (String, usize, bool) 
 
 fn validate(args: &ReadArgs) -> Result<(), ExtensionError> {
     if args.path.trim().is_empty() {
-        return Err(invalid("path cannot be empty"));
+        return Err(invalid_input(
+            "path cannot be empty",
+            "follow the read tool parameter schema",
+        ));
     }
     if args
         .max_chars
         .is_some_and(|value| value == 0 || value > MAX_RETURNED_CHARS)
     {
-        return Err(invalid("maxChars must be between 1 and 30000"));
+        return Err(invalid_input(
+            "maxChars must be between 1 and 30000",
+            "follow the read tool parameter schema",
+        ));
     }
     if args.limit == Some(0) {
-        return Err(invalid("limit must be greater than zero"));
+        return Err(invalid_input(
+            "limit must be greater than zero",
+            "follow the read tool parameter schema",
+        ));
     }
     Ok(())
-}
-
-fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::invalid_input(
-        message,
-        Some("follow the read tool parameter schema".to_string()),
-    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

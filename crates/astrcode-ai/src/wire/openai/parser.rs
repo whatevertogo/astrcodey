@@ -182,7 +182,7 @@ impl StandardAccumulator {
 }
 
 impl StandardAccumulator {
-    pub(crate) fn ingest_chat_completion(
+    fn report_usage_once(
         &mut self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
@@ -193,6 +193,14 @@ impl StandardAccumulator {
             send_event(tx, LlmEvent::Usage { usage });
             self.cache_usage_reported = true;
         }
+    }
+
+    pub(crate) fn ingest_chat_completion(
+        &mut self,
+        event: &serde_json::Value,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+    ) {
+        self.report_usage_once(event, tx);
         if let Some(choices) = event["choices"].as_array() {
             for choice in choices {
                 if let Some(delta) = choice.get("delta") {
@@ -247,12 +255,7 @@ impl StandardAccumulator {
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) {
-        if !self.cache_usage_reported
-            && let Some(usage) = extract_token_usage(event)
-        {
-            send_event(tx, LlmEvent::Usage { usage });
-            self.cache_usage_reported = true;
-        }
+        self.report_usage_once(event, tx);
         let Some(event_type) = event["type"].as_str() else {
             return;
         };

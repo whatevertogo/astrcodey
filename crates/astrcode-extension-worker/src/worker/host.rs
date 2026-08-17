@@ -88,7 +88,7 @@ impl HostApi for V3PeerHostApi {
         self.peer
             .invoke(capability, input)
             .await
-            .map_err(v3_invoke_error_to_payload)
+            .map_err(ErrorPayload::from)
     }
 
     async fn open_stream(
@@ -100,26 +100,11 @@ impl HostApi for V3PeerHostApi {
             .peer
             .invoke_stream(capability, input)
             .await
-            .map_err(v3_invoke_error_to_payload)?;
+            .map_err(ErrorPayload::from)?;
         Ok(ModelStream::from_stream(
             stream,
             tokio_util::sync::CancellationToken::new(),
         ))
-    }
-}
-
-fn v3_invoke_error_to_payload(error: astrcode_extension_sdk::wire::InvokeError) -> ErrorPayload {
-    use astrcode_extension_sdk::wire::InvokeError;
-
-    match error {
-        InvokeError::Local(error) | InvokeError::Remote(error) => error,
-        InvokeError::DriverUnavailable => ErrorPayload::new(
-            WireErrorCode::HostNotReady,
-            "S5R 3.0 host peer driver is not running",
-        ),
-        InvokeError::PeerClosed => {
-            ErrorPayload::new(WireErrorCode::PeerClosed, "S5R 3.0 host peer closed")
-        },
     }
 }
 

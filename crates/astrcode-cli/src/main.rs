@@ -199,9 +199,6 @@ enum Commands {
         /// 服务器地址（若已有运行中的 server）
         #[arg(long)]
         server_addr: Option<String>,
-        /// Auth token
-        #[arg(long)]
-        auth_token: Option<String>,
         /// 在官方 SWE-bench x86_64 instance image 中逐例求解。
         #[arg(long)]
         swe_instance_solver_binary: Option<std::path::PathBuf>,
@@ -371,7 +368,6 @@ async fn main() -> ExitCode {
             keep_workdir,
             storage,
             server_addr,
-            auth_token,
             swe_instance_solver_binary,
             swe_instance_server_config,
             swe_instance_image_namespace,
@@ -433,7 +429,6 @@ async fn main() -> ExitCode {
                 keep_workdir,
                 storage_root: storage,
                 server_addr,
-                auth_token,
                 checkpoint_path: checkpoint_output,
                 resume_checkpoint,
                 swe_bench_instance,

@@ -17,6 +17,7 @@ import type {
   ConfigViewResponseDto,
   ConversationBlockStatusDto,
   ConversationCursorDto,
+  ConversationTimelineCursorDto,
   CreateSessionRequest,
   CreateSessionResponseDto,
   CurrentModelResponseDto,
@@ -207,7 +208,7 @@ export interface ConversationState {
 
 export interface ConversationItemsPage {
   items: ConversationBlock[]
-  olderCursor?: { value: string }
+  olderCursor?: ConversationTimelineCursorDto
   hasOlder: boolean
   snapshotCursor: ConversationCursor
 }

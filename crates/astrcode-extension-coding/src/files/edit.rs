@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{HostWorkspaceEditRequest, HostWorkspaceTextEdit},
+    hostpaths::resolve_path,
     tool::{ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
 };
 use serde::Deserialize;
 
-use super::{absolute_path, text_change_metadata};
+use super::text_change_metadata;
+use crate::invalid_input;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -60,7 +62,7 @@ impl ToolHandler for EditHandler {
         let args: EditArgs = context.arguments()?;
         validate(&args)?;
         Ok(ToolPlan::new([ResourceAccess::read_write_file(
-            absolute_path(context.working_dir(), &args.path),
+            resolve_path(context.working_dir(), Path::new(&args.path)),
         )]))
     }
 
@@ -93,26 +95,26 @@ impl ToolHandler for EditHandler {
 fn validate(args: &EditArgs) -> Result<(), ExtensionError> {
     let has_top_level = args.old_text.is_some() || args.new_text.is_some();
     if has_top_level && !args.edits.is_empty() {
-        return Err(invalid("use either oldText/newText or edits, not both"));
+        return Err(invalid_input(
+            "use either oldText/newText or edits, not both",
+            "provide one or more exact replacements copied from `read` output",
+        ));
     }
     if args.edits.is_empty() && (args.old_text.is_none() || args.new_text.is_none()) {
-        return Err(invalid(
+        return Err(invalid_input(
             "oldText and newText are required when edits is empty",
+            "provide one or more exact replacements copied from `read` output",
         ));
     }
     if args.old_text.as_deref() == Some("")
         || args.edits.iter().any(|edit| edit.old_text.is_empty())
     {
-        return Err(invalid("oldText cannot be empty"));
+        return Err(invalid_input(
+            "oldText cannot be empty",
+            "provide one or more exact replacements copied from `read` output",
+        ));
     }
     Ok(())
-}
-
-fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::invalid_input(
-        message,
-        Some("provide one or more exact replacements copied from `read` output".to_string()),
-    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

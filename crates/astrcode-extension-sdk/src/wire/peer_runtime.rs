@@ -1344,6 +1344,22 @@ pub enum InvokeError {
     PeerClosed,
 }
 
+impl From<InvokeError> for ErrorPayload {
+    fn from(error: InvokeError) -> Self {
+        match error {
+            InvokeError::Local(payload) | InvokeError::Remote(payload) => payload,
+            InvokeError::DriverUnavailable => ErrorPayload::new(
+                WireErrorCode::HostNotReady,
+                "S5R peer driver is not running",
+            ),
+            InvokeError::PeerClosed => ErrorPayload::new(
+                WireErrorCode::PeerClosed,
+                "S5R peer closed before the invoke completed",
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

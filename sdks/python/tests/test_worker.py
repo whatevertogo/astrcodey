@@ -6,7 +6,9 @@ import asyncio
 import unittest
 from dataclasses import dataclass
 
+from harness import FakeHostBase
 from memory import MemoryTransport
+from test_handshake import ALL_FEATURES
 from s5r import (
     HandlerResult,
     HostClient,
@@ -30,8 +32,6 @@ from s5r.protocol import (
     CONFORMANCE_UNKNOWN_ERROR,
     CONFORMANCE_UNARY,
     CONFORMANCE_WAIT_FOR_CANCEL,
-    decode_message,
-    encode_message,
 )
 from s5r.results import FileOperation, HostResource
 from s5r.worker import (
@@ -45,42 +45,9 @@ EXT_ID = "test-extension"
 SCOPE = {"session_id": "session-1", "working_dir": "/workspace"}
 
 
-class FakeHost:
-    def __init__(self, worker: Worker, host_operations: list[str] | None = None):
-        self.transport, worker_transport = MemoryTransport.pair()
-        self.worker_task = asyncio.create_task(worker.serve(worker_transport))
-        self.host_operations = [] if host_operations is None else host_operations
-
-    async def send(self, message: dict) -> None:
-        await self.transport.write_frame(encode_message(message))
-
-    async def recv(self):
-        return decode_message(
-            await asyncio.wait_for(self.transport.read_frame(), timeout=5)
-        )
-
-    async def handshake(self) -> None:
-        await self.send(
-            {
-                "type": "initialize",
-                "id": "init-1",
-                "protocol_version": "3.0",
-                "host": {"name": "test-host"},
-                "extension_id": EXT_ID,
-                "supported_features": [
-                    "nested_invoke_v1",
-                    "model_stream_v1",
-                    "custom_event_v1",
-                ],
-                "required_features": ["nested_invoke_v1"],
-                "host_operations": self.host_operations,
-            }
-        )
-        result = await self.recv()
-        assert result.is_success, result.error
-        await self.send({"type": "activate", "id": "act-1", "config": None})
-        result = await self.recv()
-        assert result.is_success, result.error
+class FakeHost(FakeHostBase):
+    supported_features = ALL_FEATURES
+    required_features = ["nested_invoke_v1"]
 
     async def invoke(self, request_id: str, operation: str, input, stream: bool = False):
         await self.send(
@@ -99,10 +66,6 @@ class FakeHost:
             CAP_HANDLER_INVOKE,
             {"handler_id": handler_id, "event": event},
         )
-
-    async def shutdown(self) -> None:
-        self.transport.close_write()
-        await asyncio.wait_for(self.worker_task, timeout=5)
 
 
 def tool_event(arguments, phase: str = "execute", **scope_extra) -> dict:

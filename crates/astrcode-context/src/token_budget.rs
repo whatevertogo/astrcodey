@@ -153,16 +153,6 @@ pub fn truncate_text_to_tokens(content: &str, max_tokens: usize, marker: &str) -
     truncated
 }
 
-/// 按字符数裁剪文本，并追加调用方指定的截断标记。
-pub fn truncate_chars(content: &str, max_chars: usize, marker: &str) -> String {
-    if content.chars().count() <= max_chars {
-        return content.to_string();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push_str(marker);
-    truncated
-}
-
 fn turn_token_totals<'a>(messages: impl IntoIterator<Item = &'a LlmMessage>) -> Vec<usize> {
     let mut turns = Vec::new();
     let mut current = 0usize;

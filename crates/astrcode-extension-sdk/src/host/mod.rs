@@ -16,7 +16,7 @@ pub use error::HostError;
 pub use llm_mapping::llm_chat_request;
 use serde_json::Value;
 pub use workspace_patch::{
-    WorkspacePatchPathError, WorkspacePatchPaths, analyze_unified_diff_paths,
+    WorkspacePatchPathError, WorkspacePatchPaths, analyze_unified_diff_paths, is_patch_metadata,
     normalize_unified_diff_path,
 };
 

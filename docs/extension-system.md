@@ -343,8 +343,8 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `input_delivery` | `astrcode.session.root.*` | 创建 extension-owned 顶层 session、向其提交输入并读取生命周期状态；用于 channel 等进程级入口，不授予任意 session 控制。 |
 | `session_control` | `astrcode.session.control.*` | 创建、提交、注入（`inject_or_start`）、FIFO 排队（`queue_or_start`）、仅活跃 turn 注入（`defer_context`，无活跃 turn 返回 `no_active_turn`）、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
 | `session_inspect` | `astrcode.session.inspect.*` | 宿主级全局读取权限：跨 session lineage 列出所有宿主可见会话，读取快照、完整投影或 provider 可见消息。只应授予需要全局观察或后台接续会话的扩展。 |
-| `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
-| `authenticated_http` | 管理路由注册 | 注册复用宿主 bearer token、按扩展 id 隔离的 JSON HTTP 路由。 |
+| `public_http` | 公开路由注册 | 注册 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
+| `authenticated_http` | 管理路由注册 | 注册按扩展 id 隔离的管理面 JSON HTTP 路由；名称为兼容保留，当前 HTTP 运输不校验 bearer token。 |
 | `public_http_dispatch` | `astrcode.extension.http.public` | 从插件内部调用另一插件的公开路由；同步自调用会被拒绝以避免 s5r 重入死锁。 |
 | `emit_custom_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
 | `consume_custom_events` | custom event subscription | 注册并消费符合 source filter 的扩展事件。 |
@@ -394,7 +394,8 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 
 ### 事件运维接口
 
-以下接口位于 bearer 认证后的 `/api` 管理面，不是扩展作者的 host capability：
+以下接口位于 `/api` 管理面，不是扩展作者的 host capability。当前 HTTP
+运输不提供身份认证，只应绑定到 loopback 或受信网络：
 
 - `GET /api/sessions/{id}/event-consumers` 返回 custom-event subscription 的 pause、
   checkpoint、pending 与失败计数。

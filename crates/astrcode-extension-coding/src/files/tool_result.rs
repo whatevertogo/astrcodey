@@ -10,6 +10,8 @@ use astrcode_extension_sdk::{
 };
 use serde::Deserialize;
 
+use crate::invalid_input;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadToolResultArgs {
@@ -69,24 +71,23 @@ impl ToolHandler for ReadToolResultHandler {
 
 fn validate(args: &ReadToolResultArgs) -> Result<(), ExtensionError> {
     if args.artifact_id.trim().is_empty() {
-        return Err(invalid("artifactId cannot be empty"));
+        return Err(invalid_input(
+            "artifactId cannot be empty",
+            "follow the read_tool_result parameter schema",
+        ));
     }
     if args.max_bytes.is_some_and(|value| {
         !(HOST_TOOL_RESULT_MIN_BYTES..=HOST_TOOL_RESULT_MAX_BYTES).contains(&value)
     }) {
-        return Err(invalid(format!(
-            "maxBytes must be between {HOST_TOOL_RESULT_MIN_BYTES} and \
-             {HOST_TOOL_RESULT_MAX_BYTES}"
-        )));
+        return Err(invalid_input(
+            format!(
+                "maxBytes must be between {HOST_TOOL_RESULT_MIN_BYTES} and \
+                 {HOST_TOOL_RESULT_MAX_BYTES}"
+            ),
+            "follow the read_tool_result parameter schema",
+        ));
     }
     Ok(())
-}
-
-fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::invalid_input(
-        message,
-        Some("follow the read_tool_result parameter schema".to_string()),
-    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

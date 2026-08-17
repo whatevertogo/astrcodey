@@ -245,7 +245,8 @@ Unix 由 process group、Windows 由 Job Object 管理进程树，不提供 PTY 
 sandbox；后者允许访问宿主网络可达的 HTTP(S) 地址。这些能力均有并发、总超时和 I/O 大小限制，
 并响应会话取消。
 
-S5R 同时支持 `public_http` 和复用宿主 bearer token 的 `authenticated_http`；两者都不能
+S5R 同时支持 `public_http` 和按扩展 id 隔离的 `authenticated_http`（兼容保留名称，当前
+HTTP 运输不校验 bearer token）；两者都不能
 注册在 `/api` 下。s5r 工具默认串行；显式声明 `ExecutionMode::Parallel` 时，宿主会在同一
 worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。
 S5R 3.0 初始化会协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`；宿主只把

@@ -1,23 +1,6 @@
-//! HTTP 鉴权中间件、Bearer token 加载与 CORS 来源收集。
-//!
-//! 鉴权已停用（服务器不再校验 Authorization 头）；token 仍生成并写入
-//! `run.json` 以兼容现有客户端，`ASTRCODE_HTTP_TOKEN` 环境变量保留。
+//! CORS 来源收集。HTTP 鉴权已停用，token 管道已移除。
 
 use axum::http::HeaderValue;
-use uuid::Uuid;
-
-const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
-
-fn generate_auth_token() -> String {
-    Uuid::new_v4().simple().to_string()
-}
-
-pub(super) fn configured_auth_token() -> String {
-    std::env::var(ASTRCODE_HTTP_TOKEN_ENV)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(generate_auth_token)
-}
 
 pub(super) fn collect_allowed_origins() -> Vec<HeaderValue> {
     let mut origins = vec![

@@ -68,9 +68,7 @@ use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-fn router(
-    runtime: Arc<ServerRuntime>,
-) -> Result<(Router, String), astrcode_server::http::HttpServerError> {
+fn router(runtime: Arc<ServerRuntime>) -> Result<Router, astrcode_server::http::HttpServerError> {
     app_router(ServerApp::new(runtime))
 }
 
@@ -251,7 +249,7 @@ impl LlmProvider for SummaryLlm {
 #[tokio::test]
 async fn http_routes_do_not_require_auth_token() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, _token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     let no_auth = app
         .clone()
@@ -270,7 +268,7 @@ async fn http_routes_do_not_require_auth_token() {
 #[tokio::test]
 async fn cors_allows_supported_tauri_origins_only() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, _token) = router(runtime).unwrap();
+    let app = router(runtime).unwrap();
 
     for origin in [
         "tauri://localhost",
@@ -331,12 +329,11 @@ async fn cors_allows_supported_tauri_origins_only() {
 #[tokio::test]
 async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let created = post_json_owned(
         app.clone(),
         "/api/sessions",
         r#"{"workingDir":".","toolSelection":{"mode":"all","except":[" shell ","shell"]}}"#.into(),
-        &token,
     )
     .await;
     assert_eq!(created.status(), StatusCode::OK);
@@ -364,7 +361,6 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
                 .method(Method::PUT)
                 .uri(&uri)
                 .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
                     r#"{"selection":{"mode":"only","names":["write"," read ","write"]}}"#,
                 ))
@@ -407,7 +403,6 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
                 .method(Method::PUT)
                 .uri(uri)
                 .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(r#"{"selection":{"mode":"all","except":[" "]}}"#))
                 .unwrap(),
         )
@@ -420,7 +415,7 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
 async fn extension_http_routes_allow_only_declared_public_routes() {
     let runtime =
         runtime_with_extensions(Arc::new(ImmediateLlm), vec![Arc::new(HttpRoutesExtension)]).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
         .clone()
@@ -457,7 +452,6 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
             Request::builder()
                 .method(Method::POST)
                 .uri(protected_path)
-                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"source":"authenticated"}"#))
                 .unwrap(),
@@ -508,10 +502,9 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
 #[tokio::test]
 async fn provider_catalog_route_returns_endpoint_presets() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
-    let catalog =
-        get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog", &token).await;
+    let catalog = get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog").await;
 
     let qwen = catalog
         .providers
@@ -557,7 +550,7 @@ async fn provider_catalog_route_returns_endpoint_presets() {
 #[tokio::test]
 async fn provider_preset_apply_persists_profile_from_catalog() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "qwen",
         "endpointId": "dashscope-compatible",
@@ -566,13 +559,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
     })
     .to_string();
 
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let applied: ApplyProviderPresetResponseDto =
@@ -602,7 +589,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
 #[tokio::test]
 async fn concurrent_config_updates_preserve_both_profiles() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let first = post_json_owned(
         app.clone(),
         "/api/config/provider-preset/apply",
@@ -613,7 +600,6 @@ async fn concurrent_config_updates_preserve_both_profiles() {
             "activate": false
         })
         .to_string(),
-        &token,
     );
     let second = post_json_owned(
         app,
@@ -626,7 +612,6 @@ async fn concurrent_config_updates_preserve_both_profiles() {
             "activate": false
         })
         .to_string(),
-        &token,
     );
 
     let (first, second) = tokio::join!(first, second);
@@ -648,7 +633,7 @@ async fn concurrent_config_updates_preserve_both_profiles() {
 #[tokio::test]
 async fn provider_preset_apply_uses_submitted_api_key() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "openai-compatible",
         "baseUrl": "https://api.example.test/v1",
@@ -658,13 +643,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
     })
     .to_string();
 
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let applied: ApplyProviderPresetResponseDto =
@@ -691,13 +670,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
         "activate": true
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let config = runtime.config_manager().raw_config_snapshot();
@@ -713,7 +686,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
         "profileName": "openai-compatible"
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/provider-preset/remove", body, &token).await;
+    let response = post_json_owned(app, "/api/config/provider-preset/remove", body).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let config = runtime.config_manager().raw_config_snapshot();
@@ -730,7 +703,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 #[tokio::test]
 async fn model_options_rejects_unknown_profile() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "profileName": "nonexistent",
         "modelId": "test",
@@ -738,7 +711,7 @@ async fn model_options_rejects_unknown_profile() {
     })
     .to_string();
 
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -749,7 +722,7 @@ async fn model_options_rejects_unknown_profile() {
 #[tokio::test]
 async fn model_options_rejects_unknown_model() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // First create a profile via provider preset
     let body = serde_json::json!({
@@ -759,13 +732,7 @@ async fn model_options_rejects_unknown_model() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Now try updating a non-existent model
@@ -775,7 +742,7 @@ async fn model_options_rejects_unknown_model() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -786,7 +753,7 @@ async fn model_options_rejects_unknown_model() {
 #[tokio::test]
 async fn model_options_rejects_thinking_without_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // openai-compatible has no built-in thinking capability
     let body = serde_json::json!({
@@ -796,13 +763,7 @@ async fn model_options_rejects_thinking_without_capability() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Try enabling thinking (should fail since no capability exists)
@@ -812,7 +773,7 @@ async fn model_options_rejects_thinking_without_capability() {
         "thinking": { "enabled": true, "effort": "high" }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
@@ -823,7 +784,7 @@ async fn model_options_rejects_thinking_without_capability() {
 #[tokio::test]
 async fn model_options_persists_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
     let body = serde_json::json!({
@@ -833,13 +794,7 @@ async fn model_options_persists_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -850,7 +805,7 @@ async fn model_options_persists_thinking() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let resp: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
     assert_eq!(resp["success"], true);
@@ -877,7 +832,7 @@ async fn model_options_persists_thinking() {
 #[tokio::test]
 async fn model_options_can_disable_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // Use deepseek which has a built-in thinking capability
     let body = serde_json::json!({
@@ -887,13 +842,7 @@ async fn model_options_can_disable_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -904,7 +853,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Now disable by sending enabled:false
@@ -914,7 +863,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": false }
     })
     .to_string();
-    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify disabled
@@ -945,13 +894,7 @@ async fn model_options_can_disable_thinking() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = serde_json::json!({
@@ -960,7 +903,7 @@ async fn model_options_can_disable_thinking() {
         "thinking": { "enabled": false }
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = body_bytes(response).await;
     let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -970,7 +913,7 @@ async fn model_options_can_disable_thinking() {
 #[tokio::test]
 async fn model_options_null_thinking_restores_model_default() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     let body = serde_json::json!({
         "providerId": "deepseek",
@@ -979,13 +922,7 @@ async fn model_options_null_thinking_restores_model_default() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -996,7 +933,7 @@ async fn model_options_null_thinking_restores_model_default() {
         "thinking": null
     })
     .to_string();
-    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    let response = post_json_owned(app, "/api/config/model-options", body).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let config = runtime.config_manager().raw_config_snapshot();
@@ -1015,7 +952,7 @@ async fn model_options_null_thinking_restores_model_default() {
 #[tokio::test]
 async fn get_config_exposes_thinking_and_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat mapping)
     let body = serde_json::json!({
@@ -1025,13 +962,7 @@ async fn get_config_exposes_thinking_and_capability() {
         "activate": false
     })
     .to_string();
-    let response = post_json_owned(
-        app.clone(),
-        "/api/config/provider-preset/apply",
-        body,
-        &token,
-    )
-    .await;
+    let response = post_json_owned(app.clone(), "/api/config/provider-preset/apply", body).await;
     assert_eq!(response.status(), StatusCode::OK);
     let deepseek_default_model = "deepseek-v4-flash";
 
@@ -1042,10 +973,10 @@ async fn get_config_exposes_thinking_and_capability() {
         "thinking": { "enabled": true }
     })
     .to_string();
-    let _ = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    let _ = post_json_owned(app.clone(), "/api/config/model-options", body).await;
 
     // GET /api/config should show thinking and capability
-    let config_resp = get_json::<serde_json::Value>(app, "/api/config", &token).await;
+    let config_resp = get_json::<serde_json::Value>(app, "/api/config").await;
     let profiles = config_resp["profiles"].as_array().unwrap();
     let test_profile = profiles
         .iter()
@@ -1074,12 +1005,12 @@ async fn get_config_exposes_thinking_and_capability() {
 #[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
 
-    let first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#, &token);
-    let second = post_json(app, &prompt_uri, r#"{"text":"second"}"#, &token);
+    let first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#);
+    let second = post_json(app, &prompt_uri, r#"{"text":"second"}"#);
 
     let (first, second) = tokio::join!(first, second);
     let statuses = [first.status(), second.status()];
@@ -1119,8 +1050,8 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 #[tokio::test]
 async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let attachment_session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let attachment_session_id = create_session(app.clone()).await;
     let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
     let valid_attachment_body = serde_json::json!({
         "text": "",
@@ -1132,23 +1063,18 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     })
     .to_string();
 
-    let accepted = post_json_owned(
-        app.clone(),
-        &attachment_prompt_uri,
-        valid_attachment_body,
-        &token,
-    )
-    .await;
+    let accepted =
+        post_json_owned(app.clone(), &attachment_prompt_uri, valid_attachment_body).await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
-    let oversized_session_id = create_session(app.clone(), &token).await;
+    let oversized_session_id = create_session(app.clone()).await;
     let oversized_prompt_uri = format!("/api/sessions/{oversized_session_id}/prompt");
     let body = serde_json::json!({
         "text": "x".repeat(MAX_PROMPT_TEXT_BYTES + 1)
     })
     .to_string();
 
-    let response = post_json_owned(app, &oversized_prompt_uri, body, &token).await;
+    let response = post_json_owned(app, &oversized_prompt_uri, body).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
@@ -1156,14 +1082,14 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
 #[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
     let inject_uri = format!("/api/sessions/{session_id}/inject");
-    let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#, &token).await;
+    let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#).await;
 
-    let inject = post_json(app, &inject_uri, r#"{"text":"steer me"}"#, &token).await;
+    let inject = post_json(app, &inject_uri, r#"{"text":"steer me"}"#).await;
     assert_eq!(inject.status(), StatusCode::OK);
     let body: PromptSubmitResponse = serde_json::from_slice(&body_bytes(inject).await).unwrap();
     assert!(matches!(
@@ -1176,24 +1102,23 @@ async fn inject_route_writes_mid_turn_user_message() {
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let inject_uri = format!("/api/sessions/{session_id}/inject");
 
-    let response = post_json(app, &inject_uri, r#"{"text":"too early"}"#, &token).await;
+    let response = post_json(app, &inject_uri, r#"{"text":"too early"}"#).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
@@ -1205,7 +1130,6 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1228,7 +1152,6 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         app,
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"hello"}"#,
-        &token,
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1239,11 +1162,10 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     assert!(body.contains("hello from http"));
     assert!(body.contains(r#""status":"complete""#));
 
-    let (after_app, after_token) = router(runtime).unwrap();
+    let after_app = router(runtime).unwrap();
     let after = get_json::<ConversationSnapshotResponseDto>(
         after_app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &after_token,
     )
     .await;
     assert_eq!(after.blocks.len(), 2);
@@ -1252,8 +1174,8 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 #[tokio::test]
 async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapshot_contract() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let session_id_value = SessionId::new(&session_id);
 
     for index in 1..=3 {
@@ -1300,7 +1222,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
     let state = get_json::<ConversationStateResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation/state"),
-        &token,
     )
     .await;
     assert_eq!(state.cursor.value, "12");
@@ -1309,7 +1230,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
     let latest = get_json::<ConversationItemsPageResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation/items?limit=2"),
-        &token,
     )
     .await;
     assert_eq!(visible_texts(&latest.items), ["user-3", "assistant-3"]);
@@ -1319,7 +1239,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
     let older = get_json::<ConversationItemsPageResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation/items?limit=2&before={older_cursor}"),
-        &token,
     )
     .await;
     assert_eq!(visible_texts(&older.items), ["user-2", "assistant-2"]);
@@ -1329,7 +1248,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
         app.clone(),
         &format!("/api/sessions/{session_id}/fork"),
         "{}".into(),
-        &token,
     )
     .await;
     let forked_id = serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(forked).await)
@@ -1338,7 +1256,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
     let forked_latest = get_json::<ConversationItemsPageResponseDto>(
         app.clone(),
         &format!("/api/sessions/{forked_id}/conversation/items?limit=2"),
-        &token,
     )
     .await;
     assert_eq!(
@@ -1352,7 +1269,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
             "/api/sessions/{forked_id}/conversation/items?limit=2&before={}",
             forked_latest.older_cursor.unwrap().value
         ),
-        &token,
     )
     .await;
     assert_eq!(
@@ -1363,7 +1279,6 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
     let legacy = get_json::<ConversationSnapshotResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(legacy.blocks.len(), 6);
@@ -1383,15 +1298,14 @@ fn visible_texts(blocks: &[ConversationBlockDto]) -> Vec<&str> {
 #[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let stream_response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1403,7 +1317,6 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
         app,
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"hello"}"#,
-        &token,
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1416,8 +1329,8 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1440,7 +1353,6 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1448,7 +1360,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .await
         .unwrap();
 
-    let reload = post_json(app, "/api/extensions/reload", "{}", &token).await;
+    let reload = post_json(app, "/api/extensions/reload", "{}").await;
     assert_eq!(reload.status(), StatusCode::OK);
 
     let body = read_sse_until(response.into_body(), "extensionRegistryChanged").await;
@@ -1459,8 +1371,8 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 #[tokio::test]
 async fn stream_preserves_ask_user_events_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1483,7 +1395,6 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1519,14 +1430,13 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
 #[tokio::test]
 async fn stream_suppresses_current_session_ask_user_global_copy() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1576,8 +1486,8 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
         vec![Arc::new(EventConsumerHttpExtension)],
     )
     .await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     runtime
         .event_store()
         .append_event(DurableEvent::session(
@@ -1632,7 +1542,6 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/event-consumers"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1654,7 +1563,6 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
     let control = |action: &str| {
         Request::builder()
             .method(Method::POST)
-            .header("authorization", format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
             .uri(format!(
                 "/api/sessions/{session_id}/event-consumers/control"
@@ -1691,8 +1599,8 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
 #[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1713,7 +1621,6 @@ async fn stream_replays_events_after_snapshot_cursor() {
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.blocks.len(), 1);
@@ -1750,7 +1657,6 @@ async fn stream_replays_events_after_snapshot_cursor() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!(
                     "/api/sessions/{session_id}/stream?cursor={}",
                     snapshot.cursor.value
@@ -1770,8 +1676,8 @@ async fn stream_replays_events_after_snapshot_cursor() {
 #[tokio::test]
 async fn snapshot_and_replay_preserve_durable_errors() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
@@ -1791,7 +1697,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
     let before = get_json::<ConversationSnapshotResponseDto>(
         app.clone(),
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
 
@@ -1839,7 +1744,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!(
                     "/api/sessions/{session_id}/stream?cursor={}",
                     before.cursor.value
@@ -1859,7 +1763,6 @@ async fn snapshot_and_replay_preserve_durable_errors() {
     let latest = get_json::<ConversationSnapshotResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert!(
@@ -1880,8 +1783,8 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 #[tokio::test]
 async fn stream_invalid_cursors_request_rehydrate_and_close() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     for cursor in ["invalid", "999999"] {
         let response = app
@@ -1889,7 +1792,6 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .header("authorization", format!("Bearer {token}"))
                     .uri(format!("/api/sessions/{session_id}/stream?cursor={cursor}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1912,8 +1814,8 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
 #[tokio::test]
 async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     for _ in 0..=1_000 {
@@ -1932,7 +1834,6 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1954,16 +1855,15 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
 #[tokio::test]
 async fn stream_ignores_events_from_other_sessions() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_a = create_session(app.clone(), &token).await;
-    let session_b = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_a = create_session(app.clone()).await;
+    let session_b = create_session(app.clone()).await;
 
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_a}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1975,7 +1875,6 @@ async fn stream_ignores_events_from_other_sessions() {
         app.clone(),
         &format!("/api/sessions/{session_b}/prompt"),
         r#"{"text":"from session b"}"#,
-        &token,
     )
     .await;
     assert_eq!(session_b_prompt.status(), StatusCode::OK);
@@ -1984,7 +1883,6 @@ async fn stream_ignores_events_from_other_sessions() {
         app,
         &format!("/api/sessions/{session_a}/prompt"),
         r#"{"text":"from session a"}"#,
-        &token,
     )
     .await;
     assert_eq!(session_a_prompt.status(), StatusCode::OK);
@@ -1997,8 +1895,8 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
     let child_id = child_sid.to_string();
@@ -2023,7 +1921,6 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
                 .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2062,13 +1959,12 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let body = get_json::<SlashCommandListResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/commands"),
-        &token,
     )
     .await;
 
@@ -2100,14 +1996,13 @@ async fn command_list_route_exposes_backend_slash_commands() {
 #[tokio::test]
 async fn invoke_command_route_toggles_mode() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let http_response = post_json(
         app,
         &format!("/api/sessions/{session_id}/commands/mode"),
         r#"{"arguments":""}"#,
-        &token,
     )
     .await;
     assert_eq!(http_response.status(), StatusCode::OK);
@@ -2125,14 +2020,13 @@ async fn invoke_command_route_toggles_mode() {
 #[tokio::test]
 async fn command_completion_route_returns_empty_for_commands_without_completion() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
 
     let http_response = post_json(
         app,
         &format!("/api/sessions/{session_id}/commands/mode/complete"),
         r#"{"argument":"","cursor":0}"#,
-        &token,
     )
     .await;
     assert_eq!(http_response.status(), StatusCode::OK);
@@ -2146,8 +2040,8 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 #[tokio::test]
 async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
 
     for text in ["one", "two", "three"] {
@@ -2184,7 +2078,6 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
         app.clone(),
         &format!("/api/sessions/{session_id}/prompt"),
         r#"{"text":"/compact"}"#,
-        &token,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -2212,8 +2105,8 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     // bundled set(含 astrcode-coding)已由 runtime helper 经 source generation 加载。
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
     let read_fixture = "target/post-compact-read-fixture.txt";
     fs::create_dir_all("target").unwrap();
@@ -2289,7 +2182,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         app.clone(),
         &format!("/api/sessions/{session_id}/compact"),
         r#"{}"#,
-        &token,
     )
     .await;
     let status = response.status();
@@ -2323,7 +2215,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app,
         &format!("/api/sessions/{session_id}/conversation"),
-        &token,
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
@@ -2331,26 +2222,20 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     let _ = fs::remove_file(read_fixture);
 }
 
-async fn create_session(app: Router, token: &str) -> String {
-    let response = post_json(app, "/api/sessions", r#"{"workingDir":"."}"#, token).await;
+async fn create_session(app: Router) -> String {
+    let response = post_json(app, "/api/sessions", r#"{"workingDir":"."}"#).await;
     assert_eq!(response.status(), StatusCode::OK);
     serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(response).await)
         .unwrap()
         .session_id
 }
 
-async fn post_json(
-    app: Router,
-    uri: &str,
-    body: &'static str,
-    token: &str,
-) -> axum::response::Response {
+async fn post_json(app: Router, uri: &str, body: &'static str) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method(Method::POST)
             .uri(uri)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
             .body(Body::from(body))
             .unwrap(),
     )
@@ -2358,18 +2243,12 @@ async fn post_json(
     .unwrap()
 }
 
-async fn post_json_owned(
-    app: Router,
-    uri: &str,
-    body: String,
-    token: &str,
-) -> axum::response::Response {
+async fn post_json_owned(app: Router, uri: &str, body: String) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method(Method::POST)
             .uri(uri)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
             .body(Body::from(body))
             .unwrap(),
     )
@@ -2377,13 +2256,12 @@ async fn post_json_owned(
     .unwrap()
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(app: Router, uri: &str, token: &str) -> T {
+async fn get_json<T: serde::de::DeserializeOwned>(app: Router, uri: &str) -> T {
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .uri(uri)
-                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -42,10 +42,10 @@ impl ServerRuntimeTestExt for ServerRuntime {
 
 pub fn router_with_event_bus(
     server_app: Arc<crate::bootstrap::ServerApp>,
-) -> Result<(Router, String, Arc<ServerEventBus>), HttpServerError> {
+) -> Result<(Router, Arc<ServerEventBus>), HttpServerError> {
     let event_bus = Arc::clone(server_app.event_bus());
-    let (router, auth_token) = crate::http::router(server_app)?;
-    Ok((router, auth_token, event_bus))
+    let router = crate::http::router(server_app)?;
+    Ok((router, event_bus))
 }
 
 /// Mirrors the production bootstrap host-router wiring so integration tests load
