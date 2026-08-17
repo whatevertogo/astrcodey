@@ -13,6 +13,8 @@ from s5r import (
     HandlerResult,
     HostClient,
     HostOperation,
+    ExtensionHttpRoute,
+    ProtocolError,
     ResourceAccess,
     SlashCommand,
     S5rError,
@@ -484,6 +486,399 @@ class ConformanceOpsTest(unittest.IsolatedAsyncioTestCase):
         await host.invoke("r-7", CAP_RUNTIME_PING, None)
         self.assertEqual((await host.recv()).id, "r-7")
         await host.shutdown()
+
+
+class DisposeRootTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dispose_root_ack_round_trip(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        @worker.tool(ToolDefinition(name="cleanup", description="", parameters={}))
+        async def cleanup(arguments, ctx):
+            await HostClient.session_control().dispose_root("root-1")
+            return tool_text("disposed")
+
+        host = FakeHost(worker, host_operations=[HostOperation.SESSION_ROOT_DISPOSE])
+        await host.handshake()
+        await host.invoke_handler("r-1", f"{EXT_ID}:tool:cleanup", tool_event({}))
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_DISPOSE)
+        self.assertEqual(nested.parent_invoke_id, "r-1")
+        self.assertEqual(nested.input, {"target_session_id": "root-1"})
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"ok": True},
+            }
+        )
+        result = await host.recv()
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.output["data"]["content"], "disposed")
+        await host.shutdown()
+
+    async def test_dispose_root_rejects_bad_ack(self) -> None:
+        for output in ({"ok": False}, {"ok": True, "unexpected": 1}, {}):
+            with self.subTest(output=output):
+                worker = Worker(EXT_ID, "0.1.0")
+
+                @worker.tool(
+                    ToolDefinition(name="cleanup", description="", parameters={})
+                )
+                async def cleanup(arguments, ctx):
+                    await HostClient.session_control().dispose_root("root-1")
+                    return tool_text("unreachable")
+
+                host = FakeHost(
+                    worker, host_operations=[HostOperation.SESSION_ROOT_DISPOSE]
+                )
+                await host.handshake()
+                await host.invoke_handler(
+                    "r-1", f"{EXT_ID}:tool:cleanup", tool_event({})
+                )
+                nested = await host.recv()
+                await host.send(
+                    {
+                        "type": "result",
+                        "status": "success",
+                        "id": nested.id,
+                        "kind": "invoke",
+                        "output": output,
+                    }
+                )
+                result = await host.recv()
+                self.assertFalse(result.is_success)
+                self.assertEqual(result.error.code, WireErrorCode.INVALID_RESPONSE)
+                await host.shutdown()
+
+
+class HttpRouteTest(unittest.IsolatedAsyncioTestCase):
+    def test_route_validation(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def noop(request, ctx):
+            return {"status": 200, "body": None}
+
+        for route in (
+            ExtensionHttpRoute.public("FETCH", "/health"),
+            ExtensionHttpRoute(method="GET", path="/health", access="anonymous"),
+            ExtensionHttpRoute.public("GET", "/files/../secret"),
+            ExtensionHttpRoute.public("GET", "/trailing/"),
+            ExtensionHttpRoute.public("GET", "/double//slash"),
+            ExtensionHttpRoute.public("GET", "/{id}/{id}"),
+            ExtensionHttpRoute.public("GET", "/bad-{param}"),
+            ExtensionHttpRoute(method="POST", path="/body", max_body_bytes=0),
+            ExtensionHttpRoute(method="POST", path="/body", max_body_bytes=1024 * 1024 + 1),
+        ):
+            with self.subTest(route=route):
+                with self.assertRaises(S5rError) as raised:
+                    worker.http_route(route, noop)
+                self.assertEqual(raised.exception.code, WireErrorCode.INVALID_HTTP_ROUTE)
+
+    def test_conflicting_route_registration(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def noop(request, ctx):
+            return {"status": 200, "body": None}
+
+        worker.http_route(ExtensionHttpRoute.public("GET", "/future-tasks/{id}"), noop)
+        with self.assertRaises(S5rError) as raised:
+            worker.http_route(ExtensionHttpRoute.public("GET", "/future-tasks/{jobId}"), noop)
+        self.assertEqual(raised.exception.code, WireErrorCode.DUPLICATE_REGISTRATION)
+        # Different access or method does not conflict.
+        worker.http_route(ExtensionHttpRoute.authenticated("GET", "/future-tasks/{jobId}"), noop)
+        worker.http_route(ExtensionHttpRoute.public("POST", "/future-tasks/{jobId}"), noop)
+        # Same shape but non-overlapping patterns coexist.
+        worker.http_route(ExtensionHttpRoute.public("GET", "/notes/{id}"), noop)
+        self.assertEqual(len(worker._http_route_manifest), 4)
+
+    async def test_manifest_and_dispatch_round_trip(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        @worker.http_route(ExtensionHttpRoute.public("GET", "/health"))
+        async def health(request, ctx):
+            self.assertEqual(ctx.extension_id, EXT_ID)
+            self.assertEqual(
+                request,
+                {
+                    "method": "GET",
+                    "path": "/health",
+                    "path_params": {},
+                    "query": "verbose=1",
+                    "body": None,
+                },
+            )
+            return {"status": 200, "body": {"ok": True}}
+
+        host = FakeHost(worker)
+        init = await host.initialize()
+        self.assertEqual(
+            init.output["manifest"]["http_routes"],
+            [
+                {
+                    "route": {
+                        "method": "GET",
+                        "path": "/health",
+                        "access": "public",
+                        "description": "",
+                        "max_body_bytes": 64 * 1024,
+                    },
+                    "handler_id": f"{EXT_ID}:http:route_0",
+                }
+            ],
+        )
+        await host.activate()
+        await host.invoke_handler(
+            "r-1",
+            f"{EXT_ID}:http:route_0",
+            {"method": "GET", "path": "/health", "query": "verbose=1"},
+        )
+        result = await host.recv()
+        self.assertTrue(result.is_success)
+        self.assertEqual(
+            result.output,
+            {"effect": "http_response", "data": {"status": 200, "body": {"ok": True}}},
+        )
+        await host.shutdown()
+
+    async def test_unknown_route_and_invalid_payload(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def health(request, ctx):
+            return {"status": 200, "body": None}
+
+        worker.http_route(ExtensionHttpRoute.public("GET", "/health"), health)
+        host = FakeHost(worker)
+        await host.handshake()
+        await host.invoke_handler("r-1", f"{EXT_ID}:http:route_9", {})
+        result = await host.recv()
+        self.assertEqual(result.error.code, WireErrorCode.UNKNOWN_HANDLER)
+        for event in (
+            "not-an-object",
+            {"method": "FETCH", "path": "/health"},
+            {"method": "GET", "path": "/health", "headers": {}},
+            {"method": "GET", "path": "/health", "path_params": {"id": 42}},
+        ):
+            await host.invoke_handler("r-2", f"{EXT_ID}:http:route_0", event)
+            result = await host.recv()
+            self.assertEqual(result.error.code, WireErrorCode.INVALID_INPUT)
+        await host.shutdown()
+
+    async def test_invalid_response_fails(self) -> None:
+        for response in ({"status": 99, "body": None}, {"status": 200}, "oops"):
+            with self.subTest(response=response):
+                worker = Worker(EXT_ID, "0.1.0")
+
+                async def broken(request, ctx):
+                    return response
+
+                worker.http_route(ExtensionHttpRoute.public("GET", "/health"), broken)
+                host = FakeHost(worker)
+                await host.handshake()
+                await host.invoke_handler(
+                    "r-1",
+                    f"{EXT_ID}:http:route_0",
+                    {"method": "GET", "path": "/health"},
+                )
+                result = await host.recv()
+                self.assertFalse(result.is_success)
+                self.assertEqual(
+                    result.error.code, WireErrorCode.SERIALIZATION_FAILED
+                )
+                await host.shutdown()
+
+
+class ShutdownHookTest(unittest.IsolatedAsyncioTestCase):
+    async def test_hook_runs_on_clean_eof_without_host_access(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        observed = []
+
+        async def cleanup():
+            with self.assertRaises(S5rError) as raised:
+                HostClient.host_supports(HostOperation.SESSION_STATE_READ)
+            observed.append(raised.exception.code)
+
+        worker.on_shutdown(cleanup)
+        host = FakeHost(worker)
+        await host.handshake()
+        await host.shutdown()
+        self.assertEqual(observed, [WireErrorCode.CONTEXT_UNAVAILABLE])
+
+    async def test_hook_error_surfaces_after_clean_driver_exit(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def cleanup():
+            raise S5rError.of(WireErrorCode.STORAGE_IO_ERROR, "flush failed")
+
+        worker.on_shutdown(cleanup)
+        host = FakeHost(worker)
+        await host.handshake()
+        host.transport.close_write()
+        with self.assertRaises(S5rError) as raised:
+            await host.worker_task
+        self.assertEqual(raised.exception.code, WireErrorCode.STORAGE_IO_ERROR)
+
+    async def test_plain_hook_error_is_wrapped(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def cleanup():
+            raise RuntimeError("boom")
+
+        worker.on_shutdown(cleanup)
+        host = FakeHost(worker)
+        await host.handshake()
+        host.transport.close_write()
+        with self.assertRaises(S5rError) as raised:
+            await host.worker_task
+        self.assertEqual(raised.exception.code, WireErrorCode.INTERNAL_ERROR)
+        self.assertIn("boom", raised.exception.payload.message)
+
+    async def test_hook_runs_but_driver_error_stays_authoritative(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        observed = []
+
+        async def cleanup():
+            observed.append("ran")
+            raise S5rError.of(WireErrorCode.STORAGE_IO_ERROR, "flush failed")
+
+        worker.on_shutdown(cleanup)
+        host = FakeHost(worker)
+        await host.handshake()
+        # A result for an unknown request is a local protocol violation.
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": "ghost",
+                "kind": "invoke",
+                "output": None,
+            }
+        )
+        with self.assertRaises(ProtocolError):
+            await host.worker_task
+        self.assertEqual(observed, ["ran"])
+
+    async def test_hook_does_not_run_when_activation_fails(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        observed = []
+
+        async def activate(config):
+            raise S5rError.of(WireErrorCode.INVALID_INPUT, "bad config")
+
+        async def cleanup():
+            observed.append("ran")
+
+        worker.on_activate(activate)
+        worker.on_shutdown(cleanup)
+        host = FakeHost(worker)
+        await host.initialize()
+        result = await host.activate()
+        self.assertFalse(result.is_success)
+        with self.assertRaises(S5rError):
+            await host.worker_task
+        self.assertEqual(observed, [])
+
+
+class BackgroundHostTest(unittest.IsolatedAsyncioTestCase):
+    async def test_delivered_after_activation_with_root_scope(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        host = FakeHost(
+            worker,
+            host_operations=[
+                HostOperation.SESSION_ROOT_CREATE,
+                HostOperation.SESSION_ROOT_DISPOSE,
+            ],
+        )
+        background = worker.background_host()
+        await host.handshake()
+        background_host = await asyncio.wait_for(background, timeout=5)
+        self.assertTrue(background_host.host_supports(HostOperation.SESSION_ROOT_CREATE))
+        self.assertFalse(background_host.host_supports(HostOperation.SESSION_STATE_READ))
+
+        create = asyncio.create_task(background_host.root_sessions().create_root())
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_CREATE)
+        self.assertIsNone(nested.parent_invoke_id)
+        self.assertEqual(nested.input, {})
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"session_id": "root-1"},
+            }
+        )
+        self.assertEqual((await create)["session_id"], "root-1")
+
+        dispose = asyncio.create_task(
+            background_host.root_sessions().dispose_root("root-1")
+        )
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_DISPOSE)
+        self.assertIsNone(nested.parent_invoke_id)
+        self.assertEqual(nested.input, {"target_session_id": "root-1"})
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"ok": True},
+            }
+        )
+        await dispose
+        await host.shutdown()
+
+    async def test_repeated_registration_supersedes_previous_future(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        first = worker.background_host()
+        second = worker.background_host()
+        self.assertTrue(first.cancelled())
+        self.assertFalse(second.done())
+        host = FakeHost(worker)
+        await host.handshake()
+        background_host = await asyncio.wait_for(second, timeout=5)
+        self.assertFalse(background_host.host_supports(HostOperation.SESSION_ROOT_CREATE))
+        await host.shutdown()
+
+    async def test_registration_after_serve_start_fails(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        host = FakeHost(worker)
+        await host.handshake()
+        with self.assertRaises(S5rError) as raised:
+            worker.background_host()
+        self.assertEqual(raised.exception.code, WireErrorCode.INVALID_INPUT)
+        await host.shutdown()
+
+    async def test_future_fails_when_handshake_fails(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def activate(config):
+            raise S5rError.of(WireErrorCode.INVALID_INPUT, "bad config")
+
+        worker.on_activate(activate)
+        background = worker.background_host()
+        host = FakeHost(worker)
+        await host.initialize()
+        result = await host.activate()
+        self.assertFalse(result.is_success)
+        with self.assertRaises(S5rError):
+            await background
+        with self.assertRaises(S5rError):
+            await host.worker_task
+
+    async def test_calls_fail_closed_after_the_driver_stops(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        host = FakeHost(worker, host_operations=[HostOperation.SESSION_ROOT_CREATE])
+        background = worker.background_host()
+        await host.handshake()
+        background_host = await asyncio.wait_for(background, timeout=5)
+        await host.shutdown()
+        with self.assertRaises(S5rError) as raised:
+            await background_host.root_sessions().create_root()
+        self.assertEqual(raised.exception.code, WireErrorCode.PEER_CLOSED)
 
 
 class ParseHelperTest(unittest.TestCase):

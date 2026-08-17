@@ -67,8 +67,11 @@ EOF(stdin 关闭)时干净退出。
 | `continuation_hook_handler(on, handler)` | 仅由 hook continuation 调用 |
 | `command(SlashCommand(...), handler)` | slash command(execute + completion) |
 | `custom_event(...)` / `on_custom_event(...)` | custom event 声明与订阅 |
+| `http_route(ExtensionHttpRoute..., handler)` | HTTP route:manifest 声明与 handler 同源(含路径/冲突校验);handler 收 `ExtensionHttpRequest` 字典与 `WorkerCallContext`,返回 `{"status", "body"}` |
 | `capability(...)` / `require_transport(...)` | manifest 能力声明 |
 | `on_activate(handler)` | activate 配置处理 |
+| `on_shutdown(handler)` | 驱动结束后的 best-effort 清理(仅 activation 成功后执行;hook 内 `HostClient` 不可用) |
+| `background_host()` | activate 完成后交付 `BackgroundHost` 的 future;无 turn 作用域,仅 root session 域 |
 | `run_stdio()` / `await serve(transport)` | 入口;后者便于测试接入自定义 transport |
 
 Handler 返回 `HandlerResult`(`HandlerResult.ok()`、`HandlerResult.of(effect, data)`、
@@ -110,14 +113,15 @@ session 为 target(对标 Rust 的 `WorkerInvocationContext::defer_context`)。
 ## 协议覆盖
 
 已覆盖:长度前缀帧(含畸形/超限拒绝)、initialize/activate 与 feature negotiation、
-`handler.invoke` 的 tool(plan/execute 两阶段)/hook/command/custom-event 分发、
+`handler.invoke` 的 tool(plan/execute 两阶段)/hook/command/custom-event/HTTP route 分发、
 双向 invoke(含 `parent_invoke_id` nested 校验)、model stream 接收(事件顺序校验)、
 双向 cancel(墓碑吸收迟到终态)、`s5r.runtime.ping` 与全部 `s5r.conformance.*` 内建操作
 (与 Rust worker 相同)。
 
-未覆盖:HTTP route 注册(`http_routes` 恒为空,`http` 类 handler id 返回
-`unknown_handler`)。原因:需要复刻宿主侧 HTTP 路由校验与分发语义,超出薄 SDK 范围;
-协议其余注册面(tool/hook/command/event)均已支持。
+后台能力:`on_shutdown` 清理 hook(driver 结束后执行,HostClient 不可用)与
+`background_host()`(activate 后交付无 turn 作用域的 `BackgroundHost`,仅 root session 域:
+`create_root` / `submit_root_turn` / `root_state` / `dispose_root`,invoke 不带
+`parent_invoke_id`,宿主按 detached context 处理)。
 
 ## 测试
 

@@ -112,6 +112,32 @@ class CommandAvailability:
     INTERACTIVE_ONLY = "interactive_only"
 
 
+class ExtensionHttpMethod:
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    PATCH = "PATCH"
+    DELETE = "DELETE"
+
+
+ALL_EXTENSION_HTTP_METHODS = frozenset(
+    value for key, value in vars(ExtensionHttpMethod).items() if not key.startswith("_")
+)
+
+
+class ExtensionHttpAccess:
+    PUBLIC = "public"
+    AUTHENTICATED = "authenticated"
+
+
+ALL_EXTENSION_HTTP_ACCESSES = frozenset(
+    {ExtensionHttpAccess.PUBLIC, ExtensionHttpAccess.AUTHENTICATED}
+)
+
+DEFAULT_EXTENSION_HTTP_BODY_BYTES = 64 * 1024
+MAX_EXTENSION_HTTP_BODY_BYTES = 1024 * 1024
+
+
 # Fixed modes from `fixed_hook_mode`; all other lifecycle events are mode-flexible.
 FIXED_HOOK_MODES: dict[str, str] = {
     LifecycleEvent.AFTER_PROVIDER_RESPONSE: HookMode.ADVISORY,
@@ -220,3 +246,102 @@ class CustomEventSubscription:
             "event_type": self.event_type,
             "source": self.source,
         }
+
+
+@dataclass
+class ExtensionHttpRoute:
+    """HTTP route manifest entry. All fields are wire-required."""
+
+    method: str
+    path: str
+    access: str = ExtensionHttpAccess.AUTHENTICATED
+    description: str = ""
+    max_body_bytes: int = DEFAULT_EXTENSION_HTTP_BODY_BYTES
+
+    @classmethod
+    def public(cls, method: str, path: str) -> ExtensionHttpRoute:
+        return cls(method=method, path=path, access=ExtensionHttpAccess.PUBLIC)
+
+    @classmethod
+    def authenticated(cls, method: str, path: str) -> ExtensionHttpRoute:
+        return cls(method=method, path=path, access=ExtensionHttpAccess.AUTHENTICATED)
+
+    def to_manifest(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "path": self.path,
+            "access": self.access,
+            "description": self.description,
+            "max_body_bytes": self.max_body_bytes,
+        }
+
+
+def validate_extension_http_route(route: ExtensionHttpRoute) -> str | None:
+    """Registration-time route rules; returns the failure reason or `None`."""
+    if route.method not in ALL_EXTENSION_HTTP_METHODS:
+        return f"unknown extension HTTP method {route.method!r}"
+    if route.access not in ALL_EXTENSION_HTTP_ACCESSES:
+        return f"unknown extension HTTP access {route.access!r}"
+    if not _valid_extension_http_route_path(route.path):
+        return f"invalid extension HTTP route path: {route.path}"
+    if not 1 <= route.max_body_bytes <= MAX_EXTENSION_HTTP_BODY_BYTES:
+        return (
+            "extension HTTP max_body_bytes must be between 1 and"
+            f" {MAX_EXTENSION_HTTP_BODY_BYTES}"
+        )
+    return None
+
+
+def extension_http_route_patterns_conflict(left: str, right: str) -> bool:
+    """Two patterns conflict when they can match the same request path."""
+    left_segments = _extension_http_path_segments(left)
+    right_segments = _extension_http_path_segments(right)
+    return len(left_segments) == len(right_segments) and all(
+        left_segment == right_segment
+        or _extension_http_param_name(left_segment) is not None
+        or _extension_http_param_name(right_segment) is not None
+        for left_segment, right_segment in zip(left_segments, right_segments)
+    )
+
+
+def _valid_extension_http_route_path(path: str) -> bool:
+    if (
+        not path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
+        or ".." in path
+    ):
+        return False
+    params: set[str] = set()
+    for segment in path.split("/")[1:]:
+        if not segment:
+            return False
+        starts = segment.startswith("{")
+        ends = segment.endswith("}")
+        if starts and ends:
+            name = segment[1:-1]
+            if (
+                not name
+                or not all(
+                    character.isascii() and (character.isalnum() or character == "_")
+                    for character in name
+                )
+                or name in params
+            ):
+                return False
+            params.add(name)
+        elif starts or ends or "{" in segment or "}" in segment:
+            return False
+    return True
+
+
+def _extension_http_path_segments(path: str) -> list[str]:
+    return [segment for segment in path.strip("/").split("/") if segment]
+
+
+def _extension_http_param_name(segment: str) -> str | None:
+    if segment.startswith("{") and segment.endswith("}") and len(segment) > 2:
+        return segment[1:-1]
+    return None
+
+
