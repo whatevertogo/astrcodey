@@ -615,8 +615,10 @@ async fn concurrent_config_updates_preserve_both_profiles() {
     );
 
     let (first, second) = tokio::join!(first, second);
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(second.status(), StatusCode::OK);
+    let first = response_status_and_body(first).await;
+    let second = response_status_and_body(second).await;
+    assert_eq!(first.0, StatusCode::OK, "first response: {}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "second response: {}", second.1);
 
     let config = runtime.config_manager().raw_config_snapshot();
     for expected in ["concurrent-qwen", "concurrent-compatible"] {
@@ -2276,6 +2278,12 @@ async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
         .await
         .unwrap()
         .to_vec()
+}
+
+async fn response_status_and_body(response: axum::response::Response) -> (StatusCode, String) {
+    let status = response.status();
+    let body = String::from_utf8_lossy(&body_bytes(response).await).into_owned();
+    (status, body)
 }
 
 async fn read_sse_until(mut body: Body, needle: &str) -> String {

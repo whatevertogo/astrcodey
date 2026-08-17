@@ -2,11 +2,7 @@
 //!
 //! 供需要崩溃一致性的持久化写共用(consumer state、config store)。
 
-use std::{
-    fs::File,
-    io::Write as _,
-    path::{Path, PathBuf},
-};
+use std::{io::Write as _, path::Path};
 
 use crate::StorageError;
 
@@ -37,36 +33,20 @@ pub(crate) fn replace_durable_file(path: &Path, bytes: &[u8]) -> std::io::Result
         sync_directory(parent.parent())?;
     }
 
-    let temporary = temporary_sibling(path);
-    let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temporary, path)?;
-        sync_directory(Some(parent))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(temporary);
-    }
-    result
-}
-
-fn temporary_sibling(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".astrcode-durable-")
+        .tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    sync_directory(Some(parent))
 }
 
 #[cfg(unix)]
 pub(crate) fn sync_directory(directory: Option<&Path>) -> std::io::Result<()> {
     if let Some(directory) = directory {
-        File::open(directory)?.sync_all()?;
+        std::fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
 }
@@ -74,4 +54,40 @@ pub(crate) fn sync_directory(directory: Option<&Path>) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub(crate) fn sync_directory(_directory: Option<&Path>) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn concurrent_replacements_use_independent_temporary_files() {
+        const WRITERS: usize = 16;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(directory.path().join("config.toml"));
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let writes = (0..WRITERS)
+            .map(|writer| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let content = format!("writer = {writer}\n").repeat(4_096);
+                    barrier.wait();
+                    replace_durable_file(&path, content.as_bytes()).map(|()| content)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let completed = writes
+            .into_iter()
+            .map(|write| write.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        let persisted = std::fs::read_to_string(path.as_ref()).unwrap();
+
+        assert!(completed.contains(&persisted));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 }
