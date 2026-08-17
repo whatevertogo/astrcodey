@@ -32,6 +32,14 @@
   - [ ] 审计日志增强
 - [ ] ACP 协议完善
 - [ ] CodeGraph
+- [ ] **Conversation timeline C：SQLite 物化读模型**
+  - [ ] **触发条件**：真实长会话 soak 仍出现不可接受的内存增长，或 JSONL 深度翻页延迟随历史长度明显增长；触发前保留当前有界 JSONL reader，避免提前引入双存储复杂度
+  - [ ] **稳定边界**：HTTP 继续只依赖 [`ConversationTimelineReader`](../crates/astrcode-server/src/http/conversation_timeline.rs)，保持现有 state/items DTO、不透明版本化 cursor、SSE 增量与前端窗口协议不变；SQLite 实现不得泄漏表结构到 wire contract
+  - [ ] **数据所有权**：durable JSONL 仍是唯一事实来源；SQLite 只是可删除、可重建的 read model，由单一 projector 按 `(session_id, event_seq, item_index)` 幂等消费，持久化 projection watermark 与 schema version
+  - [ ] **查询模型**：按 session 与 timeline position 建索引，直接读取 bounded suffix；普通分页不得回扫 JSONL，也不得反序列化完整 `SessionForked.messages`
+  - [ ] **一致性**：定义 snapshot watermark 与 SSE replay cursor 的握手；覆盖投影落后、重复投递、进程崩溃、日志截尾、fork、compaction、旧 schema 迁移与重建中断
+  - [ ] **迁移路径**：实现 SQLite reader → 从 JSONL backfill → shadow read 与 JSONL 结果对比 → 按 session 灰度切换 → 保留一键回退 JSONL 与全量 rebuild；不做双写事实源
+  - [ ] **验收标准**：首屏和任意深度分页的内存保持有界，分页延迟不再随日志总长度线性增长；重启/重建后 block 顺序、状态、cursor、fork 历史与 SSE 无缺失、无重复；完成真实 6 GB 复现场景的 Electron renderer 与后端 RSS soak
 
 ## 扩展能力对齐(deepseek-harness 对照,2026-08 缺口分析)
 

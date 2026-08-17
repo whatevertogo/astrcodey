@@ -39,6 +39,11 @@ export interface AppState {
   transientBlockOwners: Record<string, string>
   control: ConversationControlState | null
   cursor: string | null
+  timelineOlderCursor: string | null
+  timelineHasOlder: boolean
+  timelineLoading: boolean
+  timelinePageBlockIds: string[][]
+  timelineDetachedFromLatest: boolean
   compactSubmitting: boolean
 
   sessionStream: ActiveSessionStream | null
@@ -69,6 +74,8 @@ export interface AppState {
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
   refreshConversationSnapshot: () => Promise<string | null>
+  loadOlderConversationItems: () => Promise<void>
+  returnToLatestConversation: () => Promise<void>
   refreshPendingAskUserQuestions: () => Promise<void>
   refreshExtensionData: () => Promise<void>
   refreshCommands: () => Promise<void>

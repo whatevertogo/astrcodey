@@ -196,6 +196,22 @@ export interface ConversationSnapshot {
   agentSessions: AgentSessionLink[]
 }
 
+export interface ConversationState {
+  sessionId: string
+  sessionTitle: string
+  cursor: ConversationCursor
+  control: ConversationControlState
+  transientBlocks: ConversationBlock[]
+  agentSessions: AgentSessionLink[]
+}
+
+export interface ConversationItemsPage {
+  items: ConversationBlock[]
+  olderCursor?: { value: string }
+  hasOlder: boolean
+  snapshotCursor: ConversationCursor
+}
+
 // ── SSE Stream ──
 
 export interface ConversationStreamEnvelope {

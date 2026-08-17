@@ -13,7 +13,9 @@ import type {
   ConversationControlState,
   ConversationCursor,
   ConversationDelta,
+  ConversationItemsPage,
   ConversationSnapshot,
+  ConversationState,
   ConversationStreamEnvelope,
   PendingAskUserQuestion,
   PendingAskUserQuestionsResponse,
@@ -420,6 +422,37 @@ export function decodeConversationSnapshot(
     agentSessions: arrayField(object, 'agentSessions').map(
       decodeAgentSessionLink
     ),
+  }
+}
+
+export function decodeConversationState(value: unknown): ConversationState {
+  const object = decodeObject(value, 'conversation state')
+  return {
+    sessionId: requiredString(object, 'sessionId'),
+    sessionTitle: requiredString(object, 'sessionTitle'),
+    cursor: decodeConversationCursor(object.cursor),
+    control: decodeConversationControlState(object.control),
+    transientBlocks: arrayField(object, 'transientBlocks').map(
+      decodeConversationBlock
+    ),
+    agentSessions: arrayField(object, 'agentSessions').map(
+      decodeAgentSessionLink
+    ),
+  }
+}
+
+export function decodeConversationItemsPage(
+  value: unknown
+): ConversationItemsPage {
+  const object = decodeObject(value, 'conversation items page')
+  const olderCursor = optionalObject(object, 'olderCursor')
+  return {
+    items: arrayField(object, 'items').map(decodeConversationBlock),
+    olderCursor: olderCursor
+      ? decodeConversationCursor(olderCursor)
+      : undefined,
+    hasOlder: requiredBoolean(object, 'hasOlder'),
+    snapshotCursor: decodeConversationCursor(object.snapshotCursor),
   }
 }
 

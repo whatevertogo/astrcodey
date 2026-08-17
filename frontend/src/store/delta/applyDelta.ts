@@ -32,6 +32,7 @@ export type ConversationRenderState = Pick<
   | 'pendingAskUserRefreshInFlight'
   | 'askUserEventRevision'
   | 'transientHint'
+  | 'timelineDetachedFromLatest'
 >
 
 type ConversationRenderPatch = Partial<ConversationRenderState>
@@ -150,6 +151,7 @@ export function reduceConversationDeltas(
   let askUserEventRevision = current.askUserEventRevision
   let transientHint = current.transientHint
   let pendingBlockDeltas: BlockDelta[] = []
+  const updateVisibleBlocks = !current.timelineDetachedFromLatest
 
   const flushBlockDeltas = () => {
     if (pendingBlockDeltas.length === 0) return
@@ -165,7 +167,7 @@ export function reduceConversationDeltas(
 
   for (const coalesced of coalesceDeltas(deltas)) {
     if (coalesced.kind !== 'other') {
-      pendingBlockDeltas.push(coalesced)
+      if (updateVisibleBlocks) pendingBlockDeltas.push(coalesced)
       continue
     }
 
@@ -173,6 +175,7 @@ export function reduceConversationDeltas(
     const delta = coalesced.delta
     switch (delta.kind) {
       case 'appendBlock': {
+        if (!updateVisibleBlocks) break
         const baseBlocks =
           delta.block.kind === 'compactSummary'
             ? blocks.filter((block) => block.kind !== 'compactSummary')
@@ -183,6 +186,7 @@ export function reduceConversationDeltas(
       }
 
       case 'appendTransientBlock': {
+        if (!updateVisibleBlocks) break
         blocks = upsertBlock(blocks, delta.block)
         if (transientBlockOwners[delta.block.id] !== delta.turnId) {
           transientBlockOwners = {
@@ -194,6 +198,7 @@ export function reduceConversationDeltas(
       }
 
       case 'clearTransientBlocks': {
+        if (!updateVisibleBlocks) break
         const ownedIds = Object.entries(transientBlockOwners)
           .filter(([, turnId]) => turnId === delta.turnId)
           .map(([blockId]) => blockId)
@@ -206,11 +211,13 @@ export function reduceConversationDeltas(
       }
 
       case 'finalizeBlock':
+        if (!updateVisibleBlocks) break
         blocks = upsertBlock(blocks, delta.block)
         promoteTransientBlock(delta.block.id)
         break
 
       case 'resetBlock':
+        if (!updateVisibleBlocks) break
         blocks = blocks.map((block) => {
           if (block.id !== delta.blockId || block.kind !== 'assistant') {
             return block
@@ -349,6 +356,7 @@ export function reduceConversationDeltas(
       }
 
       case 'toolApprovalRequested':
+        if (!updateVisibleBlocks) break
         blocks = updateToolCall(blocks, delta.approval.callId, (block) => ({
           ...block,
           approval: delta.approval,
@@ -356,6 +364,7 @@ export function reduceConversationDeltas(
         break
 
       case 'toolApprovalResolved':
+        if (!updateVisibleBlocks) break
         blocks = updateToolCall(blocks, delta.callId, (block) => {
           const next = { ...block }
           delete next.approval

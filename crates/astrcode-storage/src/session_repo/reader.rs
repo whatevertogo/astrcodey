@@ -67,6 +67,18 @@ impl EventReader for FileSystemSessionRepository {
         meta.log.replay_from_start_limited(max_events).await
     }
 
+    async fn replay_before_limited(
+        &self,
+        session_id: &SessionId,
+        before: Option<&Cursor>,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let before_seq = before.map(parse_cursor).transpose()?;
+        meta.log.replay_before_limited(before_seq, max_events).await
+    }
+
     async fn replay_events_active_or_recycled(
         &self,
         session_id: &SessionId,

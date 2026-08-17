@@ -54,6 +54,38 @@ async fn event_log_round_trip_reopen_and_append_guards_share_one_sequence_contra
 }
 
 #[tokio::test]
+async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("paged-session");
+    let (log, _) = EventLog::create(dir.path().join("events.jsonl"), started_event(&session_id))
+        .await
+        .unwrap();
+    for text in [
+        "one".to_owned(),
+        "x".repeat(70 * 1024),
+        "three".to_owned(),
+        "four".to_owned(),
+    ] {
+        log.append(user_event(&session_id, &text)).await.unwrap();
+    }
+    log.force_sync().await.unwrap();
+
+    let latest = log.replay_before_limited(None, 2).await.unwrap();
+    let older = log.replay_before_limited(Some(3), 2).await.unwrap();
+    let empty = log.replay_before_limited(Some(1), 0).await.unwrap();
+
+    assert_eq!(
+        latest.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [3, 4]
+    );
+    assert_eq!(
+        older.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
 async fn event_log_batch_is_atomic_and_assigns_consecutive_sequences() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("events.jsonl");

@@ -26,6 +26,11 @@ import { Icon } from '../ui/Icon'
 interface MessageListProps {
   blocks: ConversationBlock[]
   sessionId: string | null
+  hasOlderHistory: boolean
+  historyLoading: boolean
+  detachedFromLatest: boolean
+  onLoadOlderHistory: () => Promise<void>
+  onReturnToLatest: () => Promise<void>
 }
 
 function sameBlockReferences<T>(left: T[] | null, right: T[] | null) {
@@ -113,10 +118,20 @@ const BlockRenderer = memo(
 
 const BLOCK_GAP_PX = 22
 const SCROLL_END_THRESHOLD_PX = 96
+const LOAD_OLDER_THRESHOLD_PX = 120
 
-export default function MessageList({ blocks, sessionId }: MessageListProps) {
+export default function MessageList({
+  blocks,
+  sessionId,
+  hasOlderHistory,
+  historyLoading,
+  detachedFromLatest,
+  onLoadOlderHistory,
+  onReturnToLatest,
+}: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const positionedSessionRef = useRef<string | null>(null)
+  const previousScrollTopRef = useRef<number | null>(null)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const allItems = useMemo(() => buildMessageListItems(blocks), [blocks])
   const getItemKey = useCallback(
@@ -155,18 +170,23 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   useLayoutEffect(() => {
     if (!sessionId) {
       positionedSessionRef.current = null
+      previousScrollTopRef.current = null
       return
     }
     if (allItems.length === 0 || positionedSessionRef.current === sessionId) {
       return
     }
 
+    previousScrollTopRef.current = null
     let settleFrame: number | undefined
     const frame = requestAnimationFrame(() => {
       virtualizer.scrollToEnd({ behavior: 'instant' })
       settleFrame = requestAnimationFrame(() => {
         virtualizer.scrollToEnd({ behavior: 'instant' })
-        positionedSessionRef.current = sessionId
+        settleFrame = requestAnimationFrame(() => {
+          positionedSessionRef.current = sessionId
+          previousScrollTopRef.current = listRef.current?.scrollTop ?? null
+        })
       })
     })
     return () => {
@@ -176,12 +196,42 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   }, [allItems.length, sessionId, virtualizer])
 
   const virtualItems = virtualizer.getVirtualItems()
+  const handleScroll = useCallback(() => {
+    const element = listRef.current
+    const previousScrollTop = previousScrollTopRef.current
+    previousScrollTopRef.current = element?.scrollTop ?? null
+    if (
+      !element ||
+      positionedSessionRef.current !== sessionId ||
+      previousScrollTop == null ||
+      element.scrollTop >= previousScrollTop ||
+      element.scrollTop > LOAD_OLDER_THRESHOLD_PX ||
+      !hasOlderHistory ||
+      historyLoading
+    ) {
+      return
+    }
+    void onLoadOlderHistory()
+  }, [hasOlderHistory, historyLoading, onLoadOlderHistory, sessionId])
+
+  const handleJumpToLatest = useCallback(() => {
+    if (!detachedFromLatest) {
+      virtualizer.scrollToEnd({ behavior: 'smooth' })
+      return
+    }
+    void onReturnToLatest().then(() => {
+      requestAnimationFrame(() => {
+        virtualizer.scrollToEnd({ behavior: 'instant' })
+      })
+    })
+  }, [detachedFromLatest, onReturnToLatest, virtualizer])
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1">
       <div
         ref={listRef}
         data-testid="conversation-scroll"
+        onScroll={handleScroll}
         className="h-full w-full overflow-x-hidden overflow-y-auto overscroll-contain bg-panel-bg px-[var(--layout-page-padding-x)]"
       >
         {blocks.length === 0 && (
@@ -214,6 +264,11 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
               overflowAnchor: 'none',
             }}
           >
+            {historyLoading && (
+              <div className="absolute left-0 top-1 z-10 w-full text-center text-[12px] text-text-muted">
+                正在加载更早历史…
+              </div>
+            )}
             {virtualItems.map((virtualItem) => {
               const item = allItems[virtualItem.index]
               if (!item) return null
@@ -236,11 +291,11 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
         )}
       </div>
 
-      {showJumpToLatest && blocks.length > 0 && (
+      {(showJumpToLatest || detachedFromLatest) && blocks.length > 0 && (
         <button
           type="button"
           className="absolute bottom-4 left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-surface/95 px-3 py-1.5 text-[12px] font-medium text-text-secondary shadow-surface-lg backdrop-blur transition-colors hover:bg-surface-muted hover:text-text-primary"
-          onClick={() => virtualizer.scrollToEnd({ behavior: 'smooth' })}
+          onClick={handleJumpToLatest}
           aria-label="跳到最新消息"
         >
           <Icon name="chevron-down" size={14} />

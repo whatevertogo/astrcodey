@@ -1,12 +1,13 @@
 //! 把 LLM message 历史与 EventPayload 投影成 ConversationBlockDto。
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_context::is_synthetic_context_message;
 use astrcode_core::{
     event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, TranscriptRewriteReason},
     llm::{
-        LlmContent, LlmMessage, LlmRole, TranscriptMessageOrigin, attachments_from_user_message,
+        LlmContent, LlmMessage, LlmRole, TranscriptMessage, TranscriptMessageOrigin,
+        attachments_from_user_message,
     },
     types::ToolCallId,
 };
@@ -213,6 +214,21 @@ pub(in crate::http) fn transcript_blocks(
     }));
     blocks.sort_by_key(|entry| entry.seq);
     blocks.into_iter().map(|entry| entry.block).collect()
+}
+
+pub(in crate::http) fn persisted_transcript_blocks(
+    messages: &[TranscriptMessage],
+    source_seq: u64,
+) -> Vec<ConversationBlockDto> {
+    let messages = messages
+        .iter()
+        .map(|entry| SequencedLlmMessage {
+            message: Arc::new(entry.message.clone()),
+            updated_seq: source_seq,
+            origin: entry.origin,
+        })
+        .collect::<Vec<_>>();
+    transcript_blocks(&messages, &[], None)
 }
 
 struct SequencedConversationBlock {

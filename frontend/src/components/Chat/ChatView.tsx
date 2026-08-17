@@ -19,6 +19,17 @@ export default function ChatView({
   const blocks = useAppStore((s) => s.blocks)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const workingDir = useAppStore((s) => s.workingDir)
+  const timelineHasOlder = useAppStore((s) => s.timelineHasOlder)
+  const timelineLoading = useAppStore((s) => s.timelineLoading)
+  const timelineDetachedFromLatest = useAppStore(
+    (s) => s.timelineDetachedFromLatest
+  )
+  const loadOlderConversationItems = useAppStore(
+    (s) => s.loadOlderConversationItems
+  )
+  const returnToLatestConversation = useAppStore(
+    (s) => s.returnToLatestConversation
+  )
   const phase = useAppStore((state) =>
     effectiveConversationPhase(state.control, state.compactSubmitting)
   )
@@ -54,7 +65,15 @@ export default function ChatView({
         </main>
       ) : (
         <>
-          <MessageList blocks={blocks} sessionId={activeSessionId} />
+          <MessageList
+            blocks={blocks}
+            sessionId={activeSessionId}
+            hasOlderHistory={timelineHasOlder}
+            historyLoading={timelineLoading}
+            detachedFromLatest={timelineDetachedFromLatest}
+            onLoadOlderHistory={loadOlderConversationItems}
+            onReturnToLatest={returnToLatestConversation}
+          />
           <InputBar presentation="docked" />
         </>
       )}

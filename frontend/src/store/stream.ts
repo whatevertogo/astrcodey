@@ -6,6 +6,7 @@ import {
 } from './sessionStreamController'
 import { ConversationDeltaFrameBuffer } from './delta/frameBuffer'
 import type { ActiveSessionStream, AppState } from './types'
+import { MAX_TIMELINE_BLOCKS } from './conversationHistory'
 
 const SSE_RECONNECT_BASE_MS = 1000
 const SSE_RECONNECT_MAX_MS = 30_000
@@ -35,6 +36,7 @@ export function startSessionStream(
   const frameBuffer = new ConversationDeltaFrameBuffer()
   let rafId: number | null = null
   let timeoutId: number | null = null
+  let rebasingTimeline = false
 
   const clearFlushSchedule = () => {
     if (rafId !== null) {
@@ -53,6 +55,17 @@ export function startSessionStream(
 
     const frame = frameBuffer.drain()
     applyDeltasToState(frame.deltas, get, set, frame.cursor ?? undefined)
+    const state = get()
+    if (
+      !rebasingTimeline &&
+      !state.timelineDetachedFromLatest &&
+      state.blocks.length > MAX_TIMELINE_BLOCKS
+    ) {
+      rebasingTimeline = true
+      void state.returnToLatestConversation().finally(() => {
+        rebasingTimeline = false
+      })
+    }
   }
 
   const scheduleFlush = () => {

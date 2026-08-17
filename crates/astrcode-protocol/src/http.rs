@@ -368,6 +368,40 @@ pub struct ConversationSnapshotResponseDto {
     pub agent_sessions: Vec<AgentSessionLinkDto>,
 }
 
+/// UI timeline 的不透明分页游标。客户端只负责原样回传。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationTimelineCursorDto {
+    pub value: String,
+}
+
+/// 与历史列表解耦的当前 conversation 状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationStateResponseDto {
+    pub session_id: String,
+    pub session_title: String,
+    pub cursor: ConversationCursorDto,
+    pub control: ConversationControlStateDto,
+    pub transient_blocks: Vec<ConversationBlockDto>,
+    pub agent_sessions: Vec<AgentSessionLinkDto>,
+}
+
+/// 一页只读 conversation timeline；新事件仍通过 SSE 增量发送。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationItemsPageResponseDto {
+    pub items: Vec<ConversationBlockDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<ConversationTimelineCursorDto>,
+    pub has_older: bool,
+    /// 生成本页时已提交的最新 durable event cursor。
+    pub snapshot_cursor: ConversationCursorDto,
+}
+
 /// conversation 控制状态。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

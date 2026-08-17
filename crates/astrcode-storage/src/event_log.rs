@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, ErrorKind, Read, Seek, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -222,6 +222,119 @@ fn replay_events_at_path(
         Ok(!max_events.is_some_and(|limit| events.len() >= limit))
     })?;
     Ok(events)
+}
+
+fn replay_events_before_at_path(
+    path: &Path,
+    before_seq: Option<u64>,
+    max_events: usize,
+) -> Result<Vec<StoredEvent>, StorageError> {
+    if max_events == 0 {
+        return Ok(Vec::new());
+    }
+    const REVERSE_SCAN_CHUNK_BYTES: u64 = 64 * 1024;
+
+    let mut file = File::open(path).map_err(|error| {
+        StorageError::Io(std::io::Error::new(
+            error.kind(),
+            enhance_open_error(path, error),
+        ))
+    })?;
+    let file_len = file.metadata().map_err(StorageError::Io)?.len();
+    let Some(mut position) = last_committed_offset(&mut file, file_len)? else {
+        return Ok(Vec::new());
+    };
+    let mut leading_fragment = Vec::new();
+    let mut events = Vec::with_capacity(max_events);
+    let mut newer_seq = None;
+    let mut session_id = None;
+
+    while position > 0 && events.len() < max_events {
+        let start = position.saturating_sub(REVERSE_SCAN_CHUNK_BYTES);
+        let mut chunk = vec![0; (position - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(StorageError::Io)?;
+        chunk.extend_from_slice(&leading_fragment);
+
+        let (complete, next_fragment) = if start == 0 {
+            (chunk.as_slice(), Vec::new())
+        } else if let Some(first_newline) = chunk.iter().position(|byte| *byte == b'\n') {
+            (&chunk[first_newline + 1..], chunk[..first_newline].to_vec())
+        } else {
+            (&[][..], chunk)
+        };
+
+        for line in complete.rsplit(|byte| *byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let line = std::str::from_utf8(line).map_err(|error| {
+                StorageError::CorruptLog(format!(
+                    "event at {} is not valid UTF-8: {error}",
+                    path.display()
+                ))
+            })?;
+            let event = parse_event_line(path, 0, line)?;
+            if let Some(expected_newer) = newer_seq
+                && event.seq.checked_add(1) != Some(expected_newer)
+            {
+                return Err(corrupt_log(
+                    path,
+                    0,
+                    format!(
+                        "expected reverse seq {}, got {}",
+                        expected_newer.saturating_sub(1),
+                        event.seq
+                    ),
+                ));
+            }
+            if let Some(expected_session) = &session_id {
+                if &event.session_id != expected_session {
+                    return Err(corrupt_log(
+                        path,
+                        0,
+                        format!(
+                            "event belongs to session {}, expected {}",
+                            event.session_id, expected_session
+                        ),
+                    ));
+                }
+            } else {
+                session_id = Some(event.session_id.clone());
+            }
+            newer_seq = Some(event.seq);
+
+            if before_seq.is_none_or(|before| event.seq < before) {
+                events.push(event);
+                if events.len() == max_events {
+                    break;
+                }
+            }
+        }
+        leading_fragment = next_fragment;
+        position = start;
+    }
+
+    events.reverse();
+    Ok(events)
+}
+
+fn last_committed_offset(file: &mut File, file_len: u64) -> Result<Option<u64>, StorageError> {
+    const TAIL_SCAN_BYTES: u64 = 8 * 1024;
+    let mut position = file_len;
+    while position > 0 {
+        let start = position.saturating_sub(TAIL_SCAN_BYTES);
+        let mut chunk = vec![0; (position - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(StorageError::Io)?;
+        if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            return Ok(Some(start + newline as u64 + 1));
+        }
+        position = start;
+    }
+    Ok(None)
 }
 
 fn read_summary_at_path(
@@ -823,6 +936,16 @@ impl EventLog {
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, None, None, Some(max_events))).await
+    }
+
+    /// Replay the newest events before an optional exclusive sequence cursor.
+    pub(crate) async fn replay_before_limited(
+        &self,
+        before_seq: Option<u64>,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || replay_events_before_at_path(&path, before_seq, max_events)).await
     }
 
     /// Replay events whose assigned seq is greater than `seq`.

@@ -215,6 +215,31 @@ pub trait EventReader: Send + Sync {
         Ok(events)
     }
 
+    /// Replays the newest events whose sequence is strictly less than `before`.
+    ///
+    /// The returned events remain in ascending sequence order. `None` selects
+    /// the newest page of the session.
+    async fn replay_before_limited(
+        &self,
+        session_id: &SessionId,
+        before: Option<&Cursor>,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let before_seq = before
+            .map(|cursor| {
+                cursor
+                    .parse::<u64>()
+                    .map_err(|_| StorageError::InvalidId(format!("Invalid cursor: {cursor}")))
+            })
+            .transpose()?;
+        let mut events = self.replay_events(session_id).await?;
+        if let Some(before_seq) = before_seq {
+            events.retain(|event| event.seq < before_seq);
+        }
+        let keep_from = events.len().saturating_sub(max_events);
+        Ok(events.split_off(keep_from))
+    }
+
     async fn replay_events_active_or_recycled(
         &self,
         session_id: &SessionId,

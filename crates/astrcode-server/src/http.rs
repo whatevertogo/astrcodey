@@ -15,6 +15,7 @@ use axum::{
 use crate::{bootstrap::ServerApp, session_command_contract::HandlerError};
 
 mod auth;
+mod conversation_timeline;
 mod projection;
 mod routes;
 mod server;
@@ -26,6 +27,8 @@ pub use server::{HttpServerError, router, run_http_server};
 #[derive(Clone)]
 pub(crate) struct HttpState {
     pub(crate) app: Arc<ServerApp>,
+    pub(in crate::http) conversation_timeline:
+        Arc<dyn conversation_timeline::ConversationTimelineReader>,
 }
 
 pub(crate) fn error_response(

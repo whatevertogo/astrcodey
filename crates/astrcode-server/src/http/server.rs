@@ -18,6 +18,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use super::{
     HttpState,
     auth::{collect_allowed_origins, configured_auth_token},
+    conversation_timeline::EventLogConversationTimeline,
     routes::{config, event_consumers, extensions, lifecycle, models, sessions},
     stream,
 };
@@ -51,7 +52,13 @@ pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServer
 fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
     let auth_token = configured_auth_token();
     let event_bus = Arc::clone(server_app.event_bus());
-    let state = HttpState { app: server_app };
+    let conversation_timeline = Arc::new(EventLogConversationTimeline::new(Arc::clone(
+        server_app.runtime().event_store(),
+    )));
+    let state = HttpState {
+        app: server_app,
+        conversation_timeline,
+    };
 
     let allowed_origins = collect_allowed_origins();
     let cors = CorsLayer::new()
@@ -78,6 +85,14 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
         .route(
             "/api/sessions/{id}/conversation",
             get(sessions::conversation_snapshot),
+        )
+        .route(
+            "/api/sessions/{id}/conversation/state",
+            get(sessions::conversation_state),
+        )
+        .route(
+            "/api/sessions/{id}/conversation/items",
+            get(sessions::conversation_items),
         )
         .route(
             "/api/sessions/{id}/tools",

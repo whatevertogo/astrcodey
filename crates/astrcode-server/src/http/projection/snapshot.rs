@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
-    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto, ToolApprovalDto,
-    ToolCallStatusDto,
+    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto,
+    ConversationStateResponseDto, ToolApprovalDto, ToolCallStatusDto,
 };
 use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
@@ -73,6 +73,60 @@ pub(in crate::http) fn conversation_to_dto(
             .map(agent_session_link_to_dto)
             .collect(),
     }
+}
+
+pub(in crate::http) fn conversation_state_to_dto(
+    session: &SessionReadModel,
+    streaming: Option<&StreamingSnapshot>,
+) -> ConversationStateResponseDto {
+    let transient_blocks = if session.execution.unsettled_turn_id.is_some() {
+        streaming
+            .map(|message| {
+                vec![streaming_assistant_block(
+                    message.message_id.clone(),
+                    message.text.clone(),
+                    message.reasoning_content.clone(),
+                )]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    ConversationStateResponseDto {
+        session_id: session.identity.session_id.to_string(),
+        session_title: session
+            .first_user_message()
+            .map(str::to_owned)
+            .unwrap_or_else(|| session_title_from_working_dir(&session.identity.working_dir)),
+        cursor: ConversationCursorDto {
+            value: session.cursor(),
+        },
+        control: control_from_phase(
+            session.execution.phase,
+            !session.model_context.messages.is_empty(),
+        ),
+        transient_blocks,
+        agent_sessions: session
+            .agent_sessions
+            .iter()
+            .map(agent_session_link_to_dto)
+            .collect(),
+    }
+}
+
+pub(in crate::http) fn decorate_timeline_items(
+    blocks: &mut [ConversationBlockDto],
+    session: &SessionReadModel,
+    is_latest_page: bool,
+) {
+    if !is_latest_page {
+        return;
+    }
+    if session.execution.unsettled_turn_id.is_none() {
+        finalize_orphaned_tool_blocks(blocks);
+    }
+    apply_pending_tool_approvals(blocks, &session.execution.pending_tool_approvals);
 }
 
 fn finalize_orphaned_tool_blocks(blocks: &mut [ConversationBlockDto]) {

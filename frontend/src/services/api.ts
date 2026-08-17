@@ -1,7 +1,9 @@
 import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
 import {
+  decodeConversationItemsPage,
   decodeConversationSnapshot,
+  decodeConversationState,
   decodePendingAskUserQuestionsResponse,
 } from './protocol'
 import type {
@@ -26,6 +28,8 @@ import type {
   PromptSubmitResponse,
   SessionListResponse,
   ConversationSnapshot,
+  ConversationItemsPage,
+  ConversationState,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponse,
   ApprovalMode,
@@ -140,6 +144,32 @@ export async function getConversation(
   return decodeConversationSnapshot(
     await request<unknown>(
       `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
+    )
+  )
+}
+
+export async function getConversationState(
+  sessionId: string
+): Promise<ConversationState> {
+  return decodeConversationState(
+    await request<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/conversation/state`
+    )
+  )
+}
+
+export async function getConversationItems(
+  sessionId: string,
+  before?: string,
+  limit?: number
+): Promise<ConversationItemsPage> {
+  const params = new URLSearchParams()
+  if (before) params.set('before', before)
+  if (limit != null) params.set('limit', String(limit))
+  const query = params.size > 0 ? `?${params.toString()}` : ''
+  return decodeConversationItemsPage(
+    await request<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/conversation/items${query}`
     )
   )
 }

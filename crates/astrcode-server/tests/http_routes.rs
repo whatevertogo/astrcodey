@@ -20,7 +20,7 @@ use astrcode_core::{
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
-    types::{Cursor, SessionId, new_message_id},
+    types::{Cursor, SessionId, new_message_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     builder::manifest,
@@ -37,9 +37,10 @@ use astrcode_protocol::{
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
-        ConversationSnapshotResponseDto, CreateSessionResponseDto,
-        CustomEventConsumerListResponseDto, CustomEventConsumerStatusDto, PromptSubmitResponse,
-        ProviderCatalogResponseDto, SlashCommandListResponseDto, ToolSelectionDto,
+        ConversationItemsPageResponseDto, ConversationSnapshotResponseDto,
+        ConversationStateResponseDto, CreateSessionResponseDto, CustomEventConsumerListResponseDto,
+        CustomEventConsumerStatusDto, PromptSubmitResponse, ProviderCatalogResponseDto,
+        SlashCommandListResponseDto, ToolSelectionDto,
     },
     wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -1246,6 +1247,137 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     )
     .await;
     assert_eq!(after.blocks.len(), 2);
+}
+
+#[tokio::test]
+async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapshot_contract() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let session_id_value = SessionId::new(&session_id);
+
+    for index in 1..=3 {
+        let turn_id = new_turn_id();
+        runtime
+            .event_store()
+            .append_events(vec![
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::TurnStarted,
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: format!("user-{index}"),
+                        attachments: Vec::new(),
+                        accepted_seq: None,
+                    },
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id.clone(),
+                    DurableEventPayload::AssistantMessageCompleted {
+                        message_id: new_message_id(),
+                        text: format!("assistant-{index}"),
+                        reasoning_content: None,
+                    },
+                ),
+                DurableEvent::turn(
+                    session_id_value.clone(),
+                    turn_id,
+                    DurableEventPayload::TurnCompleted {
+                        finish_reason: "stop".into(),
+                    },
+                ),
+            ])
+            .await
+            .unwrap();
+    }
+
+    let state = get_json::<ConversationStateResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/state"),
+        &token,
+    )
+    .await;
+    assert_eq!(state.cursor.value, "12");
+    assert!(state.transient_blocks.is_empty());
+
+    let latest = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/items?limit=2"),
+        &token,
+    )
+    .await;
+    assert_eq!(visible_texts(&latest.items), ["user-3", "assistant-3"]);
+    assert!(latest.has_older);
+    let older_cursor = latest.older_cursor.unwrap().value;
+
+    let older = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation/items?limit=2&before={older_cursor}"),
+        &token,
+    )
+    .await;
+    assert_eq!(visible_texts(&older.items), ["user-2", "assistant-2"]);
+    assert!(older.has_older);
+
+    let forked = post_json_owned(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/fork"),
+        "{}".into(),
+        &token,
+    )
+    .await;
+    let forked_id = serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(forked).await)
+        .unwrap()
+        .session_id;
+    let forked_latest = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{forked_id}/conversation/items?limit=2"),
+        &token,
+    )
+    .await;
+    assert_eq!(
+        visible_texts(&forked_latest.items),
+        ["user-3", "assistant-3"]
+    );
+    assert!(forked_latest.has_older);
+    let forked_older = get_json::<ConversationItemsPageResponseDto>(
+        app.clone(),
+        &format!(
+            "/api/sessions/{forked_id}/conversation/items?limit=2&before={}",
+            forked_latest.older_cursor.unwrap().value
+        ),
+        &token,
+    )
+    .await;
+    assert_eq!(
+        visible_texts(&forked_older.items),
+        ["user-2", "assistant-2"]
+    );
+
+    let legacy = get_json::<ConversationSnapshotResponseDto>(
+        app,
+        &format!("/api/sessions/{session_id}/conversation"),
+        &token,
+    )
+    .await;
+    assert_eq!(legacy.blocks.len(), 6);
+}
+
+fn visible_texts(blocks: &[ConversationBlockDto]) -> Vec<&str> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ConversationBlockDto::User { text, .. }
+            | ConversationBlockDto::Assistant { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]

@@ -27,6 +27,11 @@ import {
   syncProjectFolderOrder,
 } from '../components/Sidebar/projectFolderOrder'
 import type { AppState } from './types'
+import {
+  earliestConversationCursor,
+  latestTimelineWindow,
+  prependTimelinePage,
+} from './conversationHistory'
 
 let commandRefreshGeneration = 0
 let sessionSwitchGeneration = 0
@@ -49,6 +54,11 @@ function resetSessionView(): Partial<AppState> {
     transientBlockOwners: {},
     control: null,
     cursor: null,
+    timelineOlderCursor: null,
+    timelineHasOlder: false,
+    timelineLoading: false,
+    timelinePageBlockIds: [],
+    timelineDetachedFromLatest: false,
     compactSubmitting: false,
     sessionStream: null,
     sessionStreamStatus: 'disconnected',
@@ -78,6 +88,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   transientBlockOwners: {},
   control: null,
   cursor: null,
+  timelineOlderCursor: null,
+  timelineHasOlder: false,
+  timelineLoading: false,
+  timelinePageBlockIds: [],
+  timelineDetachedFromLatest: false,
   compactSubmitting: false,
   sessionStream: null,
   sessionStreamStatus: 'disconnected',
@@ -239,7 +254,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
 
     try {
-      const snapshot = await api.getConversation(sessionId)
+      const [conversationState, timelinePage] = await Promise.all([
+        api.getConversationState(sessionId),
+        api.getConversationItems(sessionId),
+      ])
       if (
         get().activeSessionId !== sessionId ||
         switchGeneration !== sessionSwitchGeneration
@@ -249,19 +267,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       const sessions = get().sessions
       const sessionItem = sessions.find((s) => s.sessionId === sessionId)
 
+      const timeline = latestTimelineWindow(
+        timelinePage.items,
+        conversationState.transientBlocks
+      )
+      const replayCursor = earliestConversationCursor(
+        conversationState.cursor.value,
+        timelinePage.snapshotCursor.value
+      )
       set({
-        blocks: snapshot.blocks,
+        blocks: timeline.blocks,
         transientBlockOwners: {},
-        control: snapshot.control,
-        cursor: snapshot.cursor.value,
-        activeSessionTitle: snapshot.sessionTitle,
+        control: conversationState.control,
+        cursor: replayCursor,
+        timelineOlderCursor: timelinePage.olderCursor?.value ?? null,
+        timelineHasOlder: timelinePage.hasOlder,
+        timelineLoading: false,
+        timelinePageBlockIds: timeline.pageBlockIds,
+        timelineDetachedFromLatest: false,
+        activeSessionTitle: conversationState.sessionTitle,
         workingDir: sessionItem?.workingDir ?? null,
-        agentSessions: snapshot.agentSessions,
+        agentSessions: conversationState.agentSessions,
       })
 
       const sessionStream = startSessionStream(
         sessionId,
-        snapshot.cursor.value,
+        replayCursor,
         get,
         set
       )
@@ -298,7 +329,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const refreshGeneration = ++conversationRefreshGeneration
 
     try {
-      const snapshot = await api.getConversation(activeSessionId)
+      const [conversationState, timelinePage] = await Promise.all([
+        api.getConversationState(activeSessionId),
+        api.getConversationItems(activeSessionId),
+      ])
       if (
         get().activeSessionId !== activeSessionId ||
         switchGeneration !== sessionSwitchGeneration ||
@@ -306,15 +340,28 @@ export const useAppStore = create<AppState>((set, get) => ({
       ) {
         return null
       }
+      const timeline = latestTimelineWindow(
+        timelinePage.items,
+        conversationState.transientBlocks
+      )
+      const replayCursor = earliestConversationCursor(
+        conversationState.cursor.value,
+        timelinePage.snapshotCursor.value
+      )
       set({
-        blocks: snapshot.blocks,
+        blocks: timeline.blocks,
         transientBlockOwners: {},
-        control: snapshot.control,
-        cursor: snapshot.cursor.value,
-        activeSessionTitle: snapshot.sessionTitle,
-        agentSessions: snapshot.agentSessions,
+        control: conversationState.control,
+        cursor: replayCursor,
+        timelineOlderCursor: timelinePage.olderCursor?.value ?? null,
+        timelineHasOlder: timelinePage.hasOlder,
+        timelineLoading: false,
+        timelinePageBlockIds: timeline.pageBlockIds,
+        timelineDetachedFromLatest: false,
+        activeSessionTitle: conversationState.sessionTitle,
+        agentSessions: conversationState.agentSessions,
       })
-      return snapshot.cursor.value
+      return replayCursor
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
       if (
@@ -329,6 +376,91 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       return null
     }
+  },
+
+  loadOlderConversationItems: async () => {
+    const current = get()
+    if (
+      !current.activeSessionId ||
+      !current.timelineHasOlder ||
+      !current.timelineOlderCursor ||
+      current.timelineLoading
+    ) {
+      return
+    }
+    const sessionId = current.activeSessionId
+    const before = current.timelineOlderCursor
+    const switchGeneration = sessionSwitchGeneration
+    set({ timelineLoading: true })
+
+    try {
+      const page = await api.getConversationItems(sessionId, before)
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
+      set((state) => {
+        const timeline = prependTimelinePage(
+          {
+            blocks: state.blocks,
+            pageBlockIds: state.timelinePageBlockIds,
+            detachedFromLatest: state.timelineDetachedFromLatest,
+          },
+          page.items
+        )
+        return {
+          blocks: timeline.blocks,
+          transientBlockOwners: timeline.detachedFromLatest
+            ? {}
+            : state.transientBlockOwners,
+          timelineOlderCursor: page.olderCursor?.value ?? null,
+          timelineHasOlder: page.hasOlder,
+          timelineLoading: false,
+          timelinePageBlockIds: timeline.pageBlockIds,
+          timelineDetachedFromLatest: timeline.detachedFromLatest,
+        }
+      })
+    } catch (err) {
+      console.error('Failed to load older conversation items:', err)
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
+      set({
+        timelineLoading: false,
+        transientHint:
+          err instanceof Error ? err.message : '加载更早会话历史失败',
+      })
+    }
+  },
+
+  returnToLatestConversation: async () => {
+    const current = get()
+    const sessionId = current.activeSessionId
+    if (!sessionId) return
+
+    const fallbackCursor = current.cursor
+    current.sessionStream?.stop()
+    set({ sessionStream: null, sessionStreamStatus: 'connecting' })
+
+    const snapshotCursor = await get().refreshConversationSnapshot()
+    if (get().activeSessionId !== sessionId) return
+    const resumeCursor = snapshotCursor ?? fallbackCursor
+    if (resumeCursor == null) {
+      set({ sessionStreamStatus: 'degraded' })
+      return
+    }
+
+    const sessionStream = startSessionStream(sessionId, resumeCursor, get, set)
+    if (get().activeSessionId !== sessionId) {
+      sessionStream.stop()
+      return
+    }
+    set({ sessionStream })
   },
 
   refreshPendingAskUserQuestions: async () => {

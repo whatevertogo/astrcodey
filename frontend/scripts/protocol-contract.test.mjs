@@ -5,7 +5,9 @@ import {
   ProtocolDecodeError,
   decodeConversationBlock,
   decodeConversationDelta,
+  decodeConversationItemsPage,
   decodeConversationSnapshot,
+  decodeConversationState,
   decodeConversationStreamEnvelope,
 } from '../../target/frontend-contract/services/protocol.js'
 
@@ -330,6 +332,27 @@ assert.deepEqual(snapshot.control.retryStatus, {
   maxRetries: 5,
   delayMs: 2000,
 })
+
+const state = decodeConversationState({
+  sessionId: 's-1',
+  sessionTitle: 'title',
+  cursor: { value: '8' },
+  control: snapshot.control,
+  transientBlocks: [
+    { kind: 'assistant', id: 'streaming', text: 'hello', status: 'streaming' },
+  ],
+  agentSessions: snapshot.agentSessions,
+})
+assert.equal(state.transientBlocks[0].id, 'streaming')
+
+const itemsPage = decodeConversationItemsPage({
+  items: snapshot.blocks,
+  olderCursor: { value: 'timeline-v1:2' },
+  hasOlder: true,
+  snapshotCursor: { value: '8' },
+})
+assert.equal(itemsPage.items.length, 2)
+assert.equal(itemsPage.olderCursor?.value, 'timeline-v1:2')
 
 const transportRetrySnapshot = decodeConversationSnapshot({
   ...snapshot,

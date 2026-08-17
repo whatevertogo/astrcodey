@@ -98,6 +98,30 @@ impl EventReader for InMemoryEventStore {
         Ok(events.into_iter().filter(|event| event.seq > seq).collect())
     }
 
+    async fn replay_before_limited(
+        &self,
+        session_id: &SessionId,
+        before: Option<&Cursor>,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let before_seq = before
+            .map(|cursor| {
+                cursor
+                    .parse::<u64>()
+                    .map_err(|_| StorageError::InvalidId(format!("Invalid cursor: {cursor}")))
+            })
+            .transpose()?;
+        let map = self.sessions.lock().await;
+        let events = &map
+            .get(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?
+            .events;
+        let end = before_seq
+            .map(|before| events.partition_point(|event| event.seq < before))
+            .unwrap_or(events.len());
+        Ok(events[end.saturating_sub(max_events)..end].to_vec())
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         Ok(self.sessions.lock().await.keys().cloned().collect())
     }
