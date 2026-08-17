@@ -127,6 +127,17 @@ def _open_stream(
     return binding.invoke_stream(operation, dict(request) if request is not None else {})
 
 
+def _ensure_ack(operation: str, output: Any) -> None:
+    """Validate an `Acknowledgement` response (mirrors `invoke_ack`)."""
+    if not isinstance(output, Mapping) or set(output) != {"ok"} or output["ok"] is not True:
+        raise S5rError(
+            ErrorPayload(
+                WireErrorCode.INVALID_RESPONSE,
+                f"invalid {operation} response: expected an `ok: true` acknowledgement",
+            )
+        )
+
+
 async def _collect(stream: AsyncIterator[dict[str, Any]]) -> Any:
     output = None
     async for event in stream:
@@ -180,6 +191,14 @@ class SessionControlClient:
 
     async def root_state(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.SESSION_ROOT_STATE, request)
+
+    async def dispose_root(self, target_session_id: str) -> None:
+        """Dispose a root session; the host must answer `{"ok": true}`."""
+        output = await _call(
+            HostOperation.SESSION_ROOT_DISPOSE,
+            {"target_session_id": target_session_id},
+        )
+        _ensure_ack(HostOperation.SESSION_ROOT_DISPOSE, output)
 
     async def inject_or_start(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.SESSION_CONTROL_INJECT_OR_START, request)
@@ -336,6 +355,56 @@ class NetworkClient:
 class ExtensionHttpClient:
     async def dispatch_public(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.EXTENSION_HTTP_PUBLIC, request)
+
+
+class BackgroundHost:
+    """Host handle that escapes the handler lifecycle (root session domain only).
+
+    Mirrors `astrcode_extension_worker::worker::host::BackgroundHost`: bound
+    directly to the root driver (`parent_invoke_id` is `None`, so the host
+    treats calls as a detached context) and delivered via
+    `Worker.background_host()` once the handshake completes. Support is not
+    pre-checked locally; an unsupported operation fails at the host with
+    `unknown_capability`.
+    """
+
+    def __init__(
+        self,
+        invoke: Callable[[str, Any], Awaitable[Any]],
+        host_operations: frozenset[str],
+    ):
+        self._invoke = invoke
+        self._host_operations = host_operations
+
+    def host_supports(self, operation: str) -> bool:
+        return operation in self._host_operations
+
+    def root_sessions(self) -> BackgroundRootSessionClient:
+        return BackgroundRootSessionClient(self._invoke)
+
+
+class BackgroundRootSessionClient:
+    """Root-session domain of `BackgroundHost` (no session-scoped methods)."""
+
+    def __init__(self, invoke: Callable[[str, Any], Awaitable[Any]]):
+        self._invoke = invoke
+
+    async def create_root(self, working_dir: str | None = None) -> Any:
+        request = {"working_dir": working_dir} if working_dir is not None else {}
+        return await self._invoke(HostOperation.SESSION_ROOT_CREATE, request)
+
+    async def submit_root_turn(self, request: Mapping[str, Any]) -> Any:
+        return await self._invoke(HostOperation.SESSION_ROOT_SUBMIT_TURN, dict(request))
+
+    async def root_state(self, request: Mapping[str, Any]) -> Any:
+        return await self._invoke(HostOperation.SESSION_ROOT_STATE, dict(request))
+
+    async def dispose_root(self, target_session_id: str) -> None:
+        output = await self._invoke(
+            HostOperation.SESSION_ROOT_DISPOSE,
+            {"target_session_id": target_session_id},
+        )
+        _ensure_ack(HostOperation.SESSION_ROOT_DISPOSE, output)
 
 
 _EVENTS = EventClient()

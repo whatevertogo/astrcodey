@@ -35,7 +35,7 @@ from .frames import (
     encode_frame,
     parse_frame_header,
 )
-from .host import HostClient, HostOperation
+from .host import BackgroundHost, BackgroundRootSessionClient, HostClient, HostOperation
 from .manifest import (
     CommandAvailability,
     CompactEvent,
@@ -43,6 +43,9 @@ from .manifest import (
     CustomEventDelivery,
     CustomEventSubscription,
     ExtensionCapability,
+    ExtensionHttpAccess,
+    ExtensionHttpMethod,
+    ExtensionHttpRoute,
     HookMode,
     LifecycleEvent,
     SlashCommand,
@@ -75,6 +78,8 @@ __version__ = "0.1.0"
 __all__ = [
     "CAP_HANDLER_INVOKE",
     "CAP_RUNTIME_PING",
+    "BackgroundHost",
+    "BackgroundRootSessionClient",
     "CancelToken",
     "CommandAvailability",
     "CompactEvent",
@@ -83,6 +88,9 @@ __all__ = [
     "CustomEventSubscription",
     "ErrorPayload",
     "ExtensionCapability",
+    "ExtensionHttpAccess",
+    "ExtensionHttpMethod",
+    "ExtensionHttpRoute",
     "FEATURE_CUSTOM_EVENT_V1",
     "FEATURE_MODEL_STREAM_V1",
     "FEATURE_NESTED_INVOKE_V1",

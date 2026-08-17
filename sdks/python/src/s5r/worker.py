@@ -26,23 +26,27 @@ from .context import (
 )
 from .errors import ErrorPayload, ProtocolError, S5rError, WireErrorCode
 from .frames import FrameTransport, StdioTransport
-from .host import _HostBinding, _current_binding
+from .host import BackgroundHost, _HostBinding, _current_binding
 from .manifest import (
     ALL_CAPABILITIES,
     ALL_CUSTOM_EVENT_DELIVERIES,
+    ALL_EXTENSION_HTTP_METHODS,
     ALL_HOOK_MODES,
     ALL_LIFECYCLE_EVENTS,
     ALL_TRANSPORT_FEATURES,
     CompactEvent,
     CustomEventDeclaration,
     CustomEventSubscription,
+    ExtensionHttpRoute,
     FIXED_HOOK_MODES,
     HookMode,
     LifecycleEvent,
     SlashCommand,
     ToolDefinition,
     ToolMode,
+    extension_http_route_patterns_conflict,
     hook_mode_is_supported,
+    validate_extension_http_route,
 )
 from .protocol import (
     CAP_HANDLER_INVOKE,
@@ -81,7 +85,9 @@ HookHandlerFn = Callable[[Any, WorkerInvocationContext], Awaitable[HandlerResult
 ContinuationHandlerFn = Callable[[Any, WorkerCallContext], Awaitable[HandlerResult]]
 CommandHandlerFn = Callable[[WorkerCommandContext], Awaitable[HandlerResult]]
 CustomEventHandlerFn = Callable[[Any, WorkerCustomEventContext], Awaitable[HandlerResult]]
+HttpHandlerFn = Callable[[Any, WorkerCallContext], Awaitable[Mapping[str, Any]]]
 ActivationHandlerFn = Callable[[Any], Awaitable[None]]
+ShutdownHandlerFn = Callable[[], Awaitable[None]]
 
 # The Rust worker declares all three v1 features; the conformance host requires
 # all of them, so this set is not configurable.
@@ -122,6 +128,9 @@ class Worker:
         self._extension_id = extension_id
         self._version = version
         self._activation: ActivationHandlerFn | None = None
+        self._shutdown: ShutdownHandlerFn | None = None
+        self._background_host_future: asyncio.Future[BackgroundHost] | None = None
+        self._serving = False
         self._capabilities: list[str] = []
         self._transport_features: list[str] = []
         self._tools: dict[str, tuple[ToolPlannerFn | None, ToolHandlerFn]] = {}
@@ -129,17 +138,55 @@ class Worker:
         self._continuation_hooks: dict[str, ContinuationHandlerFn] = {}
         self._commands: dict[str, CommandHandlerFn] = {}
         self._custom_events: dict[str, CustomEventHandlerFn] = {}
+        self._http_routes: dict[str, HttpHandlerFn] = {}
         self._tool_manifest: list[dict[str, Any]] = []
         self._hook_manifest: list[dict[str, Any]] = []
         self._command_manifest: list[dict[str, Any]] = []
         self._custom_event_manifest: list[dict[str, Any]] = []
         self._custom_event_subscription_manifest: list[dict[str, Any]] = []
+        self._http_route_manifest: list[dict[str, Any]] = []
 
     # ── registration ────────────────────────────────────────────────────────
 
     def on_activate(self, handler: ActivationHandlerFn) -> None:
         """Handle the host-owned configuration before this worker goes ready."""
         self._activation = handler
+
+    def on_shutdown(self, handler: ShutdownHandlerFn) -> None:
+        """Register a best-effort cleanup hook that runs once after serving ends.
+
+        The hook runs only after a successful activation and for any driver
+        outcome (clean EOF or error). The host does not wait for it and
+        terminates the process tree after a bounded grace period, so keep it
+        fast. `HostClient` is unavailable inside the hook: use it for
+        worker-local cleanup (flushing files, closing worker-owned
+        connections), not for reporting results back to the host.
+        """
+        self._shutdown = handler
+
+    def background_host(self) -> asyncio.Future[BackgroundHost]:
+        """Register the receiver for the post-activation background host handle.
+
+        The returned future resolves once activation completes, before the
+        message driver starts, with a `BackgroundHost` that carries no turn
+        scope and exposes only the root session domain — safe to hold in
+        `asyncio` background tasks (poll loops, external agents driving root
+        sessions). Must be called inside the worker's event loop before
+        `serve` starts; repeated calls supersede the previous future.
+        """
+        if self._serving:
+            raise S5rError.of(
+                WireErrorCode.INVALID_INPUT,
+                "background_host() must be called before serve() starts",
+            )
+        previous = self._background_host_future
+        if previous is not None and not previous.done():
+            previous.cancel()
+        future: asyncio.Future[BackgroundHost] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._background_host_future = future
+        return future
 
     def capability(self, capability: str) -> None:
         if capability not in ALL_CAPABILITIES:
@@ -316,6 +363,44 @@ class Worker:
         self._custom_event_subscription_manifest.append(subscription.to_manifest())
         return handler
 
+    def http_route(
+        self,
+        route: ExtensionHttpRoute,
+        handler: HttpHandlerFn | None = None,
+    ) -> HttpHandlerFn | Callable[[HttpHandlerFn], HttpHandlerFn]:
+        """Register an HTTP route: manifest declaration and handler in one call.
+
+        Usable directly or as a decorator (`@worker.http_route(route)`). The
+        handler receives the wire `ExtensionHttpRequest` mapping and a
+        `WorkerCallContext` (no session scope), and must return an
+        `ExtensionHttpResponse` mapping `{"status": int, "body": ...}`.
+        """
+        if handler is None:
+            return lambda fn: self.http_route(route, fn)  # type: ignore[return-value]
+        reason = validate_extension_http_route(route)
+        if reason is not None:
+            raise S5rError.of(WireErrorCode.INVALID_HTTP_ROUTE, reason)
+        for entry in self._http_route_manifest:
+            existing = entry["route"]
+            if (
+                existing["access"] == route.access
+                and existing["method"] == route.method
+                and extension_http_route_patterns_conflict(existing["path"], route.path)
+            ):
+                raise S5rError.of(
+                    WireErrorCode.DUPLICATE_REGISTRATION,
+                    f"conflicting HTTP route registration: {route.path}",
+                )
+        handler_name = f"route_{len(self._http_route_manifest)}"
+        self._http_routes[handler_name] = handler
+        self._http_route_manifest.append(
+            {
+                "route": route.to_manifest(),
+                "handler_id": f"{self._extension_id}:http:{handler_name}",
+            }
+        )
+        return handler
+
     def _fixed_hook(self, event: str, handler: HookHandlerFn) -> HookHandlerFn:
         return self._register_hook(event, FIXED_HOOK_MODES[event], handler)
 
@@ -351,15 +436,73 @@ class Worker:
 
     async def serve(self, transport: FrameTransport) -> None:
         """Handshake, then run the message driver over `transport`."""
-        negotiated, host_operations = await self._accept_initialize(transport)
-        await self._accept_activation(transport)
+        self._serving = True
+        try:
+            negotiated, host_operations = await self._accept_initialize(transport)
+            await self._accept_activation(transport)
+        except BaseException as error:
+            self._fail_background_host(error)
+            raise
         driver = _Driver(
             transport=transport,
             worker=self,
             negotiated_features=negotiated,
             host_operations=host_operations,
         )
-        await driver.run()
+        self._deliver_background_host(driver)
+        driver_error: BaseException | None = None
+        try:
+            await driver.run()
+        except BaseException as error:
+            driver_error = error
+        await self._run_shutdown_hook(driver_error)
+
+    def _deliver_background_host(self, driver: _Driver) -> None:
+        future = self._background_host_future
+        self._background_host_future = None
+        if future is None or future.done():
+            return
+        # Root binding: parent_invoke_id stays None, so the host treats these
+        # calls as a detached context.
+        future.set_result(
+            BackgroundHost(
+                invoke=lambda operation, input: driver.invoke(operation, input),
+                host_operations=frozenset(driver.host_operations),
+            )
+        )
+
+    def _fail_background_host(self, error: BaseException) -> None:
+        future = self._background_host_future
+        self._background_host_future = None
+        if future is not None and not future.done():
+            future.set_exception(error)
+
+    async def _run_shutdown_hook(self, driver_error: BaseException | None) -> None:
+        """Run the shutdown hook after the driver ends.
+
+        The hook's error surfaces only when the driver itself finished
+        cleanly, keeping the driver's root-cause error authoritative.
+        """
+        if self._shutdown is None:
+            if driver_error is not None:
+                raise driver_error
+            return
+        shutdown_error: S5rError | None = None
+        try:
+            await _resolve(self._shutdown())
+        except S5rError as error:
+            shutdown_error = error
+        except Exception as error:
+            shutdown_error = S5rError(
+                ErrorPayload(
+                    WireErrorCode.INTERNAL_ERROR,
+                    f"worker shutdown failed: {error}",
+                )
+            )
+        if driver_error is not None:
+            raise driver_error
+        if shutdown_error is not None:
+            raise shutdown_error
 
     async def _accept_initialize(self, transport: FrameTransport) -> tuple[set[str], list[str]]:
         try:
@@ -467,7 +610,7 @@ class Worker:
             "tools": list(self._tool_manifest),
             "hooks": list(self._hook_manifest),
             "commands": list(self._command_manifest),
-            "http_routes": [],
+            "http_routes": list(self._http_route_manifest),
             "custom_events": list(self._custom_event_manifest),
             "custom_event_subscriptions": list(self._custom_event_subscription_manifest),
         }
@@ -556,7 +699,7 @@ class Worker:
         if kind == "command":
             return await self._dispatch_command(name, event, facts, token)
         if kind == "http":
-            raise S5rError.of(WireErrorCode.UNKNOWN_HANDLER, f"unknown HTTP route: {name}")
+            return await self._dispatch_http(name, event, token)
         return await self._dispatch_custom_event(name, event, facts, token)
 
     async def _dispatch_tool(
@@ -719,6 +862,21 @@ class Worker:
         )
         return _ensure_handler_result(await _resolve(handler(event, context)))
 
+    async def _dispatch_http(
+        self, name: str, event: Any, token: CancelToken
+    ) -> HandlerResult:
+        handler = self._http_routes.get(name)
+        if handler is None:
+            raise S5rError.of(WireErrorCode.UNKNOWN_HANDLER, f"unknown HTTP route: {name}")
+        request = _parse_http_request(event)
+        context = WorkerCallContext(
+            extension_id=self._extension_id, cancel_token=token
+        )
+        response = await _resolve(handler(request, context))
+        return HandlerResult(
+            effect=HandlerEffect.HTTP_RESPONSE, data=_http_response_json(response)
+        )
+
 
 def _split_handler_id(handler_id: Any) -> tuple[str, str, str] | None:
     if not isinstance(handler_id, str):
@@ -730,6 +888,85 @@ def _split_handler_id(handler_id: Any) -> tuple[str, str, str] | None:
     if not owner or not name or kind not in _HANDLER_ID_KINDS:
         return None
     return owner, kind, name
+
+
+_HTTP_REQUEST_FIELDS = frozenset({"method", "path", "path_params", "query", "body"})
+
+
+def _parse_http_request(event: Any) -> dict[str, Any]:
+    """Strict-decode a wire `ExtensionHttpRequest`, serde defaults applied."""
+    if not isinstance(event, Mapping):
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            "invalid HTTP request payload: expected an object",
+        )
+    unknown = set(event) - _HTTP_REQUEST_FIELDS
+    if unknown:
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            f"invalid HTTP request payload: unknown fields {sorted(unknown)}",
+        )
+    method = event.get("method")
+    if method not in ALL_EXTENSION_HTTP_METHODS:
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            f"invalid HTTP request payload: unknown method {method!r}",
+        )
+    path = event.get("path")
+    if not isinstance(path, str):
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            "invalid HTTP request payload: path must be a string",
+        )
+    path_params = event.get("path_params", {})
+    if not isinstance(path_params, Mapping) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in path_params.items()
+    ):
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            "invalid HTTP request payload: path_params must map strings to strings",
+        )
+    query = event.get("query")
+    if query is not None and not isinstance(query, str):
+        raise S5rError.of(
+            WireErrorCode.INVALID_INPUT,
+            "invalid HTTP request payload: query must be a string",
+        )
+    return {
+        "method": method,
+        "path": path,
+        "path_params": dict(path_params),
+        "query": query,
+        "body": event.get("body"),
+    }
+
+
+def _http_response_json(response: Any) -> dict[str, Any]:
+    """Validate a handler-returned `ExtensionHttpResponse` for the wire."""
+    if not isinstance(response, Mapping):
+        raise S5rError.of(
+            WireErrorCode.SERIALIZATION_FAILED,
+            "HTTP handler must return a response mapping with status and body",
+        )
+    unknown = set(response) - {"status", "body"}
+    if unknown:
+        raise S5rError.of(
+            WireErrorCode.SERIALIZATION_FAILED,
+            f"HTTP response has unknown fields {sorted(unknown)}",
+        )
+    if "status" not in response or "body" not in response:
+        raise S5rError.of(
+            WireErrorCode.SERIALIZATION_FAILED,
+            "HTTP response requires status and body",
+        )
+    status = response["status"]
+    if not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599:
+        raise S5rError.of(
+            WireErrorCode.SERIALIZATION_FAILED,
+            "extension HTTP status must be between 100 and 599",
+        )
+    return {"status": status, "body": response["body"]}
 
 
 def _parse_tool_scope(scope: Any) -> tuple[str, str, str | None, str | None]:
@@ -822,6 +1059,7 @@ class _Driver:
         self._next_request_id = 0
         self._write_error: BaseException | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._closed = False
 
     async def run(self) -> None:
         self._reader_task = asyncio.current_task()
@@ -1095,6 +1333,8 @@ class _Driver:
     def _validate_outbound(
         self, operation: str, parent_invoke_id: str | None, *, stream: bool
     ) -> None:
+        if self._closed:
+            raise S5rError.of(WireErrorCode.PEER_CLOSED, "peer driver is closed")
         error = self._negotiation_error(
             operation,
             parent_invoke_id,
@@ -1168,6 +1408,9 @@ class _Driver:
                 self._reader_task.cancel()
 
     async def _shutdown(self, writer: asyncio.Task[None]) -> None:
+        # Reject new outbound calls first: once the driver stops, a queued
+        # invoke would never be answered (Rust's PeerHandle fails closed).
+        self._closed = True
         for task, token in self._inbound.values():
             token.cancel("peer_driver_stopped")
             task.cancel()
