@@ -585,6 +585,55 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
 }
 
 #[tokio::test]
+async fn stale_repair_does_not_resume_a_step_after_a_durable_error() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+    let turn_id = new_turn_id();
+
+    for payload in [
+        DurableEventPayload::TurnStarted,
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: "fail".into(),
+            attachments: Vec::new(),
+            accepted_seq: None,
+        },
+        DurableEventPayload::StepStarted {
+            step_index: 0,
+            attempt: 1,
+        },
+        DurableEventPayload::ErrorOccurred {
+            code: 500,
+            message: "durable failure".into(),
+            recoverable: false,
+        },
+    ] {
+        store
+            .append_event(DurableEvent::new(
+                sid.clone(),
+                Some(turn_id.clone()),
+                payload,
+            ))
+            .await
+            .unwrap();
+    }
+
+    scheduler.repair_stale(&sid).await.unwrap();
+
+    assert!(!scheduler.registry().has_active(&sid));
+    let events = store.replay_events(&sid).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, DurableEventPayload::StepStarted { .. }))
+            .count(),
+        1,
+        "a durable error is terminal for stale-step resumption"
+    );
+}
+
+#[tokio::test]
 async fn queued_input_retries_after_a_transient_start_failure() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let release = Arc::new(Semaphore::new(0));

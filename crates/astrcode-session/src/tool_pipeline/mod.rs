@@ -7,16 +7,12 @@ mod prepare;
 
 use std::sync::Arc;
 
-use astrcode_core::tool::{
-    ToolDefinition, ToolResultArtifactReader,
-    access::{FileOperation, ResourceAccess},
-};
+use astrcode_core::tool::{ToolDefinition, ToolResultArtifactReader};
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     ToolRegistry,
-    early_tool_scheduler::EarlyToolScheduler,
     session::Session,
     tool_exec::{ToolCallRuntimeContext, TurnToolContext},
     turn_context::SharedTurnContext,
@@ -32,21 +28,6 @@ pub(crate) struct ToolCalls {
 }
 
 impl ToolCalls {
-    pub(crate) fn can_execute_early(
-        &self,
-        call: &crate::tool_types::PreparedToolInvocation,
-    ) -> bool {
-        call.plan.resources().iter().all(|access| {
-            matches!(
-                access,
-                ResourceAccess::File {
-                    operation: FileOperation::Read | FileOperation::Search,
-                    ..
-                }
-            )
-        })
-    }
-
     pub(crate) fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
@@ -96,19 +77,5 @@ impl ToolCalls {
             ),
             cancellation_token: self.cancellation_token.clone(),
         }
-    }
-
-    /// 创建流式工具执行调度器。
-    pub(crate) fn create_early_scheduler(
-        &self,
-        tools: Vec<ToolDefinition>,
-        max_parallel: usize,
-    ) -> EarlyToolScheduler {
-        let tools_arc: Arc<[ToolDefinition]> = Arc::from(tools);
-        EarlyToolScheduler::new(
-            Arc::clone(&self.tool_registry),
-            self.make_runtime_context(tools_arc),
-            max_parallel,
-        )
     }
 }

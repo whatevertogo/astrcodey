@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use astrcode_core::event::EventSendError;
 use serde::{Deserialize, Serialize};
 
+use crate::WireErrorCode;
 pub use crate::wire::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 
 // ─── Tool hook target ──────────────────────────────────────────────────
@@ -231,6 +232,17 @@ pub enum ExtensionError {
     },
     #[error("extension error: {0}")]
     Internal(String),
+}
+
+impl ExtensionError {
+    /// 构造 [`InvalidInput`](Self::InvalidInput) 错误，wire code 固定为 `invalid_input`。
+    pub fn invalid_input(message: impl Into<String>, hint: impl Into<Option<String>>) -> Self {
+        Self::InvalidInput {
+            code: WireErrorCode::InvalidInput.as_str().into(),
+            message: message.into(),
+            hint: hint.into(),
+        }
+    }
 }
 
 // ─── ContinueAfterStop limit ───────────────────────────────────────────

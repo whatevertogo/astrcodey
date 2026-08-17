@@ -156,7 +156,20 @@ fn push_recent<T>(records: &mut Vec<T>, record: T) {
     records.push(record);
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+/// 校验 event consumer id 非空；磁盘与内存存储实现共用。
+pub(crate) fn validate_event_consumer_id(consumer_id: &str) -> Result<(), StorageError> {
+    if consumer_id.is_empty() {
+        return Err(StorageError::InvalidId(
+            "event consumer id cannot be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// 按字节上限截断字符串，回退到最后一个 UTF-8 字符边界。
+///
+/// 供消费方审计记录与 event log 解析预览共用。
+pub(crate) fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
@@ -200,6 +213,31 @@ pub trait EventReader: Send + Sync {
         let mut events = self.replay_events(session_id).await?;
         events.truncate(max_events);
         Ok(events)
+    }
+
+    async fn replay_events_active_or_recycled(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.replay_events(session_id).await
+    }
+
+    async fn replay_from_active_or_recycled_limited(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.replay_from_limited(session_id, cursor, max_events)
+            .await
+    }
+
+    async fn replay_from_start_active_or_recycled_limited(
+        &self,
+        session_id: &SessionId,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.replay_from_start_limited(session_id, max_events).await
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;

@@ -13,7 +13,7 @@ use astrcode_storage::config_store::FileConfigStore;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use super::{ConfigManager, ConfigUpdateError};
+use super::{ConfigManager, ConfigUpdateError, PreparedConfigError};
 
 const CODING_EXTENSION_ID: &str = "astrcode-coding";
 
@@ -159,7 +159,7 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
         Default::default(),
     )
     .unwrap();
-    manager.initialize_extensions::<()>().await.unwrap();
+    manager.initialize_extensions().await.unwrap();
 
     let invalid: Result<(), ConfigUpdateError<()>> = manager
         .update_and_save(|candidate| {
@@ -184,7 +184,7 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
 
     let mut invalid_reload = test_config();
     set_coding_timeout(&mut invalid_reload, 0);
-    let invalid_reload: Result<(), ConfigUpdateError<()>> =
+    let invalid_reload: Result<(), PreparedConfigError> =
         manager.apply_loaded_config(invalid_reload).await;
     assert!(matches!(
         invalid_reload,
@@ -242,7 +242,7 @@ async fn cancelled_config_request_is_owned_through_publication_and_shutdown() {
     )
     .unwrap();
     let manager = Arc::new(manager);
-    manager.initialize_extensions::<()>().await.unwrap();
+    manager.initialize_extensions().await.unwrap();
 
     let save_entered = store.save_entered.notified();
     let update = tokio::spawn({

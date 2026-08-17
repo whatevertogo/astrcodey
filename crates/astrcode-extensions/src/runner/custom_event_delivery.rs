@@ -80,7 +80,7 @@ pub(super) struct CustomEventLaneId {
 
 pub(super) struct CustomEventLane {
     sender: mpsc::UnboundedSender<CustomEventLaneCommand>,
-    durable_reconciliation_queued: AtomicBool,
+    full_reconciliation_queued: AtomicBool,
     consumer: Arc<CustomEventConsumer>,
     stopped: tokio_util::sync::CancellationToken,
 }
@@ -103,6 +103,7 @@ enum CustomEventLaneCommand {
     ReconcileDurable {
         _lane: Arc<CustomEventLane>,
         session: CustomEventSession,
+        through_seq: Option<u64>,
     },
 }
 
@@ -247,11 +248,17 @@ async fn run_custom_event_lane(
                 }
                 drop(_permit);
             },
-            CustomEventLaneCommand::ReconcileDurable { _lane, session } => {
-                _lane
-                    .durable_reconciliation_queued
-                    .store(false, Ordering::Release);
-                reconcile_durable_custom_events(&consumer, &_lane, &session).await;
+            CustomEventLaneCommand::ReconcileDurable {
+                _lane,
+                session,
+                through_seq,
+            } => {
+                if through_seq.is_none() {
+                    _lane
+                        .full_reconciliation_queued
+                        .store(false, Ordering::Release);
+                }
+                reconcile_durable_custom_events(&consumer, &_lane, &session, through_seq).await;
             },
         }
     }
@@ -261,10 +268,11 @@ async fn reconcile_durable_custom_events(
     consumer: &CustomEventConsumer,
     lane: &Arc<CustomEventLane>,
     session: &CustomEventSession,
+    through_seq: Option<u64>,
 ) {
     let mut retry_delay = CUSTOM_EVENT_RETRY_INITIAL_DELAY;
     loop {
-        if reconcile_durable_custom_events_once(consumer, lane, session).await {
+        if reconcile_durable_custom_events_once(consumer, lane, session, through_seq).await {
             return;
         }
         tokio::select! {
@@ -281,6 +289,7 @@ async fn reconcile_durable_custom_events_once(
     consumer: &CustomEventConsumer,
     lane: &Arc<CustomEventLane>,
     session: &CustomEventSession,
+    through_seq: Option<u64>,
 ) -> bool {
     let state = match session
         .event_store
@@ -318,7 +327,10 @@ async fn reconcile_durable_custom_events_once(
         },
     };
     let stored_events = match stored_events {
-        Ok(events) => events,
+        Ok(events) => events
+            .into_iter()
+            .take_while(|event| through_seq.is_none_or(|through_seq| event.seq <= through_seq))
+            .collect::<Vec<_>>(),
         Err(error) => {
             consumer.metrics.record_failure();
             tracing::warn!(
@@ -682,7 +694,7 @@ impl ExtensionRunner {
                 continue;
             };
             if durable {
-                if !Self::signal_durable_custom_events(&lane, session.clone()) {
+                if !Self::signal_durable_custom_events(&lane, session.clone(), event.seq) {
                     fully_admitted = false;
                 }
                 continue;
@@ -737,7 +749,7 @@ impl ExtensionRunner {
                 fully_admitted = false;
                 continue;
             };
-            if !Self::signal_durable_custom_events(&lane, session.clone()) {
+            if !Self::signal_durable_custom_events(&lane, session.clone(), None) {
                 fully_admitted = false;
             }
         }
@@ -782,7 +794,7 @@ impl ExtensionRunner {
         let stopped = tokio_util::sync::CancellationToken::new();
         let lane = Arc::new(CustomEventLane {
             sender,
-            durable_reconciliation_queued: AtomicBool::new(false),
+            full_reconciliation_queued: AtomicBool::new(false),
             consumer: Arc::clone(&consumer),
             stopped: stopped.clone(),
         });
@@ -823,11 +835,9 @@ impl ExtensionRunner {
     pub(super) fn signal_durable_custom_events(
         lane: &Arc<CustomEventLane>,
         session: CustomEventSession,
+        through_seq: Option<u64>,
     ) -> bool {
-        if lane
-            .durable_reconciliation_queued
-            .swap(true, Ordering::AcqRel)
-        {
+        if through_seq.is_none() && lane.full_reconciliation_queued.swap(true, Ordering::AcqRel) {
             return true;
         }
         if lane
@@ -835,13 +845,16 @@ impl ExtensionRunner {
             .send(CustomEventLaneCommand::ReconcileDurable {
                 _lane: Arc::clone(lane),
                 session,
+                through_seq,
             })
             .is_ok()
         {
             return true;
         }
-        lane.durable_reconciliation_queued
-            .store(false, Ordering::Release);
+        if through_seq.is_none() {
+            lane.full_reconciliation_queued
+                .store(false, Ordering::Release);
+        }
         false
     }
 

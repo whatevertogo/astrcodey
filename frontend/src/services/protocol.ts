@@ -250,6 +250,14 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
   switch (kind) {
     case 'appendBlock':
       return { kind, block: decodeConversationBlock(object.block) }
+    case 'appendTransientBlock':
+      return {
+        kind,
+        turnId: requiredString(object, 'turnId'),
+        block: decodeConversationBlock(object.block),
+      }
+    case 'clearTransientBlocks':
+      return { kind, turnId: requiredString(object, 'turnId') }
     case 'patchBlock':
       return {
         kind,

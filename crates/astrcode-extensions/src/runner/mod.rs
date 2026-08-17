@@ -400,7 +400,7 @@ impl PreparedExtensionGeneration {
         };
         let index = Arc::new(build_handler_index(&next, generation));
         for hosted in &next {
-            hosted.public_http_dispatcher.bind_once(&index);
+            hosted.public_http_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
         *active = next;
@@ -1332,7 +1332,7 @@ impl ExtensionRunner {
         };
         let index = Arc::new(build_handler_index(extensions, generation));
         for hosted in extensions {
-            hosted.public_http_dispatcher.bind_once(&index);
+            hosted.public_http_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
         before_stable();

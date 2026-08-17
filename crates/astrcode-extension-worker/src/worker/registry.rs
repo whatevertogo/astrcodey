@@ -1092,8 +1092,7 @@ mod tests {
                 crate::builder::worker_tool("  review  ")
                     .strict()
                     .execution_mode(crate::tool::ExecutionMode::Sequential)
-                    .build()
-                    .into(),
+                    .build(),
                 Arc::clone(&tool_planner),
                 Arc::clone(&tool_handler),
             )
@@ -1161,7 +1160,7 @@ mod tests {
         assert_eq!(
             registry
                 .register_tool(
-                    crate::builder::worker_tool("review").build().into(),
+                    crate::builder::worker_tool("review").build(),
                     tool_planner,
                     tool_handler,
                 )

@@ -233,7 +233,7 @@ impl ExtensionRunner {
                     target.subscription,
                 ))
             })?;
-        if Self::signal_durable_custom_events(&lane, target.session.clone()) {
+        if Self::signal_durable_custom_events(&lane, target.session.clone(), None) {
             Ok(())
         } else {
             Err(CustomEventConsumerControlError::ConsumerUnavailable(

@@ -466,12 +466,12 @@ impl LlmProvider for DelayThenCompleteLlm {
     }
 }
 
-struct EarlyCompletedToolLlm {
+struct CompletedToolCallLlm {
     calls: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for EarlyCompletedToolLlm {
+impl LlmProvider for CompletedToolCallLlm {
     async fn generate_request(
         &self,
         _request: astrcode_core::llm::LlmRequest,
@@ -542,14 +542,14 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 }
 
 #[tokio::test]
-async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
-    let (session, store, sid) = common::spawn_session_with_store(Arc::new(EarlyCompletedToolLlm {
+async fn ssot_tool_request_is_durable_after_assistant_message() {
+    let (session, store, sid) = common::spawn_session_with_store(Arc::new(CompletedToolCallLlm {
         calls: AtomicUsize::new(0),
     }))
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger early tool".into(), turn_id, None)
+        .submit("trigger tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -570,8 +570,7 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
         .expect("tool request should be durable");
     assert!(
         assistant_completed_index < tool_requested_index,
-        "early tool preparation must not persist ToolCallRequested before \
-         assistant_message_completed"
+        "ToolCallRequested must not be persisted before assistant_message_completed"
     );
 
     let provider_messages = session.read_model().await.unwrap().provider_messages();

@@ -1,6 +1,9 @@
 //! Generation-owned workers for memory persistence and background extraction.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, OnceLock},
+};
 
 use astrcode_extension_sdk::{
     extension::{ExtensionError, ExtensionTasks},
@@ -54,9 +57,7 @@ struct PipelineRequest {
 
 #[derive(Default)]
 struct PipelineQueueState {
-    running: bool,
-    ready: Option<PipelineRequest>,
-    pending: Option<PipelineRequest>,
+    ready: VecDeque<PipelineRequest>,
 }
 
 #[derive(Default)]
@@ -79,19 +80,26 @@ impl Drop for PipelineWork<'_> {
 impl PipelineQueue {
     fn submit(&self, request: PipelineRequest) {
         let mut state = self.state.lock();
-        if state.running {
-            state.pending = Some(request);
-        } else {
-            state.running = true;
-            state.ready = Some(request);
-            self.changed.notify_one();
+        if let Some(queued) = state
+            .ready
+            .iter_mut()
+            .find(|queued| queued.working_dir == request.working_dir)
+        {
+            *queued = request;
+            return;
         }
+        state.ready.push_back(request);
+        self.changed.notify_one();
     }
 
     async fn next(&self) -> PipelineWork<'_> {
         loop {
             let changed = self.changed.notified();
-            if let Some(request) = self.state.lock().ready.take() {
+            let request = {
+                let mut state = self.state.lock();
+                state.ready.pop_front()
+            };
+            if let Some(request) = request {
                 return PipelineWork {
                     request,
                     queue: self,
@@ -102,12 +110,9 @@ impl PipelineQueue {
     }
 
     fn complete(&self) {
-        let mut state = self.state.lock();
-        if let Some(request) = state.pending.take() {
-            state.ready = Some(request);
+        let state = self.state.lock();
+        if !state.ready.is_empty() {
             self.changed.notify_one();
-        } else {
-            state.running = false;
         }
     }
 }
@@ -446,17 +451,17 @@ mod tests {
         });
         queue.submit(PipelineRequest {
             session_id: "s3".into(),
-            working_dir: "/c".into(),
+            working_dir: "/a".into(),
         });
 
         let active = queue.next().await;
-        assert_eq!(active.request.session_id, "s1");
+        assert_eq!(active.request.session_id, "s3");
         assert_eq!(active.request.working_dir, "/a");
 
         drop(active);
         let pending = queue.next().await;
-        assert_eq!(pending.request.session_id, "s3");
-        assert_eq!(pending.request.working_dir, "/c");
+        assert_eq!(pending.request.session_id, "s2");
+        assert_eq!(pending.request.working_dir, "/b");
         drop(pending);
 
         queue.submit(PipelineRequest {

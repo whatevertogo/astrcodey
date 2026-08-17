@@ -20,6 +20,7 @@ type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 export type ConversationRenderState = Pick<
   AppState,
   | 'blocks'
+  | 'transientBlockOwners'
   | 'control'
   | 'cursor'
   | 'compactSubmitting'
@@ -138,6 +139,8 @@ export function reduceConversationDeltas(
   cursor?: string | null
 ): ConversationRenderPatch {
   let blocks = current.blocks
+  const initialTransientBlockOwners = current.transientBlockOwners ?? {}
+  let transientBlockOwners = initialTransientBlockOwners
   let control = current.control
   let agentSessions = current.agentSessions
   let statusItems = current.statusItems
@@ -152,6 +155,12 @@ export function reduceConversationDeltas(
     if (pendingBlockDeltas.length === 0) return
     blocks = applyCoalescedDeltas(blocks, pendingBlockDeltas)
     pendingBlockDeltas = []
+  }
+
+  const promoteTransientBlock = (blockId: string) => {
+    if (transientBlockOwners[blockId] === undefined) return
+    transientBlockOwners = { ...transientBlockOwners }
+    delete transientBlockOwners[blockId]
   }
 
   for (const coalesced of coalesceDeltas(deltas)) {
@@ -169,11 +178,36 @@ export function reduceConversationDeltas(
             ? blocks.filter((block) => block.kind !== 'compactSummary')
             : blocks
         blocks = upsertBlock(baseBlocks, delta.block)
+        promoteTransientBlock(delta.block.id)
+        break
+      }
+
+      case 'appendTransientBlock': {
+        blocks = upsertBlock(blocks, delta.block)
+        if (transientBlockOwners[delta.block.id] !== delta.turnId) {
+          transientBlockOwners = {
+            ...transientBlockOwners,
+            [delta.block.id]: delta.turnId,
+          }
+        }
+        break
+      }
+
+      case 'clearTransientBlocks': {
+        const ownedIds = Object.entries(transientBlockOwners)
+          .filter(([, turnId]) => turnId === delta.turnId)
+          .map(([blockId]) => blockId)
+        if (ownedIds.length === 0) break
+        const owned = new Set(ownedIds)
+        blocks = blocks.filter((block) => !owned.has(block.id))
+        transientBlockOwners = { ...transientBlockOwners }
+        for (const blockId of ownedIds) delete transientBlockOwners[blockId]
         break
       }
 
       case 'finalizeBlock':
         blocks = upsertBlock(blocks, delta.block)
+        promoteTransientBlock(delta.block.id)
         break
 
       case 'resetBlock':
@@ -346,6 +380,9 @@ export function reduceConversationDeltas(
 
   const patch: ConversationRenderPatch = {}
   if (blocks !== current.blocks) patch.blocks = blocks
+  if (transientBlockOwners !== initialTransientBlockOwners) {
+    patch.transientBlockOwners = transientBlockOwners
+  }
   if (control !== current.control) patch.control = control
   if (agentSessions !== current.agentSessions) {
     patch.agentSessions = agentSessions

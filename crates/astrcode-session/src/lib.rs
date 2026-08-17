@@ -4,7 +4,6 @@
 
 pub mod compaction;
 pub(crate) mod deferred_tools;
-pub(crate) mod early_tool_scheduler;
 pub(crate) mod llm_stream;
 pub mod payload;
 mod perf_snapshot;

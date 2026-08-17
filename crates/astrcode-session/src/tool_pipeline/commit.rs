@@ -9,7 +9,7 @@ use astrcode_extension_sdk::extension::{
 
 use super::{
     ToolCalls,
-    events::{finish_tool_call, missing_tool_outcome, tool_result_for_output},
+    events::{finish_tool_call, missing_tool_outcome},
 };
 use crate::{
     tool_results::{
@@ -98,7 +98,6 @@ impl ToolCalls {
             )
             .await?;
             uncommitted_calls.remove(&item.call.call_id);
-            state.record_tool_result(tool_result_for_output(&item.outcome));
         }
 
         Ok(discovered_tools)

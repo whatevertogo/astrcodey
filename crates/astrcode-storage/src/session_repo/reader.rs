@@ -67,6 +67,59 @@ impl EventReader for FileSystemSessionRepository {
         meta.log.replay_from_start_limited(max_events).await
     }
 
+    async fn replay_events_active_or_recycled(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        match self.replay_events(session_id).await {
+            Ok(events) => Ok(events),
+            Err(StorageError::NotFound(_)) => self.recycled_events(session_id).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn replay_from_active_or_recycled_limited(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        match self
+            .replay_from_limited(session_id, cursor, max_events)
+            .await
+        {
+            Ok(events) => Ok(events),
+            Err(StorageError::NotFound(_)) => {
+                let seq = parse_cursor(cursor)?;
+                Ok(self
+                    .recycled_events(session_id)
+                    .await?
+                    .into_iter()
+                    .filter(|event| event.seq > seq)
+                    .take(max_events)
+                    .collect())
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn replay_from_start_active_or_recycled_limited(
+        &self,
+        session_id: &SessionId,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        match self.replay_from_start_limited(session_id, max_events).await {
+            Ok(events) => Ok(events),
+            Err(StorageError::NotFound(_)) => Ok(self
+                .recycled_events(session_id)
+                .await?
+                .into_iter()
+                .take(max_events)
+                .collect()),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         Ok(self
             .list_root_session_locations()
@@ -121,6 +174,18 @@ impl SessionReader for FileSystemSessionRepository {
 }
 
 impl FileSystemSessionRepository {
+    async fn recycled_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        validate_storage_session_id(session_id)?;
+        let recycled_dir = self
+            .find_recycled_session_dir(session_id)
+            .await
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        EventLog::replay_read_only(Self::event_log_path(&recycled_dir, session_id)).await
+    }
+
     async fn summaries_for_locations(
         &self,
         locations: BTreeMap<SessionId, PathBuf>,

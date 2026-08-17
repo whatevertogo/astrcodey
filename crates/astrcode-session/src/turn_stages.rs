@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_shared_messages},
-    tool::{ToolDefinition, ToolResult},
+    tool::ToolDefinition,
 };
 use astrcode_session_projection::ActiveStepView;
 
@@ -21,7 +21,6 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct TurnTranscript {
     output_text: String,
-    tool_results: Vec<ToolResult>,
     latest_provider_response: Option<LlmMessage>,
 }
 
@@ -91,10 +90,6 @@ impl TurnTranscript {
         self.latest_provider_response = None;
     }
 
-    pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
-        self.tool_results.push(result);
-    }
-
     pub(crate) fn append_final_text(&mut self, text: &str) {
         self.output_text.push_str(text);
     }
@@ -107,11 +102,8 @@ impl TurnTranscript {
         self.output_text = text;
     }
 
-    pub(crate) fn take_output_parts(&mut self) -> (String, Vec<ToolResult>) {
-        (
-            std::mem::take(&mut self.output_text),
-            std::mem::take(&mut self.tool_results),
-        )
+    pub(crate) fn take_output_text(&mut self) -> String {
+        std::mem::take(&mut self.output_text)
     }
 
     pub(crate) fn provider_response_messages(
@@ -223,10 +215,6 @@ impl TurnState {
         self.same_input_tokens_streak
     }
 
-    pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
-        self.transcript.record_tool_result(result);
-    }
-
     pub(crate) fn append_final_text(&mut self, text: &str) {
         self.transcript.append_final_text(text);
     }
@@ -269,8 +257,8 @@ impl TurnState {
         self.reactive_compact_used = true;
     }
 
-    pub(crate) fn take_output_parts(&mut self) -> (String, Vec<ToolResult>) {
-        self.transcript.take_output_parts()
+    pub(crate) fn take_output_text(&mut self) -> String {
+        self.transcript.take_output_text()
     }
 
     pub(crate) fn all_tool_snapshots(&self) -> &[ToolSnapshot] {

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use astrcode_core::config::defaults::extension_data_dir;
 
+use super::ExtensionError;
+
 /// Persistence locations already namespaced to one extension.
 ///
 /// Authors never provide an extension id when asking for a path. The runtime derives both
@@ -35,6 +37,11 @@ impl ExtensionPaths {
         self.session_data_dir
             .as_deref()
             .ok_or(ExtensionPathError::SessionContextUnavailable)
+    }
+
+    /// 返回 session 数据目录，缺省时映射为 [`ExtensionError`]。
+    pub fn require_session_data_dir(&self) -> Result<&Path, ExtensionError> {
+        self.session_data_dir().map_err(ExtensionError::from)
     }
 }
 

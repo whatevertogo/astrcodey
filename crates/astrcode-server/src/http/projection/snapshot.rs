@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto, ToolApprovalDto,
+    ToolCallStatusDto,
 };
 use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
@@ -37,12 +38,17 @@ pub(in crate::http) fn conversation_to_dto(
         &session.presentation.artifacts,
         latest_compaction.map(|compaction| compaction.source_seq),
     ));
+    if session.execution.unsettled_turn_id.is_none() {
+        finalize_orphaned_tool_blocks(&mut blocks);
+    }
     apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
     // 需要从 runtime 的 live 投影补充，让重连客户端看到已流出的文本。
-    if let Some(msg) = streaming {
+    if session.execution.unsettled_turn_id.is_some()
+        && let Some(msg) = streaming
+    {
         blocks.push(streaming_assistant_block(
             msg.message_id.clone(),
             msg.text.clone(),
@@ -66,6 +72,21 @@ pub(in crate::http) fn conversation_to_dto(
             .iter()
             .map(agent_session_link_to_dto)
             .collect(),
+    }
+}
+
+fn finalize_orphaned_tool_blocks(blocks: &mut [ConversationBlockDto]) {
+    for block in blocks {
+        let ConversationBlockDto::ToolCall { text, status, .. } = block else {
+            continue;
+        };
+        if *status != ToolCallStatusDto::Streaming {
+            continue;
+        }
+        *status = ToolCallStatusDto::Failed;
+        if text.is_empty() {
+            *text = "tool execution interrupted before completion".into();
+        }
     }
 }
 
@@ -145,6 +166,7 @@ mod tests {
         arguments: serde_json::Value,
     ) -> SessionReadModel {
         let mut session = session_read_model(session_id);
+        session.execution.unsettled_turn_id = Some("turn-1".into());
         session
             .model_context
             .messages
@@ -164,6 +186,40 @@ mod tests {
                 origin: None,
             });
         session
+    }
+
+    #[test]
+    fn closed_turn_projects_unanswered_tool_call_as_interrupted() {
+        let mut session = session_with_tool_call(
+            "session-interrupted",
+            "tool-interrupted",
+            "read",
+            serde_json::json!({ "path": "README.md" }),
+        );
+        session.execution.unsettled_turn_id = None;
+
+        let dto = conversation_to_dto(&session, None);
+
+        assert!(matches!(
+            dto.blocks.as_slice(),
+            [ConversationBlockDto::ToolCall { status, text, .. }]
+                if *status == ToolCallStatusDto::Failed
+                    && text == "tool execution interrupted before completion"
+        ));
+    }
+
+    #[test]
+    fn closed_turn_ignores_stale_runtime_streaming_snapshot() {
+        let session = session_read_model("session-closed");
+        let streaming = StreamingSnapshot {
+            message_id: "assistant-stale".into(),
+            text: "partial answer".into(),
+            reasoning_content: None,
+        };
+
+        let dto = conversation_to_dto(&session, Some(&streaming));
+
+        assert!(dto.blocks.is_empty());
     }
 
     #[test]

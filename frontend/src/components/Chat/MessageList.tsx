@@ -28,6 +28,16 @@ interface MessageListProps {
   sessionId: string | null
 }
 
+function sameBlockReferences<T>(left: T[] | null, right: T[] | null) {
+  if (left === right) return true
+  return (
+    left != null &&
+    right != null &&
+    left.length === right.length &&
+    left.every((block, index) => block === right[index])
+  )
+}
+
 function sameRenderedItem(left: MessageListItem, right: MessageListItem) {
   if (left.type !== right.type || left.id !== right.id) return false
   if (left.type === 'forkRow') return true
@@ -38,8 +48,8 @@ function sameRenderedItem(left: MessageListItem, right: MessageListItem) {
     return false
   }
   return (
-    left.blocks.length === right.blocks.length &&
-    left.blocks.every((block, index) => block === right.blocks[index])
+    sameBlockReferences(left.blocks, right.blocks) &&
+    sameBlockReferences(left.actionBlocks, right.actionBlocks)
   )
 }
 
@@ -75,7 +85,11 @@ const BlockRenderer = memo(
     return (
       <div className="mx-auto w-[min(100%,var(--layout-content-max-width))] min-w-0 px-[var(--layout-content-inset-x)]">
         {item.type === 'assistantRun' ? (
-          <AssistantRunMessage blocks={item.blocks} sessionId={sessionId} />
+          <AssistantRunMessage
+            blocks={item.blocks}
+            actionBlocks={item.actionBlocks}
+            sessionId={sessionId}
+          />
         ) : item.type === 'forkRow' ? (
           <ForkRow sessionId={sessionId} />
         ) : item.block.kind === 'user' ? (
@@ -127,12 +141,14 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     estimateSize: () => 280,
     getItemKey,
     gap: BLOCK_GAP_PX,
-    overscan: 6,
+    overscan: 2,
     paddingStart: 28,
     paddingEnd: 32,
     anchorTo: 'end',
     followOnAppend: true,
     scrollEndThreshold: SCROLL_END_THRESHOLD_PX,
+    // Resize observations can arrive during a React commit; avoid nesting a synchronous commit.
+    useFlushSync: false,
     onChange: handleVirtualizerChange,
   })
 
@@ -145,11 +161,18 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       return
     }
 
+    let settleFrame: number | undefined
     const frame = requestAnimationFrame(() => {
       virtualizer.scrollToEnd({ behavior: 'instant' })
-      positionedSessionRef.current = sessionId
+      settleFrame = requestAnimationFrame(() => {
+        virtualizer.scrollToEnd({ behavior: 'instant' })
+        positionedSessionRef.current = sessionId
+      })
     })
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      if (settleFrame != null) cancelAnimationFrame(settleFrame)
+    }
   }, [allItems.length, sessionId, virtualizer])
 
   const virtualItems = virtualizer.getVirtualItems()

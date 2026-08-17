@@ -8,10 +8,7 @@ use astrcode_protocol::{
     http::{ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto},
 };
 
-use super::{
-    args::format_args_inline,
-    blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
-};
+use super::blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block};
 
 pub(in crate::http) fn event_to_deltas(
     event: &Event,
@@ -55,24 +52,28 @@ fn durable_event_to_deltas(
         DurableEventPayload::TranscriptRewritten { .. } => {
             vec![ConversationDeltaDto::RehydrateRequired]
         },
-        DurableEventPayload::TurnStarted | DurableEventPayload::TurnCompleted { .. } => {
-            vec![ConversationDeltaDto::UpdateControlState {
+        DurableEventPayload::TurnStarted => vec![ConversationDeltaDto::UpdateControlState {
+            control: control_from_event(event, has_messages),
+        }],
+        DurableEventPayload::TurnCompleted { .. } => {
+            let mut deltas = clear_transient_turn(event);
+            deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
-            }]
+            });
+            deltas
         },
         DurableEventPayload::ToolCallRequested {
             call_id,
-            tool_name: _,
+            tool_name,
             arguments,
             raw_arguments,
-        } => {
-            let args_text = format_args_inline(arguments);
-            vec![ConversationDeltaDto::PatchArguments {
-                block_id: call_id.to_string(),
-                arguments: args_text,
-                arguments_json: raw_arguments.is_none().then(|| arguments.clone()),
-            }]
-        },
+        } => vec![ConversationDeltaDto::AppendBlock {
+            block: streaming_tool_call_block(
+                call_id.to_string(),
+                tool_name,
+                raw_arguments.is_none().then_some(arguments),
+            ),
+        }],
         DurableEventPayload::ToolApprovalRequested {
             call_id,
             prompt,
@@ -137,9 +138,7 @@ fn durable_event_to_deltas(
         DurableEventPayload::CustomEvent(extension_event) => {
             vec![custom_event_delta(extension_event)]
         },
-        DurableEventPayload::SystemPromptConfigured { .. }
-        | DurableEventPayload::TurnAbortedContext
-        | DurableEventPayload::SessionForked { .. } => vec![],
+        // SystemPromptConfigured / TurnAbortedContext / SessionForked 无 live delta。
         _ => vec![],
     }
 }
@@ -150,14 +149,16 @@ fn live_event_to_deltas(
     has_messages: bool,
 ) -> Vec<ConversationDeltaDto> {
     match payload {
-        LiveEventPayload::AssistantMessageStarted { message_id } => vec![
-            ConversationDeltaDto::AppendBlock {
-                block: streaming_assistant_block(message_id.to_string(), String::new(), None),
-            },
-            ConversationDeltaDto::UpdateControlState {
+        LiveEventPayload::AssistantMessageStarted { message_id } => {
+            let mut deltas = append_transient_block(
+                event,
+                streaming_assistant_block(message_id.to_string(), String::new(), None),
+            );
+            deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
-            },
-        ],
+            });
+            deltas
+        },
         LiveEventPayload::AssistantMessageReset { message_id } => {
             vec![ConversationDeltaDto::ResetBlock {
                 block_id: message_id.to_string(),
@@ -175,14 +176,16 @@ fn live_event_to_deltas(
                 delta: delta.clone(),
             }]
         },
-        LiveEventPayload::ToolCallStarted { call_id, tool_name } => vec![
-            ConversationDeltaDto::AppendBlock {
-                block: streaming_tool_call_block(call_id.to_string(), tool_name, None),
-            },
-            ConversationDeltaDto::UpdateControlState {
+        LiveEventPayload::ToolCallStarted { call_id, tool_name } => {
+            let mut deltas = append_transient_block(
+                event,
+                streaming_tool_call_block(call_id.to_string(), tool_name, None),
+            );
+            deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
-            },
-        ],
+            });
+            deltas
+        },
         LiveEventPayload::ToolOutputDelta {
             call_id,
             stream,
@@ -196,9 +199,15 @@ fn live_event_to_deltas(
             .map(|block| ConversationDeltaDto::AppendBlock { block })
             .into_iter()
             .collect(),
+        LiveEventPayload::LlmRetrying { .. } => {
+            let mut deltas = clear_transient_turn(event);
+            deltas.push(ConversationDeltaDto::UpdateControlState {
+                control: control_from_event(event, has_messages),
+            });
+            deltas
+        },
         LiveEventPayload::AgentRunStarted
         | LiveEventPayload::AgentRunCompleted { .. }
-        | LiveEventPayload::LlmRetrying { .. }
         | LiveEventPayload::LlmRetryRecovered
         | LiveEventPayload::CompactionStarted
         | LiveEventPayload::CompactionCompleted { .. }
@@ -213,6 +222,32 @@ fn live_event_to_deltas(
         },
         LiveEventPayload::ToolCallArgumentsDelta { .. } => vec![],
     }
+}
+
+fn append_transient_block(
+    event: &Event,
+    block: astrcode_protocol::http::ConversationBlockDto,
+) -> Vec<ConversationDeltaDto> {
+    event
+        .turn_id
+        .as_ref()
+        .map(|turn_id| ConversationDeltaDto::AppendTransientBlock {
+            turn_id: turn_id.to_string(),
+            block,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn clear_transient_turn(event: &Event) -> Vec<ConversationDeltaDto> {
+    event
+        .turn_id
+        .as_ref()
+        .map(|turn_id| ConversationDeltaDto::ClearTransientBlocks {
+            turn_id: turn_id.to_string(),
+        })
+        .into_iter()
+        .collect()
 }
 
 pub(in crate::http) fn custom_event_delta(custom_event: &CustomEventData) -> ConversationDeltaDto {
@@ -350,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_request_patches_concise_arguments() {
+    fn tool_request_upserts_durable_block_with_concise_arguments() {
         let event = event(
             EventPayload::Durable(DurableEventPayload::ToolCallRequested {
                 call_id: "tool-1".into(),
@@ -369,20 +404,62 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            ConversationDeltaDto::PatchArguments {
-                block_id,
-                arguments,
-                arguments_json,
+            ConversationDeltaDto::AppendBlock {
+                block:
+                    ConversationBlockDto::ToolCall {
+                        id,
+                        arguments,
+                        arguments_json,
+                        status,
+                        ..
+                    },
             } => {
-                assert_eq!(block_id, "tool-1");
+                assert_eq!(id, "tool-1");
                 assert_eq!(arguments, "Explore crate architecture");
                 assert!(!arguments.contains("Read every module"));
                 assert!(arguments_json.is_some());
                 let json = arguments_json.as_ref().unwrap();
                 assert_eq!(json["description"], "Explore crate architecture");
                 assert_eq!(json["subagent_type"], "explorer");
+                assert_eq!(*status, ToolCallStatusDto::Streaming);
             },
             other => panic!("unexpected delta: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_block_starts_are_owned_by_their_turn() {
+        let cases = [
+            (
+                EventPayload::Live(LiveEventPayload::AssistantMessageStarted {
+                    message_id: "assistant-1".into(),
+                }),
+                "assistant-1",
+            ),
+            (
+                EventPayload::Live(LiveEventPayload::ToolCallStarted {
+                    call_id: "tool-1".into(),
+                    tool_name: "read".into(),
+                }),
+                "tool-1",
+            ),
+        ];
+
+        for (payload, expected_block_id) in cases {
+            let deltas = event_to_deltas(&event(payload, Some("turn-1")), true);
+            let Some(ConversationDeltaDto::AppendTransientBlock { turn_id, block }) =
+                deltas.first()
+            else {
+                panic!("expected a turn-owned transient block, got {deltas:?}");
+            };
+            let block_id = match block {
+                ConversationBlockDto::Assistant { id, .. }
+                | ConversationBlockDto::ToolCall { id, .. } => id,
+                other => panic!("unexpected transient block: {other:?}"),
+            };
+
+            assert_eq!(turn_id, "turn-1");
+            assert_eq!(block_id, expected_block_id);
         }
     }
 
@@ -463,7 +540,9 @@ mod tests {
 
         assert!(matches!(
             deltas.as_slice(),
-            [ConversationDeltaDto::UpdateControlState {
+            [
+                ConversationDeltaDto::ClearTransientBlocks { turn_id: cleared_turn },
+                ConversationDeltaDto::UpdateControlState {
                 control: ConversationControlStateDto {
                     phase: PhaseDto::Thinking,
                     active_turn_id: Some(turn_id),
@@ -475,7 +554,8 @@ mod tests {
                     }),
                     ..
                 }
-            }] if turn_id == "turn-1"
+            }
+            ] if cleared_turn == "turn-1" && turn_id == "turn-1"
         ));
     }
 
@@ -653,9 +733,23 @@ mod tests {
         for (payload, turn_id, phase, can_submit_prompt, active_turn_id) in cases {
             let event = event(payload, turn_id);
             let deltas = event_to_deltas(&event, true);
-            let [ConversationDeltaDto::UpdateControlState { control }] = deltas.as_slice() else {
-                panic!("expected one control-state delta, got {deltas:?}");
-            };
+            let control = deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    ConversationDeltaDto::UpdateControlState { control } => Some(control),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a control-state delta, got {deltas:?}"));
+            if matches!(
+                event.payload,
+                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
+            ) {
+                assert!(matches!(
+                    deltas.first(),
+                    Some(ConversationDeltaDto::ClearTransientBlocks { turn_id })
+                        if turn_id == "turn-42"
+                ));
+            }
             assert_eq!(control.phase, phase);
             assert_eq!(control.can_submit_prompt, can_submit_prompt);
             assert_eq!(control.active_turn_id.as_deref(), active_turn_id);

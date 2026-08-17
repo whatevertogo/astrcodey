@@ -74,11 +74,10 @@ pub(in crate::http) async fn set_enabled(
         .app
         .event_bus()
         .send_notification(astrcode_protocol::events::ClientNotification::ExtensionRegistryChanged);
-    let reload_errors = Vec::new();
 
     Json(SetExtensionEnabledResponseDto {
         success: true,
-        reload_errors,
+        reload_errors: Vec::new(),
     })
     .into_response()
 }

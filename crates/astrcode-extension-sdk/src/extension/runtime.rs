@@ -26,6 +26,7 @@ pub struct ExtensionConfig {
     value: serde_json::Value,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl Default for ExtensionConfig {
     fn default() -> Self {
         Self {

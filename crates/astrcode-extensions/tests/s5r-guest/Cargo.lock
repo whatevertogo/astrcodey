@@ -43,6 +43,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]

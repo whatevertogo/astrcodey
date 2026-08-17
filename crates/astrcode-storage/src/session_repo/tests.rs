@@ -370,6 +370,16 @@ async fn recycled_read_model_is_read_only_and_preserves_child_identity() {
         Some(&parent_id)
     );
     assert_eq!(recycled.first_user_message(), Some("preserved"));
+    let recycled_events = repo
+        .replay_events_active_or_recycled(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(recycled_events.len(), 2);
+    let after_start = repo
+        .replay_from_active_or_recycled_limited(&child_id, &recycled_events[0].seq.to_string(), 1)
+        .await
+        .unwrap();
+    assert_eq!(after_start, recycled_events[1..]);
     assert!(matches!(
         repo.session_read_model(&child_id).await,
         Err(StorageError::NotFound(_))

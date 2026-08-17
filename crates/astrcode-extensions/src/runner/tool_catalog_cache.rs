@@ -7,11 +7,12 @@ use parking_lot::Mutex;
 use tokio::{sync::watch, time::Instant};
 
 const PARTIAL_RETRY_AFTER: Duration = Duration::from_secs(30);
+const COMPLETE_REFRESH_AFTER: Duration = Duration::from_secs(30);
 const MAX_CACHED_SCOPES: usize = 128;
 
 struct CachedCatalog {
     snapshot: ToolCatalogSnapshot,
-    retry_after: Option<Instant>,
+    refresh_after: Instant,
     last_used: u64,
 }
 
@@ -54,8 +55,11 @@ pub(super) struct CatalogBuildPermit<'a> {
 
 impl CatalogBuildPermit<'_> {
     pub(super) fn complete(mut self, snapshot: ToolCatalogSnapshot) {
-        let retry_after = (snapshot.completeness == ToolCatalogCompleteness::Partial)
-            .then(|| Instant::now() + self.cache.partial_retry_after);
+        let refresh_interval = match snapshot.completeness {
+            ToolCatalogCompleteness::Partial => self.cache.partial_retry_after,
+            ToolCatalogCompleteness::Complete => self.cache.complete_refresh_after,
+        };
+        let refresh_after = Instant::now() + refresh_interval;
         let notification = {
             let mut state = self.cache.state.lock();
             if !state.entries.contains_key(&self.scope)
@@ -68,7 +72,7 @@ impl CatalogBuildPermit<'_> {
                 self.scope.clone(),
                 CachedCatalog {
                     snapshot,
-                    retry_after,
+                    refresh_after,
                     last_used,
                 },
             );
@@ -98,20 +102,30 @@ fn notify_waiters(notification: Option<watch::Sender<bool>>) {
 pub(super) struct ToolCatalogCache {
     state: Mutex<CacheState>,
     partial_retry_after: Duration,
+    complete_refresh_after: Duration,
     max_entries: usize,
 }
 
 impl Default for ToolCatalogCache {
     fn default() -> Self {
-        Self::with_policy(PARTIAL_RETRY_AFTER, MAX_CACHED_SCOPES)
+        Self::with_policy(
+            PARTIAL_RETRY_AFTER,
+            COMPLETE_REFRESH_AFTER,
+            MAX_CACHED_SCOPES,
+        )
     }
 }
 
 impl ToolCatalogCache {
-    fn with_policy(partial_retry_after: Duration, max_entries: usize) -> Self {
+    fn with_policy(
+        partial_retry_after: Duration,
+        complete_refresh_after: Duration,
+        max_entries: usize,
+    ) -> Self {
         Self {
             state: Mutex::new(CacheState::default()),
             partial_retry_after,
+            complete_refresh_after,
             max_entries,
         }
     }
@@ -119,10 +133,7 @@ impl ToolCatalogCache {
     pub(super) fn lookup_or_reserve(&self, scope: &ToolCatalogScope) -> CatalogCacheLookup<'_> {
         let mut state = self.state.lock();
         let snapshot = state.entries.get(scope).and_then(|cached| {
-            cached
-                .retry_after
-                .is_none_or(|retry_after| Instant::now() < retry_after)
-                .then(|| cached.snapshot.clone())
+            (Instant::now() < cached.refresh_after).then(|| cached.snapshot.clone())
         });
         if let Some(snapshot) = snapshot {
             let last_used = state.next_usage();
@@ -167,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_cache_is_scope_local_and_retries_partial_or_abandoned_builds() {
-        let cache = ToolCatalogCache::with_policy(Duration::ZERO, 2);
+        let cache = ToolCatalogCache::with_policy(Duration::ZERO, Duration::from_secs(60), 2);
         let first_scope = scope("workspace-a");
         let second_scope = scope("workspace-b");
 
@@ -215,6 +226,16 @@ mod tests {
         third.complete(snapshot(ToolCatalogCompleteness::Complete));
         assert!(matches!(
             cache.lookup_or_reserve(&second_scope),
+            CatalogCacheLookup::Build(_)
+        ));
+
+        let refreshing = ToolCatalogCache::with_policy(Duration::ZERO, Duration::ZERO, 1);
+        let CatalogCacheLookup::Build(complete) = refreshing.lookup_or_reserve(&first_scope) else {
+            panic!("first complete catalog must build");
+        };
+        complete.complete(snapshot(ToolCatalogCompleteness::Complete));
+        assert!(matches!(
+            refreshing.lookup_or_reserve(&first_scope),
             CatalogCacheLookup::Build(_)
         ));
     }

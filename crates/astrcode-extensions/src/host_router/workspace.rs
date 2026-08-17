@@ -2,7 +2,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    io::{Read, Write},
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -22,6 +22,7 @@ use astrcode_extension_sdk::{
         HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceTextEdit,
         HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, internal::HostOperationGroup,
     },
+    hostpaths::write_file_atomic_bytes,
     s5r::ErrorPayload,
     wire::WireErrorCode,
 };
@@ -46,6 +47,7 @@ use super::{
 
 const MAX_WALK_ENTRIES: usize = 5_000;
 const MAX_SEARCH_SCAN_BYTES: usize = 64 * 1024 * 1024;
+const CODING_EXTENSION_ID: &str = "astrcode-coding";
 const IGNORED_DIRECTORIES: &[&str] = &[".git", "node_modules"];
 const SEARCH_VCS_DIRECTORIES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
 const SEARCH_BUILD_DIRECTORIES: &[&str] = &[
@@ -76,6 +78,8 @@ impl WorkspaceGroup {
         context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let root = self.root(context.working_dir.as_deref())?.to_owned();
+        let allow_sensitive_paths =
+            context.resource_lease.is_some() && context.extension_id == CODING_EXTENSION_ID;
         match operation {
             HostOperation::WorkspaceApplyPatch => {
                 let observations = context.file_observation_store.clone();
@@ -86,11 +90,12 @@ impl WorkspaceGroup {
                     input,
                     root,
                     move |root, request, name| {
-                        super::workspace_patch::apply_patch(
+                        super::workspace_patch::apply_patch_with_access(
                             root,
                             request,
                             name,
                             observations.as_ref(),
+                            allow_sensitive_paths,
                         )
                     },
                 )
@@ -99,13 +104,34 @@ impl WorkspaceGroup {
             HostOperation::WorkspaceRead => {
                 let observations = context.file_observation_store.clone();
                 run_workspace_io(operation, input, root, move |root, request, name| {
-                    read(root, request, name, observations.as_ref())
+                    read_with_access(
+                        root,
+                        request,
+                        name,
+                        observations.as_ref(),
+                        allow_sensitive_paths,
+                    )
                 })
                 .await
             },
-            HostOperation::WorkspaceList => run_workspace_io(operation, input, root, list).await,
-            HostOperation::WorkspaceGrep => run_workspace_io(operation, input, root, grep).await,
-            HostOperation::WorkspaceGlob => run_workspace_io(operation, input, root, glob).await,
+            HostOperation::WorkspaceList => {
+                run_workspace_io(operation, input, root, move |root, request, name| {
+                    list_with_access(root, request, name, allow_sensitive_paths)
+                })
+                .await
+            },
+            HostOperation::WorkspaceGrep => {
+                run_workspace_io(operation, input, root, move |root, request, name| {
+                    grep_with_access(root, request, name, allow_sensitive_paths)
+                })
+                .await
+            },
+            HostOperation::WorkspaceGlob => {
+                run_workspace_io(operation, input, root, move |root, request, name| {
+                    glob_with_access(root, request, name, allow_sensitive_paths)
+                })
+                .await
+            },
             HostOperation::WorkspaceWrite => {
                 let observations = context.file_observation_store.clone();
                 run_persistent_workspace_io(
@@ -114,7 +140,15 @@ impl WorkspaceGroup {
                     operation,
                     input,
                     root,
-                    move |root, request, name| write(root, request, name, observations.as_ref()),
+                    move |root, request, name| {
+                        write_with_access(
+                            root,
+                            request,
+                            name,
+                            observations.as_ref(),
+                            allow_sensitive_paths,
+                        )
+                    },
                 )
                 .await
             },
@@ -126,7 +160,15 @@ impl WorkspaceGroup {
                     operation,
                     input,
                     root,
-                    move |root, request, name| edit(root, request, name, observations.as_ref()),
+                    move |root, request, name| {
+                        edit_with_access(
+                            root,
+                            request,
+                            name,
+                            observations.as_ref(),
+                            allow_sensitive_paths,
+                        )
+                    },
                 )
                 .await
             },
@@ -184,14 +226,25 @@ where
     serialize_wire_response(output, wire_name)
 }
 
+#[cfg(test)]
 fn read(
     root: &str,
     request: HostWorkspaceReadRequest,
     capability: &'static str,
     observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
 ) -> Result<HostWorkspaceReadOutput, ErrorPayload> {
+    read_with_access(root, request, capability, observations, false)
+}
+
+fn read_with_access(
+    root: &str,
+    request: HostWorkspaceReadRequest,
+    capability: &'static str,
+    observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
+    allow_sensitive_paths: bool,
+) -> Result<HostWorkspaceReadOutput, ErrorPayload> {
     let relative_path = required_non_empty(&request.path, "path")?;
-    reject_sensitive_path(relative_path)?;
+    enforce_sensitive_path(relative_path, allow_sensitive_paths)?;
     let path = resolve_existing_path(root, relative_path, capability)?;
     let metadata = std::fs::metadata(&path).map_err(io_error)?;
     if !metadata.is_file() {
@@ -203,7 +256,8 @@ fn read(
     let max_bytes = request
         .max_bytes
         .unwrap_or(HOST_WORKSPACE_MAX_FILE_BYTES as u64);
-    if metadata.len() > max_bytes {
+    let paginated = request.line_offset > 0 || request.line_limit.is_some();
+    if metadata.len() > max_bytes && !paginated {
         return Err(ErrorPayload::new(
             WireErrorCode::FileTooLarge,
             format!("file size {} exceeds max_bytes {max_bytes}", metadata.len()),
@@ -229,6 +283,27 @@ fn read(
             media_type: media_type.into(),
             data_base64: BASE64.encode(&data),
             bytes: data.len(),
+        });
+    }
+    if paginated && metadata.len() > max_bytes {
+        let output_limit = usize::try_from(max_bytes)
+            .unwrap_or(usize::MAX)
+            .min(HOST_WORKSPACE_MAX_TEXT_OUTPUT_BYTES);
+        let Some(page) =
+            read_paginated_text(&path, request.line_offset, request.line_limit, output_limit)?
+        else {
+            return Ok(HostWorkspaceReadOutput::Binary {
+                bytes: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+            });
+        };
+        remember_observation(observations, &path)?;
+        return Ok(HostWorkspaceReadOutput::Text {
+            content: page.content,
+            bytes: page.bytes,
+            total_lines: page.total_lines,
+            line_offset: request.line_offset.min(page.total_lines),
+            returned_lines: page.returned_lines,
+            has_more_lines: page.has_more_lines,
         });
     }
     let bytes = read_bounded_file(&path, max_bytes as usize)
@@ -261,6 +336,173 @@ fn read(
         },
         Err(_) => HostWorkspaceReadOutput::Binary { bytes: byte_count },
     })
+}
+
+struct PaginatedText {
+    content: String,
+    bytes: usize,
+    total_lines: usize,
+    returned_lines: usize,
+    has_more_lines: bool,
+}
+
+fn read_paginated_text(
+    path: &Path,
+    requested_offset: usize,
+    line_limit: Option<usize>,
+    max_output_bytes: usize,
+) -> Result<Option<PaginatedText>, ErrorPayload> {
+    let mut options = no_follow_options();
+    options.read(true);
+    let mut file = options.open(path).map_err(io_error)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut utf8_tail = Vec::new();
+    let mut output = Vec::new();
+    let mut selected_line = Vec::new();
+    let mut total_lines = 0usize;
+    let mut returned_lines = 0usize;
+    let mut bytes = 0usize;
+    let mut line_has_bytes = false;
+    let mut output_full = false;
+    let line_limit = line_limit.unwrap_or(usize::MAX);
+
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.saturating_add(read);
+        if !validate_utf8_chunk(&mut utf8_tail, &buffer[..read]) {
+            return Ok(None);
+        }
+        for byte in &buffer[..read] {
+            if *byte == b'\n' {
+                finish_paginated_line(
+                    &mut selected_line,
+                    &mut output,
+                    &mut returned_lines,
+                    &mut output_full,
+                    max_output_bytes,
+                    total_lines,
+                    requested_offset,
+                    line_limit,
+                )?;
+                total_lines = total_lines.saturating_add(1);
+                line_has_bytes = false;
+            } else {
+                line_has_bytes = true;
+                if !output_full
+                    && total_lines >= requested_offset
+                    && total_lines < requested_offset.saturating_add(line_limit)
+                {
+                    selected_line.push(*byte);
+                    if selected_line.len() > max_output_bytes {
+                        if returned_lines == 0 {
+                            return Err(line_too_large(total_lines, max_output_bytes));
+                        }
+                        selected_line.clear();
+                        output_full = true;
+                    }
+                }
+            }
+        }
+    }
+    if !utf8_tail.is_empty() {
+        return Ok(None);
+    }
+    if line_has_bytes {
+        finish_paginated_line(
+            &mut selected_line,
+            &mut output,
+            &mut returned_lines,
+            &mut output_full,
+            max_output_bytes,
+            total_lines,
+            requested_offset,
+            line_limit,
+        )?;
+        total_lines = total_lines.saturating_add(1);
+    }
+    let line_offset = requested_offset.min(total_lines);
+    let content = String::from_utf8(output)
+        .map_err(|error| io_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
+    Ok(Some(PaginatedText {
+        content,
+        bytes,
+        total_lines,
+        returned_lines,
+        has_more_lines: line_offset.saturating_add(returned_lines) < total_lines,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_paginated_line(
+    selected_line: &mut Vec<u8>,
+    output: &mut Vec<u8>,
+    returned_lines: &mut usize,
+    output_full: &mut bool,
+    max_output_bytes: usize,
+    line_index: usize,
+    requested_offset: usize,
+    line_limit: usize,
+) -> Result<(), ErrorPayload> {
+    if line_index < requested_offset
+        || line_index >= requested_offset.saturating_add(line_limit)
+        || *output_full
+    {
+        selected_line.clear();
+        return Ok(());
+    }
+    if selected_line.last() == Some(&b'\r') {
+        selected_line.pop();
+    }
+    let separator_bytes = usize::from(*returned_lines > 0);
+    if output
+        .len()
+        .saturating_add(separator_bytes)
+        .saturating_add(selected_line.len())
+        > max_output_bytes
+    {
+        if output.is_empty() {
+            return Err(line_too_large(line_index, max_output_bytes));
+        }
+        *output_full = true;
+        selected_line.clear();
+        return Ok(());
+    }
+    if *returned_lines > 0 {
+        output.push(b'\n');
+    }
+    output.append(selected_line);
+    *returned_lines = returned_lines.saturating_add(1);
+    Ok(())
+}
+
+fn line_too_large(line_index: usize, max_output_bytes: usize) -> ErrorPayload {
+    ErrorPayload::new(
+        WireErrorCode::FileTooLarge,
+        format!(
+            "line {} exceeds the {max_output_bytes}-byte workspace read output limit",
+            line_index + 1
+        ),
+    )
+    .with_hint("use grep or a process tool to inspect an exceptionally long line")
+}
+
+fn validate_utf8_chunk(incomplete: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    incomplete.extend_from_slice(chunk);
+    match std::str::from_utf8(incomplete) {
+        Ok(_) => {
+            incomplete.clear();
+            true
+        },
+        Err(error) if error.error_len().is_none() => {
+            let tail = incomplete.split_off(error.valid_up_to());
+            *incomplete = tail;
+            true
+        },
+        Err(_) => false,
+    }
 }
 
 fn bounded_text_lines(
@@ -323,13 +565,24 @@ fn image_media_type(path: &Path) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn list(
     root: &str,
     request: HostWorkspaceListRequest,
     capability: &'static str,
 ) -> Result<HostWorkspaceListOutput, ErrorPayload> {
+    list_with_access(root, request, capability, false)
+}
+
+fn list_with_access(
+    root: &str,
+    request: HostWorkspaceListRequest,
+    capability: &'static str,
+    approved_sensitive_access: bool,
+) -> Result<HostWorkspaceListOutput, ErrorPayload> {
     let relative_path = request.path.as_str();
-    reject_sensitive_path(relative_path)?;
+    let allow_sensitive_paths = approved_sensitive_access && is_sensitive_path(relative_path);
+    enforce_sensitive_path(relative_path, allow_sensitive_paths)?;
     let path = resolve_existing_path(root, relative_path, capability)?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
@@ -348,7 +601,9 @@ fn list(
         .max_depth(depth)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| traversable_entry(&canonical_root, entry, false, true))
+        .filter_entry(|entry| {
+            traversable_entry(&canonical_root, entry, false, true, allow_sensitive_paths)
+        })
     {
         let entry = entry.map_err(io_error)?;
         scanned += 1;
@@ -387,10 +642,20 @@ fn list(
     })
 }
 
+#[cfg(test)]
 fn grep(
     root: &str,
     request: HostWorkspaceGrepRequest,
     capability: &'static str,
+) -> Result<HostWorkspaceGrepOutput, ErrorPayload> {
+    grep_with_access(root, request, capability, false)
+}
+
+fn grep_with_access(
+    root: &str,
+    request: HostWorkspaceGrepRequest,
+    capability: &'static str,
+    approved_sensitive_access: bool,
 ) -> Result<HostWorkspaceGrepOutput, ErrorPayload> {
     let pattern = required_non_empty(&request.pattern, "pattern")?;
     let regex = RegexBuilder::new(pattern)
@@ -405,7 +670,13 @@ fn grep(
         })?;
     let path_filters = compile_path_filters(&request.path_filters)?;
     let relative_path = request.path.as_deref().unwrap_or(".");
-    reject_sensitive_path(relative_path)?;
+    let allow_sensitive_paths = approved_sensitive_access
+        && (is_sensitive_path(relative_path)
+            || request
+                .path_filters
+                .iter()
+                .any(|filter| pattern_explicitly_targets_sensitive_path(filter)));
+    enforce_sensitive_path(relative_path, allow_sensitive_paths)?;
     let search_root = resolve_existing_path(root, relative_path, capability)?;
     let canonical_root = canonical_root(root)?;
     let max_matches = request
@@ -424,6 +695,7 @@ fn grep(
         MAX_WALK_ENTRIES,
         request.recursive,
         &path_filters,
+        allow_sensitive_paths,
     )?;
     let mut entries = Vec::new();
     let mut output_bytes = 0usize;
@@ -641,10 +913,20 @@ fn grep_entry_bytes(entry: &HostWorkspaceGrepEntry) -> usize {
     }
 }
 
+#[cfg(test)]
 fn glob(
     root: &str,
     request: HostWorkspaceGlobRequest,
     capability: &'static str,
+) -> Result<HostWorkspaceGlobOutput, ErrorPayload> {
+    glob_with_access(root, request, capability, false)
+}
+
+fn glob_with_access(
+    root: &str,
+    request: HostWorkspaceGlobRequest,
+    capability: &'static str,
+    approved_sensitive_access: bool,
 ) -> Result<HostWorkspaceGlobOutput, ErrorPayload> {
     let pattern = required_non_empty(&request.pattern, "pattern")?;
     if Path::new(pattern).is_absolute() {
@@ -657,6 +939,8 @@ fn glob(
         .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidInput, error.to_string()))?
         .compile_matcher();
     let relative_root = request.root.as_deref().unwrap_or(".");
+    let allow_sensitive_paths = approved_sensitive_access
+        && (is_sensitive_path(relative_root) || pattern_explicitly_targets_sensitive_path(pattern));
     if is_overly_broad_glob(pattern, relative_root) {
         return Err(ErrorPayload::new(
             WireErrorCode::InvalidInput,
@@ -667,7 +951,7 @@ fn glob(
             ),
         ));
     }
-    reject_sensitive_path(relative_root)?;
+    enforce_sensitive_path(relative_root, allow_sensitive_paths)?;
     let search_root = resolve_existing_path(root, relative_root, capability)?;
     if !search_root.is_dir() {
         return Err(ErrorPayload::new(
@@ -690,6 +974,7 @@ fn glob(
         &search_root,
         include_hidden,
         request.respect_gitignore,
+        allow_sensitive_paths,
     );
     for entry in walker.build().skip(1) {
         let entry = entry.map_err(|error| io_error(std::io::Error::other(error)))?;
@@ -737,6 +1022,7 @@ fn workspace_search_walker(
     search_root: &Path,
     include_hidden: bool,
     respect_gitignore: bool,
+    allow_sensitive_paths: bool,
 ) -> WalkBuilder {
     let skip_build_directories = !path_contains_component(search_root, SEARCH_BUILD_DIRECTORIES);
     let workspace_root = workspace_root.to_owned();
@@ -751,7 +1037,12 @@ fn workspace_search_walker(
         .require_git(false)
         .follow_links(false)
         .filter_entry(move |entry| {
-            workspace_search_entry_allowed(&workspace_root, entry, skip_build_directories)
+            workspace_search_entry_allowed(
+                &workspace_root,
+                entry,
+                skip_build_directories,
+                allow_sensitive_paths,
+            )
         });
     builder
 }
@@ -760,6 +1051,7 @@ fn workspace_search_entry_allowed(
     workspace_root: &Path,
     entry: &IgnoreDirEntry,
     skip_build_directories: bool,
+    allow_sensitive_paths: bool,
 ) -> bool {
     if entry.depth() == 0 {
         return true;
@@ -772,7 +1064,7 @@ fn workspace_search_entry_allowed(
         let Component::Normal(name) = component else {
             continue;
         };
-        if name.to_str().is_some_and(is_sensitive_component)
+        if (!allow_sensitive_paths && name.to_str().is_some_and(is_sensitive_component))
             || SEARCH_VCS_DIRECTORIES
                 .iter()
                 .any(|ignored| name == *ignored)
@@ -830,16 +1122,27 @@ fn segment_has_literal(segment: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn write(
     root: &str,
     request: HostWorkspaceWriteRequest,
     capability: &'static str,
     observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
 ) -> Result<HostWorkspaceWriteOutput, ErrorPayload> {
+    write_with_access(root, request, capability, observations, false)
+}
+
+fn write_with_access(
+    root: &str,
+    request: HostWorkspaceWriteRequest,
+    capability: &'static str,
+    observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
+    allow_sensitive_paths: bool,
+) -> Result<HostWorkspaceWriteOutput, ErrorPayload> {
     let relative_path = required_non_empty(&request.path, "path")?;
     let content = request.content.as_str();
     enforce_content_limit(content)?;
-    reject_sensitive_path(relative_path)?;
+    enforce_sensitive_path(relative_path, allow_sensitive_paths)?;
     let (parent, file_name, _) =
         resolve_write_target(root, relative_path, capability, request.create_dirs)?;
     let path = parent.join(file_name);
@@ -872,15 +1175,26 @@ fn write(
     })
 }
 
+#[cfg(test)]
 fn edit(
     root: &str,
     request: HostWorkspaceEditRequest,
     capability: &'static str,
     observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
 ) -> Result<HostWorkspaceEditOutput, ErrorPayload> {
+    edit_with_access(root, request, capability, observations, false)
+}
+
+fn edit_with_access(
+    root: &str,
+    request: HostWorkspaceEditRequest,
+    capability: &'static str,
+    observations: Option<&std::sync::Arc<dyn FileObservationStore>>,
+    allow_sensitive_paths: bool,
+) -> Result<HostWorkspaceEditOutput, ErrorPayload> {
     let relative_path = required_non_empty(&request.path, "path")?;
     let operations = normalize_edits(&request)?;
-    reject_sensitive_path(relative_path)?;
+    enforce_sensitive_path(relative_path, allow_sensitive_paths)?;
     let path = resolve_existing_path(root, relative_path, capability)?;
     ensure_observation_current(observations, &path)?;
     let metadata = std::fs::metadata(&path).map_err(io_error)?;
@@ -1163,7 +1477,7 @@ fn reject_symlink_components(
     Ok(())
 }
 
-fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPayload> {
+pub(super) fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPayload> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(ErrorPayload::new(
             WireErrorCode::PermissionDenied,
@@ -1176,20 +1490,55 @@ fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPaylo
 }
 
 pub(super) fn reject_sensitive_path(relative_path: &str) -> Result<(), ErrorPayload> {
-    let sensitive = Path::new(relative_path)
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .any(is_sensitive_component);
-    if sensitive {
+    if is_sensitive_path(relative_path) {
         return Err(ErrorPayload::new(
             WireErrorCode::PermissionDenied,
             "workspace access to sensitive files is not allowed",
         ));
     }
     Ok(())
+}
+
+fn is_sensitive_path(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .any(is_sensitive_component)
+}
+
+fn pattern_explicitly_targets_sensitive_path(pattern: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    [
+        ".git",
+        ".ssh",
+        ".aws",
+        ".azure",
+        ".gcloud",
+        ".npmrc",
+        ".env",
+        "credential",
+        "secret",
+        ".pem",
+        ".key",
+        "id_rsa",
+        "id_ed25519",
+    ]
+    .iter()
+    .any(|sensitive| pattern.contains(sensitive))
+}
+
+fn enforce_sensitive_path(
+    relative_path: &str,
+    allow_sensitive_paths: bool,
+) -> Result<(), ErrorPayload> {
+    if allow_sensitive_paths {
+        Ok(())
+    } else {
+        reject_sensitive_path(relative_path)
+    }
 }
 
 // astrcode-session::permission::sensitive_file_ask::SENSITIVE_PATTERNS 有对应的 glob
@@ -1256,6 +1605,7 @@ fn traversable_entry(
     entry: &DirEntry,
     include_ignored: bool,
     include_hidden: bool,
+    allow_sensitive_paths: bool,
 ) -> bool {
     if entry.depth() == 0 {
         return true;
@@ -1265,7 +1615,7 @@ fn traversable_entry(
         let Component::Normal(name) = component else {
             continue;
         };
-        if name.to_str().is_some_and(is_sensitive_component)
+        if (!allow_sensitive_paths && name.to_str().is_some_and(is_sensitive_component))
             || (!include_ignored && IGNORED_DIRECTORIES.iter().any(|ignored| name == *ignored))
             || (!include_hidden
                 && name
@@ -1289,6 +1639,7 @@ fn searchable_files_with_limit(
     max_entries: usize,
     recursive: bool,
     path_filters: &[GlobMatcher],
+    allow_sensitive_paths: bool,
 ) -> Result<SearchableFiles, ErrorPayload> {
     if search_root.is_file() {
         let relative = search_root
@@ -1308,7 +1659,7 @@ fn searchable_files_with_limit(
     let mut files = Vec::new();
     let mut scanned = 0usize;
     let mut truncated = false;
-    let mut walk = workspace_search_walker(root, search_root, true, true);
+    let mut walk = workspace_search_walker(root, search_root, true, true, allow_sensitive_paths);
     if !recursive {
         walk.max_depth(Some(1));
     }
@@ -1343,24 +1694,7 @@ fn read_bounded_file(path: &Path, max_bytes: usize) -> std::io::Result<Option<Ve
 }
 
 pub(super) fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temporary_path = parent.join(format!(".astrcode-write-{}.tmp", uuid::Uuid::new_v4()));
-    let mut options = no_follow_options();
-    let mut temporary = options.write(true).create_new(true).open(&temporary_path)?;
-    let result = temporary
-        .write_all(content)
-        .and_then(|()| temporary.flush())
-        .and_then(|()| temporary.sync_all());
-    drop(temporary);
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&temporary_path, path) {
-        let _ = std::fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-    Ok(())
+    write_file_atomic_bytes(path, content)
 }
 
 #[cfg(unix)]
@@ -1640,6 +1974,43 @@ mod tests {
     }
 
     #[test]
+    fn workspace_read_paginates_text_larger_than_the_whole_file_limit() {
+        let workspace = tempdir().expect("workspace");
+        let root = workspace.path().to_str().expect("utf-8 workspace");
+        let line = "0123456789abcdef\n";
+        let content = line.repeat(HOST_WORKSPACE_MAX_FILE_BYTES / line.len() + 2);
+        std::fs::write(workspace.path().join("large.txt"), &content).expect("write large text");
+        let offset = content.lines().count() - 2;
+
+        let output = read(
+            root,
+            HostWorkspaceReadRequest {
+                path: "large.txt".into(),
+                max_bytes: None,
+                line_offset: offset,
+                line_limit: Some(1),
+            },
+            HostOperation::WorkspaceRead.wire_name(),
+            None,
+        )
+        .expect("read a page from large text");
+
+        assert!(matches!(
+            output,
+            HostWorkspaceReadOutput::Text {
+                content,
+                bytes,
+                line_offset,
+                returned_lines: 1,
+                has_more_lines: true,
+                ..
+            } if content == "0123456789abcdef"
+                && bytes > HOST_WORKSPACE_MAX_FILE_BYTES
+                && line_offset == offset
+        ));
+    }
+
+    #[test]
     fn write_rejects_escape_and_sensitive_files() {
         let workspace = tempdir().expect("workspace");
         let root = workspace.path().to_str().expect("utf-8 workspace");
@@ -1819,8 +2190,9 @@ mod tests {
             std::fs::write(workspace.path().join(name), name).expect("seed searchable file");
         }
 
-        let result = searchable_files_with_limit(workspace.path(), workspace.path(), 2, true, &[])
-            .expect("collect searchable files");
+        let result =
+            searchable_files_with_limit(workspace.path(), workspace.path(), 2, true, &[], false)
+                .expect("collect searchable files");
 
         assert!(result.truncated);
         assert!(result.files.len() < 3);
@@ -2004,6 +2376,44 @@ mod tests {
         )
         .expect("glob directories");
         assert_eq!(directory.paths, ["src/"]);
+
+        let untargeted_sensitive = grep_with_access(
+            root,
+            grep_request("TOKEN", None),
+            HostOperation::WorkspaceGrep.wire_name(),
+            true,
+        )
+        .expect("approved broad grep still hides sensitive paths");
+        assert!(untargeted_sensitive.entries.is_empty());
+        let targeted_sensitive = grep_with_access(
+            root,
+            HostWorkspaceGrepRequest {
+                path_filters: vec!["**/.env".into()],
+                ..grep_request("TOKEN", None)
+            },
+            HostOperation::WorkspaceGrep.wire_name(),
+            true,
+        )
+        .expect("approved targeted grep reads sensitive paths");
+        assert_eq!(
+            targeted_sensitive.entries,
+            [HostWorkspaceGrepEntry::Content {
+                path: ".env".into(),
+                line_number: 1,
+                line: "TOKEN=secret".into(),
+                before_context: Vec::new(),
+                after_context: Vec::new(),
+                line_truncated: false,
+            }]
+        );
+        let targeted_sensitive = glob_with_access(
+            root,
+            glob_request(".env"),
+            HostOperation::WorkspaceGlob.wire_name(),
+            true,
+        )
+        .expect("approved targeted glob lists sensitive paths");
+        assert_eq!(targeted_sensitive.paths, [".env"]);
 
         for pattern in [
             "*", "**/*", "**/**", "*/*", "./**/*", "**/?*", "[a-z]*", "**/*.*",

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use astrcode_extension_sdk::{
-    WireErrorCode,
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{
         HOST_TOOL_RESULT_DEFAULT_MAX_BYTES, HOST_TOOL_RESULT_MAX_BYTES, HOST_TOOL_RESULT_MIN_BYTES,
@@ -84,11 +83,10 @@ fn validate(args: &ReadToolResultArgs) -> Result<(), ExtensionError> {
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: WireErrorCode::InvalidInput.as_str().into(),
-        message: message.into(),
-        hint: Some("follow the read_tool_result parameter schema".into()),
-    }
+    ExtensionError::invalid_input(
+        message,
+        Some("follow the read_tool_result parameter schema".to_string()),
+    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

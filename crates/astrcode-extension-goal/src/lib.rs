@@ -4,18 +4,18 @@
 
 mod store;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCall,
-        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest,
-        ExtensionPaths, HookMode, PreparedProviderContribution, PreparedProviderEffect,
-        ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderHandler,
-        ProviderResult, ProviderSettlementContext, Registrar, SlashCommand, ToolContext,
-        ToolHandler, ToolPlanContext,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
+        PreparedProviderContribution, PreparedProviderEffect, ProviderContext,
+        ProviderContributionHandler, ProviderContributionId, ProviderHandler, ProviderResult,
+        ProviderSettlementContext, Registrar, SlashCommand, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
     host::ExtensionHost,
     llm::LlmMessage,
@@ -30,12 +30,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::store::{GoalState, GoalStatus, GoalStore, GoalUpdateStatus, goal_dir_from_base};
-
-fn session_data_dir(paths: &ExtensionPaths) -> Result<&Path, ExtensionError> {
-    paths
-        .session_data_dir()
-        .map_err(|error| ExtensionError::Internal(error.to_string()))
-}
 
 const EXTENSION_ID: &str = "astrcode-goal";
 const GET_GOAL_TOOL_NAME: &str = "getGoal";
@@ -185,7 +179,7 @@ impl ToolHandler for GoalToolHandler {
         &self,
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         let session_id = ctx.session_id();
 
         Ok(match ctx.tool_name() {
@@ -210,7 +204,7 @@ struct GoalProviderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for GoalProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         let Some(goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ProviderResult::Allow);
         };
@@ -235,7 +229,7 @@ impl ProviderContributionHandler for GoalProviderHandler {
         &self,
         ctx: ProviderContext,
     ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         let Some(goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(None);
         };
@@ -279,7 +273,7 @@ impl ProviderContributionHandler for GoalProviderHandler {
     }
 
     async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         store
             .acknowledge_provider_contribution(ctx.contribution_id().as_str())
             .map_err(ExtensionError::Internal)
@@ -294,7 +288,7 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ContinueAfterStopResult::EndTurn);
         };
@@ -320,7 +314,7 @@ struct GoalSlashCommandHandler;
 #[async_trait::async_trait]
 impl CommandHandler for GoalSlashCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
-        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let store = GoalStore::new(goal_dir_from_base(ctx.paths().require_session_data_dir()?));
         let args = ctx.argument().trim();
         let session_id = ctx.session_id();
 

@@ -653,6 +653,58 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn turn_completion_rejects_unsettled_durable_tool_calls() {
+        let session = test_session().await;
+        let turn_id = new_turn_id();
+        session
+            .emit_durable(Some(&turn_id), DurableEventPayload::TurnStarted)
+            .await
+            .unwrap();
+        session
+            .emit_durable(
+                Some(&turn_id),
+                DurableEventPayload::ToolCallRequested {
+                    call_id: "call-unsettled".into(),
+                    tool_name: "read".into(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                    raw_arguments: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let error = crate::finalize_turn(
+            &session,
+            &turn_id,
+            &crate::TurnFinalization {
+                finish_reason: "stop".into(),
+                pending_error: None,
+                aborted: false,
+                terminal_persisted: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionError::UnsettledToolCalls { call_ids, .. }
+                if call_ids.iter().any(|call_id| call_id.as_str() == "call-unsettled")
+        ));
+        let events = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.payload, DurableEventPayload::TurnCompleted { .. }))
+        );
+    }
+
     struct EmitEventRuntime;
 
     #[async_trait::async_trait]

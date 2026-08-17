@@ -137,10 +137,7 @@ impl PostToolUseHandler for TodoPostToolUseHandler {
 }
 
 fn todo_root(paths: &ExtensionPaths) -> Result<PathBuf, ExtensionError> {
-    paths
-        .session_data_dir()
-        .map(|path| path.join("todos"))
-        .map_err(|error| ExtensionError::Internal(error.to_string()))
+    Ok(paths.require_session_data_dir()?.join("todos"))
 }
 
 fn todo_write_prompt() -> ToolPromptMetadata {

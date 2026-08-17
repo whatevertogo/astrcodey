@@ -1,12 +1,29 @@
 //! 落盘写原语:临时文件 + fsync + 原子 rename + 目录 fsync。
 //!
-//! 供需要崩溃一致性的持久化写共用(consumer state、config store、tool artifacts)。
+//! 供需要崩溃一致性的持久化写共用(consumer state、config store)。
 
 use std::{
     fs::File,
     io::Write as _,
     path::{Path, PathBuf},
 };
+
+use crate::StorageError;
+
+/// 在阻塞线程池运行存储 IO，join 失败时映射为 [`StorageError::Io`]。
+///
+/// `noun` 用于 join 错误文案，标识被阻塞的存储操作。
+pub(crate) async fn spawn_blocking_storage<F, T>(noun: &str, f: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|error| {
+        StorageError::Io(std::io::Error::other(format!(
+            "{noun} blocking task failed: {error}"
+        )))
+    })?
+}
 
 /// 以「写临时文件 → fsync → rename → fsync 目录」的顺序替换 `path` 的内容。
 pub(crate) fn replace_durable_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

@@ -46,6 +46,7 @@ function resetSessionView(): Partial<AppState> {
     activeSessionId: null,
     activeSessionTitle: null,
     blocks: [],
+    transientBlockOwners: {},
     control: null,
     cursor: null,
     compactSubmitting: false,
@@ -74,6 +75,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSessionTitle: null,
   workingDir: null,
   blocks: [],
+  transientBlockOwners: {},
   control: null,
   cursor: null,
   compactSubmitting: false,
@@ -249,6 +251,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       set({
         blocks: snapshot.blocks,
+        transientBlockOwners: {},
         control: snapshot.control,
         cursor: snapshot.cursor.value,
         activeSessionTitle: snapshot.sessionTitle,
@@ -305,6 +308,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       set({
         blocks: snapshot.blocks,
+        transientBlockOwners: {},
         control: snapshot.control,
         cursor: snapshot.cursor.value,
         activeSessionTitle: snapshot.sessionTitle,

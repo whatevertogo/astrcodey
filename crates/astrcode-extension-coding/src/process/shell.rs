@@ -142,11 +142,7 @@ impl ToolHandler for ShellHandler {
             .timeout
             .unwrap_or_else(|| self.default_timeout_secs.load(Ordering::Acquire));
         request.timeout_ms = Some(timeout_secs * 1_000);
-        request.lifetime = if args.run_in_background {
-            HostProcessLifetime::Session
-        } else {
-            HostProcessLifetime::Call
-        };
+        request.lifetime = HostProcessLifetime::Call;
         let handle = process.start(request).await?;
         if let Some(input) = &args.stdin {
             process.write(handle.id.clone(), input.clone()).await?;
@@ -154,6 +150,11 @@ impl ToolHandler for ShellHandler {
         process.close_stdin(handle.id.clone()).await?;
 
         if args.run_in_background {
+            process
+                .promote(HostProcessTargetRequest {
+                    id: handle.id.clone(),
+                })
+                .await?;
             let mut result =
                 background_result(handle.id, args.intent.clone(), String::new(), 0, 0, 0);
             add_invocation_metadata(
@@ -556,13 +557,10 @@ fn background_result(
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: astrcode_extension_sdk::WireErrorCode::InvalidInput
-            .as_str()
-            .into(),
-        message: message.into(),
-        hint: Some("provide either a command to start or a shellId to poll".into()),
-    }
+    ExtensionError::invalid_input(
+        message,
+        Some("provide either a command to start or a shellId to poll".to_string()),
+    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

@@ -24,6 +24,11 @@ pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
 /// The bytes go to a unique sibling temporary file first, which is flushed and
 /// synced before being renamed over `path`. Parent directories are created as needed.
 pub fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
+    write_file_atomic_bytes(path, content.as_bytes())
+}
+
+#[doc(hidden)]
+pub fn write_file_atomic_bytes(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -31,7 +36,7 @@ pub fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
     std::fs::create_dir_all(parent)?;
     let (mut temporary, temporary_path) = create_atomic_write_file(parent)?;
     let write_result = temporary
-        .write_all(content.as_bytes())
+        .write_all(content)
         .and_then(|()| temporary.flush())
         .and_then(|()| temporary.sync_all());
     drop(temporary);
@@ -39,11 +44,49 @@ pub fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
         let _ = std::fs::remove_file(&temporary_path);
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(&temporary_path, path) {
+    if let Err(error) = replace_file(&temporary_path, path) {
         let _ = std::fs::remove_file(temporary_path);
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers that remain alive for the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 static NEXT_ATOMIC_WRITE_ID: AtomicU64 = AtomicU64::new(0);

@@ -9,7 +9,9 @@ use astrcode_core::{tool::ToolDefinition, types::SessionId};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::{ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext};
+use super::{
+    ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext, parse_tool_arguments,
+};
 use crate::{
     WireErrorCode,
     host::{HostError, HostSessionDeliveryOutput, HostSessionInputRequest},
@@ -78,22 +80,7 @@ impl ToolContext {
     }
 
     pub fn arguments<T: DeserializeOwned>(&self) -> Result<T, ExtensionError> {
-        serde_path_to_error::deserialize(&self.arguments).map_err(|error| {
-            let path = error.path().to_string();
-            let path = if path.is_empty() { "$" } else { path.as_str() };
-            ExtensionError::InvalidInput {
-                code: WireErrorCode::InvalidInput.as_str().into(),
-                message: format!(
-                    "tool `{}` arguments at `{path}`: {}",
-                    self.tool_name,
-                    error.into_inner()
-                ),
-                hint: Some(format!(
-                    "check the `{}` tool arguments against its declared JSON schema",
-                    self.tool_name
-                )),
-            }
-        })
+        parse_tool_arguments(&self.tool_name, &self.arguments)
     }
 
     pub fn main_model_id(&self) -> Option<&str> {

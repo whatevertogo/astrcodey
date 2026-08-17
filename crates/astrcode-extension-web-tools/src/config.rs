@@ -1,7 +1,4 @@
-use astrcode_extension_sdk::{
-    WireErrorCode,
-    extension::{ExtensionConfig, ExtensionError},
-};
+use astrcode_extension_sdk::extension::{ExtensionConfig, ExtensionError};
 use serde::Deserialize;
 
 pub(crate) const EXTENSION_ID: &str = "astrcode-web-tools";
@@ -155,13 +152,12 @@ pub(crate) fn load_config(config: &ExtensionConfig) -> Result<WebToolsConfig, Ex
 }
 
 fn invalid_fetch_config(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: WireErrorCode::InvalidInput.as_str().into(),
-        message: message.into(),
-        hint: Some(format!(
+    ExtensionError::invalid_input(
+        message,
+        Some(format!(
             "set extensions.{EXTENSION_ID}.fetch to valid positive limits"
         )),
-    }
+    )
 }
 
 pub(crate) fn resolve_api_key(inline: Option<&str>, env_name: Option<&str>) -> Option<String> {

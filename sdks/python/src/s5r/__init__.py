@@ -66,8 +66,6 @@ from .results import (
     HostResource,
     ResourceAccess,
     ToolPlan,
-    hook_continuation,
-    tool_continuation,
     tool_text,
 )
 from .worker import Worker
@@ -119,10 +117,8 @@ __all__ = [
     "WorkerInvocationContext",
     "WorkerToolPlanContext",
     "encode_frame",
-    "hook_continuation",
     "parse_frame_header",
     "parse_hook_input",
     "parse_tool_arguments",
-    "tool_continuation",
     "tool_text",
 ]

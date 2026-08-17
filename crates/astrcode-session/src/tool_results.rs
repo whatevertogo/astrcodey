@@ -1,6 +1,6 @@
 //! Tool result budgeting and LLM-facing persisted-result summaries.
 
-use astrcode_core::tool::ToolResult;
+use astrcode_core::tool::{ToolResult, read_image::ReadToolInlinePayload};
 use astrcode_storage::ToolResultArtifactRef;
 
 /// 单个工具结果允许直接进入 LLM history 的最大字节数。
@@ -24,6 +24,7 @@ pub(crate) struct ToolResultPreview {
 /// 是否可以把结果自动替换为持久化 artifact 摘要。
 pub(crate) fn should_auto_persist_tool_result(result: &ToolResult) -> bool {
     result.content.len() > TOOL_RESULT_INLINE_LIMIT_BYTES
+        && (result.is_error || ReadToolInlinePayload::parse_image(&result.content).is_none())
 }
 
 /// 为大工具结果生成摘要预览。
@@ -72,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_persist_eligibility_ignores_tool_identity_and_metadata() {
+    fn auto_persist_eligibility_ignores_tool_identity_and_metadata_but_preserves_images() {
         let large_content = "a".repeat(TOOL_RESULT_INLINE_LIMIT_BYTES + 1);
         let cases = [
             ("plain result", Default::default()),
@@ -92,6 +93,13 @@ mod tests {
             };
             assert!(should_auto_persist_tool_result(&result), "{name}");
         }
+
+        let image = ReadToolInlinePayload::image("image/png", large_content)
+            .to_content_string()
+            .unwrap();
+        assert!(!should_auto_persist_tool_result(&ToolResult::success(
+            image
+        )));
     }
 
     #[test]

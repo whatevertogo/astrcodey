@@ -11,6 +11,7 @@ macro_rules! wire_error_codes {
         }
 
         impl WireErrorCode {
+            #[cfg(test)]
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
             pub const fn as_str(self) -> &'static str {

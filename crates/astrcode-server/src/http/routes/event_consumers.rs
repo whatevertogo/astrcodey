@@ -1,6 +1,7 @@
 use astrcode_core::types::SessionId;
 use astrcode_extensions::runner::{
     CustomEventConsumerAction, CustomEventConsumerControlError, CustomEventConsumerStatus,
+    CustomEventSession,
 };
 use astrcode_protocol::http::{
     CustomEventConsumerActionDto, CustomEventConsumerControlRequest,
@@ -23,12 +24,7 @@ pub(in crate::http) async fn list_event_consumers(
     State(state): State<HttpState>,
     Path(raw_session_id): Path<String>,
 ) -> Response {
-    let session_id = SessionId::from(raw_session_id);
-    let session = state
-        .app
-        .runtime()
-        .session_manager()
-        .custom_event_session(&session_id);
+    let (session_id, session) = custom_event_session(&state, raw_session_id);
     match state
         .app
         .runtime()
@@ -49,12 +45,7 @@ pub(in crate::http) async fn control_event_consumer(
     Path(raw_session_id): Path<String>,
     Json(request): Json<CustomEventConsumerControlRequest>,
 ) -> Response {
-    let session_id = SessionId::from(raw_session_id);
-    let session = state
-        .app
-        .runtime()
-        .session_manager()
-        .custom_event_session(&session_id);
+    let (session_id, session) = custom_event_session(&state, raw_session_id);
     let action = match request.action {
         CustomEventConsumerActionDto::Pause => CustomEventConsumerAction::Pause,
         CustomEventConsumerActionDto::Resume => CustomEventConsumerAction::Resume,
@@ -81,6 +72,19 @@ pub(in crate::http) async fn control_event_consumer(
         Ok(status) => Json(status_to_dto(status)).into_response(),
         Err(error) => consumer_error_response(error),
     }
+}
+
+fn custom_event_session(
+    state: &HttpState,
+    raw_session_id: String,
+) -> (SessionId, CustomEventSession) {
+    let session_id = SessionId::from(raw_session_id);
+    let session = state
+        .app
+        .runtime()
+        .session_manager()
+        .custom_event_session(&session_id);
+    (session_id, session)
 }
 
 fn status_to_dto(status: CustomEventConsumerStatus) -> CustomEventConsumerStatusDto {

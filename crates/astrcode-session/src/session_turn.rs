@@ -430,6 +430,19 @@ async fn emit_turn_completed(
     turn_id: &TurnId,
     finish_reason: &str,
 ) -> Result<(), SessionError> {
+    let unsettled = session
+        .read_model()
+        .await?
+        .tool_calls_needing_interruption()
+        .into_iter()
+        .map(|call| call.call_id.into())
+        .collect::<Vec<_>>();
+    if !unsettled.is_empty() {
+        return Err(SessionError::UnsettledToolCalls {
+            turn_id: turn_id.clone(),
+            call_ids: unsettled,
+        });
+    }
     session
         .emit_durable(Some(turn_id), turn_completed_payload(finish_reason))
         .await?;

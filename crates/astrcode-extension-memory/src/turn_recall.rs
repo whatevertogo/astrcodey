@@ -89,10 +89,7 @@ struct ProjectRecallStore {
 
 impl ProjectRecallStore {
     fn from_paths(paths: &ExtensionPaths) -> Result<Self, ExtensionError> {
-        let root = paths
-            .session_data_dir()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?
-            .join(PROJECT_RECALL_DIR);
+        let root = paths.require_session_data_dir()?.join(PROJECT_RECALL_DIR);
         Ok(Self { root })
     }
 

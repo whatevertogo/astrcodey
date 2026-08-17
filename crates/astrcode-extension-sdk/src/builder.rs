@@ -598,7 +598,7 @@ impl ToolDefinitionBuilder {
         self
     }
 
-    /// Override the host-default invoke timeout for this tool.
+    /// Limit the tool's complete `execute` handler chain to this duration.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.execution_policy.timeout = Some(timeout);
         self

@@ -36,13 +36,10 @@ impl SessionOwnerLease {
     pub(super) async fn acquire(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {
         let session_dir = session_dir.to_path_buf();
         let owner = Arc::clone(owner);
-        tokio::task::spawn_blocking(move || Self::acquire_blocking(&session_dir, &owner))
-            .await
-            .map_err(|error| {
-                StorageError::Io(std::io::Error::other(format!(
-                    "session owner lease task failed: {error}"
-                )))
-            })?
+        crate::durable_write::spawn_blocking_storage("session owner lease", move || {
+            Self::acquire_blocking(&session_dir, &owner)
+        })
+        .await
     }
 
     fn acquire_blocking(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {

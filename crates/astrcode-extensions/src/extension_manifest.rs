@@ -406,15 +406,17 @@ mod tests {
 
     #[test]
     fn s5r_tool_timeout_must_be_positive() {
-        let manifest: InitializeManifest = serde_json::from_value(json!({
-            "tools": [{
-                "name": "invalid-timeout",
-                "description": "",
-                "parameters": {"type": "object"},
-                "timeout_ms": 0
-            }]
+        let tool: ManifestTool = serde_json::from_value(json!({
+            "name": "invalid-timeout",
+            "description": "",
+            "parameters": {"type": "object"},
+            "timeout_ms": 0
         }))
         .unwrap();
+        let manifest = InitializeManifest {
+            tools: vec![tool],
+            ..InitializeManifest::default()
+        };
 
         let error = registration_from_manifest("timeout-test", "test", manifest).unwrap_err();
         assert_eq!(error, "tool timeout_ms must be greater than zero");

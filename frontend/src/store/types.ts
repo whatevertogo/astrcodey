@@ -35,6 +35,8 @@ export interface AppState {
   workingDir: string | null
 
   blocks: ConversationBlock[]
+  /** Live preview block id -> owning turn id. Durable blocks never appear here. */
+  transientBlockOwners: Record<string, string>
   control: ConversationControlState | null
   cursor: string | null
   compactSubmitting: boolean

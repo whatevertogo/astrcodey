@@ -523,6 +523,15 @@ pub enum ConversationDeltaDto {
     AppendBlock {
         block: ConversationBlockDto,
     },
+    /// 追加仅属于当前运行 turn 的临时 block；不会进入 durable snapshot。
+    AppendTransientBlock {
+        turn_id: String,
+        block: ConversationBlockDto,
+    },
+    /// 清理指定 turn 尚未被 durable block 接管的临时内容。
+    ClearTransientBlocks {
+        turn_id: String,
+    },
     PatchBlock {
         block_id: String,
         text_delta: String,

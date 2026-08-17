@@ -357,9 +357,7 @@ impl SessionOperations for ServerSessionOperations {
                     message_count: view.message_count,
                 })
             },
-            Err(crate::session_manager::SessionManagerError::Storage(
-                astrcode_storage::StorageError::NotFound(_),
-            )) => {
+            Err(error) if error.is_not_found() => {
                 self.child_sessions
                     .verify_restore_access(&caller_sid, &target_sid)
                     .await?;
@@ -466,9 +464,9 @@ impl SessionOperations for ServerSessionOperations {
                     .read_model(&caller_sid)
                     .await
                     .map_err(|error| match error {
-                        crate::session_manager::SessionManagerError::Storage(
-                            astrcode_storage::StorageError::NotFound(_),
-                        ) => SessionApiError::NotFound(format!("parent session {caller_sid}")),
+                        error if error.is_not_found() => {
+                            SessionApiError::NotFound(format!("parent session {caller_sid}"))
+                        },
                         error => SessionApiError::internal(error),
                     })?;
                 let _target_operation = scheduler
@@ -484,9 +482,7 @@ impl SessionOperations for ServerSessionOperations {
                                 .await?;
                             (model, false)
                         },
-                        Err(crate::session_manager::SessionManagerError::Storage(
-                            astrcode_storage::StorageError::NotFound(_),
-                        )) => {
+                        Err(error) if error.is_not_found() => {
                             child_sessions
                                 .verify_restore_access(&caller_sid, &target_sid)
                                 .await?;
@@ -590,9 +586,7 @@ impl SessionOperations for ServerSessionOperations {
 
 fn map_restore_error(error: crate::session_manager::SessionManagerError) -> SessionApiError {
     match error {
-        crate::session_manager::SessionManagerError::Storage(
-            astrcode_storage::StorageError::NotFound(_),
-        ) => SessionApiError::NotFound(error.to_string()),
+        error if error.is_not_found() => SessionApiError::NotFound(error.to_string()),
         crate::session_manager::SessionManagerError::Storage(
             astrcode_storage::StorageError::Unsupported(reason),
         ) => SessionApiError::Unsupported(reason),

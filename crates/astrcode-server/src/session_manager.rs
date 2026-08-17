@@ -59,6 +59,13 @@ pub enum SessionManagerError {
     CreationTask(String),
 }
 
+impl SessionManagerError {
+    /// 底层存储报 `NotFound`（会话不存在）。
+    pub(crate) fn is_not_found(&self) -> bool {
+        matches!(self, Self::Storage(StorageError::NotFound(_)))
+    }
+}
+
 /// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
 ///
 /// 不处理 active turn、输入队列或 child completion——那些由 [`crate::turn_scheduler`]

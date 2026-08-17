@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     bootstrap::{self, BootstrapOptions},
-    config_manager::ConfigUpdateError,
+    config_manager::{ConfigUpdateError, PreparedConfigError},
 };
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
@@ -269,7 +269,7 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     let active_small_profile = config.active_small_profile.clone();
     let active_small_model = config.active_small_model.clone();
 
-    let apply_result: Result<(), ConfigUpdateError<ConfigRequestError>> = state
+    let apply_result: Result<(), PreparedConfigError> = state
         .app
         .runtime()
         .config_manager()
@@ -277,7 +277,8 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
         .await;
     if let Err(error) = apply_result {
         return match error {
-            ConfigUpdateError::Mutation(error) => bad_request_response(error.code, error.message),
+            // 本路径无 mutation 闭包，`Mutation` 不可构造；`Infallible` 穷尽兜底。
+            ConfigUpdateError::Mutation(infallible) => match infallible {},
             ConfigUpdateError::Resolve(error) => bad_request_response(
                 "invalid_config",
                 format!("Reloaded config is invalid: {error}"),

@@ -197,11 +197,11 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         }
         for registration in registrations.custom_event_subscriptions() {
             custom_event.push((
-                registration.priority,
+                registration.priority(),
                 (
                     extension_id.clone(),
-                    registration.subscription.clone(),
-                    Arc::clone(&registration.handler),
+                    registration.subscription().clone(),
+                    Arc::clone(registration.handler()),
                 ),
             ));
         }

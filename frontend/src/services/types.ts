@@ -234,6 +234,12 @@ export interface PendingAskUserQuestionsResponse {
 
 export type ConversationDelta =
   | { kind: 'appendBlock'; block: ConversationBlock }
+  | {
+      kind: 'appendTransientBlock'
+      turnId: string
+      block: ConversationBlock
+    }
+  | { kind: 'clearTransientBlocks'; turnId: string }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
   | { kind: 'resetBlock'; blockId: string }
   | { kind: 'finalizeBlock'; block: ConversationBlock }

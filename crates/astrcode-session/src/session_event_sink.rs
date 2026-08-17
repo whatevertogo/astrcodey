@@ -26,8 +26,6 @@ pub trait SessionEventObserver: Send + Sync {
 pub enum SessionEventPublishError {
     #[error("session event publisher is closed")]
     Closed,
-    #[error("session event publisher queue is full; dropped {dropped} live events")]
-    Full { dropped: u64 },
     #[error("session event publisher task failed: {0}")]
     Task(String),
     #[error("session event publication is already deferred for {session_id}")]

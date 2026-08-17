@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use astrcode_extension_sdk::{
-    WireErrorCode,
     builder::{command, manifest},
     extension::{
         CommandAvailability, CommandContext, CommandHandler, Extension, ExtensionCapability,
@@ -92,9 +91,5 @@ impl CommandHandler for SelectModelCommand {
 }
 
 fn invalid_command_input(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: WireErrorCode::InvalidInput.as_str().into(),
-        message: message.into(),
-        hint: None,
-    }
+    ExtensionError::invalid_input(message, None)
 }

@@ -93,13 +93,10 @@ impl ToolHandler for PatchHandler {
 }
 
 fn invalid_patch(error: impl std::fmt::Display) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: astrcode_extension_sdk::WireErrorCode::InvalidInput
-            .as_str()
-            .into(),
-        message: error.to_string(),
-        hint: Some("provide a complete unified diff with ---/+++ file headers".into()),
-    }
+    ExtensionError::invalid_input(
+        error.to_string(),
+        Some("provide a complete unified diff with ---/+++ file headers".to_string()),
+    )
 }
 
 const fn kind_name(kind: HostWorkspacePatchChangeKind) -> &'static str {

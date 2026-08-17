@@ -3182,7 +3182,7 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
         panic!("the caller should return its target generation");
     };
     assert_eq!(requirements.len(), 1);
-    assert_eq!(requirements[0].prompt, "v1/v1");
+    assert_eq!(requirements[0].prompt, "v1/v2");
 
     let external = runner
         .dispatch_public_http_route(
@@ -3197,6 +3197,11 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
     assert_eq!(response.body["generation"], "v2");
 
     drop(version_one_view);
+    let retained_startup_host = startup_host.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        generation_http_label(&retained_startup_host).await.unwrap(),
+        "v2"
+    );
     assert!(runner.shutdown().await.is_empty());
 }
 
@@ -3761,6 +3766,69 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
     assert_eq!(status.checkpoint, Some(unrelated.seq));
     assert_eq!(status.stream_head, Some(unrelated.seq));
     assert_eq!(status.pending_events, 0);
+
+    let durable_before_live = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "durable-before-live"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let durable_after_live = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "durable-after-live"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(runner.observe_custom_event(
+        Arc::new(Event::from(durable_before_live)),
+        custom_event_session.clone(),
+    ));
+    assert!(runner.observe_custom_event(
+        Arc::new(Event::from(LiveEvent::session(
+            session_id,
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "live-barrier"}),
+            }),
+        ))),
+        custom_event_session.clone(),
+    ));
+    assert!(runner.observe_custom_event(
+        Arc::new(Event::from(durable_after_live)),
+        custom_event_session,
+    ));
+    assert_eq!(
+        calls_rx.recv().await,
+        Some((9, "durable-before-live".into()))
+    );
+    assert_eq!(calls_rx.recv().await, Some((10, "live-barrier".into())));
+    assert_eq!(
+        calls_rx.recv().await,
+        Some((11, "durable-after-live".into()))
+    );
 }
 
 #[tokio::test]

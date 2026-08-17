@@ -109,13 +109,10 @@ fn validate(args: &EditArgs) -> Result<(), ExtensionError> {
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: astrcode_extension_sdk::WireErrorCode::InvalidInput
-            .as_str()
-            .into(),
-        message: message.into(),
-        hint: Some("provide one or more exact replacements copied from `read` output".into()),
-    }
+    ExtensionError::invalid_input(
+        message,
+        Some("provide one or more exact replacements copied from `read` output".to_string()),
+    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

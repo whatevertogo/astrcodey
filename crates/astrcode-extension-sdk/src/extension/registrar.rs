@@ -72,9 +72,23 @@ pub struct ExtensionRegistrations {
 
 #[derive(Clone)]
 pub struct CustomEventRegistration {
-    pub subscription: CustomEventSubscription,
-    pub priority: i32,
-    pub handler: Arc<dyn CustomEventHandler>,
+    subscription: CustomEventSubscription,
+    priority: i32,
+    handler: Arc<dyn CustomEventHandler>,
+}
+
+impl CustomEventRegistration {
+    pub fn subscription(&self) -> &CustomEventSubscription {
+        &self.subscription
+    }
+
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    pub fn handler(&self) -> &Arc<dyn CustomEventHandler> {
+        &self.handler
+    }
 }
 
 #[derive(Clone)]

@@ -87,7 +87,7 @@ impl ExtensionRunner {
                         custom_event_subscriptions: registrations
                             .custom_event_subscriptions()
                             .iter()
-                            .map(|registration| registration.subscription.clone())
+                            .map(|registration| registration.subscription().clone())
                             .collect(),
                         http_routes: registrations
                             .http_routes()

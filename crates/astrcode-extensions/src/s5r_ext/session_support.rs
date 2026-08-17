@@ -17,6 +17,7 @@ use crate::{
 
 const MAX_REENTRANCY: u32 = 8;
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
 
 pub(super) struct StderrTaskGuard {
     task: Option<tokio::task::JoinHandle<()>>,
@@ -144,9 +145,37 @@ fn resolve_host_invoke_context(
     }
 }
 
-pub(super) async fn drain_stderr(stderr: tokio::process::ChildStderr) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+pub(super) async fn drain_stderr(mut stderr: tokio::process::ChildStderr, extension_id: String) {
+    use tokio::io::AsyncReadExt as _;
 
-    let mut reader = BufReader::new(stderr).lines();
-    while let Ok(Some(_line)) = reader.next_line().await {}
+    let mut tail = Vec::new();
+    let mut dropped_bytes = 0usize;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stderr.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => append_stderr_tail(&mut tail, &mut dropped_bytes, &buffer[..read]),
+            Err(error) => {
+                tracing::warn!(%extension_id, %error, "S5R stderr read failed");
+                break;
+            },
+        }
+    }
+    if !tail.is_empty() {
+        tracing::warn!(
+            %extension_id,
+            dropped_bytes,
+            stderr = %String::from_utf8_lossy(&tail),
+            "S5R extension stderr"
+        );
+    }
+}
+
+fn append_stderr_tail(tail: &mut Vec<u8>, dropped_bytes: &mut usize, chunk: &[u8]) {
+    tail.extend_from_slice(chunk);
+    if tail.len() > STDERR_TAIL_BYTES {
+        let overflow = tail.len() - STDERR_TAIL_BYTES;
+        tail.drain(..overflow);
+        *dropped_bytes = dropped_bytes.saturating_add(overflow);
+    }
 }

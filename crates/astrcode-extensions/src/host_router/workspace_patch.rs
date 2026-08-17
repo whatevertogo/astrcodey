@@ -12,8 +12,8 @@ use astrcode_extension_sdk::{
 };
 
 use super::workspace::{
-    ensure_observation_current, reject_sensitive_path, remember_observation, resolve_existing_path,
-    resolve_write_target, write_file_atomic,
+    ensure_observation_current, reject_sensitive_path, reject_symlink_target, remember_observation,
+    resolve_existing_path, resolve_write_target, write_file_atomic,
 };
 
 #[derive(Debug)]
@@ -57,16 +57,27 @@ struct TextDocument {
     has_trailing_newline: bool,
 }
 
+#[cfg(test)]
 pub(super) fn apply_patch(
     root: &str,
     request: HostWorkspaceApplyPatchRequest,
     capability: &'static str,
     observations: Option<&Arc<dyn FileObservationStore>>,
 ) -> Result<HostWorkspaceApplyPatchOutput, ErrorPayload> {
+    apply_patch_with_access(root, request, capability, observations, false)
+}
+
+pub(super) fn apply_patch_with_access(
+    root: &str,
+    request: HostWorkspaceApplyPatchRequest,
+    capability: &'static str,
+    observations: Option<&Arc<dyn FileObservationStore>>,
+    allow_sensitive_paths: bool,
+) -> Result<HostWorkspaceApplyPatchOutput, ErrorPayload> {
     let patches = parse_patch(&request.patch).map_err(invalid_patch)?;
     let changes = patches
         .iter()
-        .map(|patch| apply_file_patch(root, capability, patch, observations))
+        .map(|patch| apply_file_patch(root, capability, patch, observations, allow_sensitive_paths))
         .collect();
     Ok(HostWorkspaceApplyPatchOutput { changes })
 }
@@ -176,6 +187,7 @@ fn apply_file_patch(
     capability: &'static str,
     patch: &FilePatch,
     observations: Option<&Arc<dyn FileObservationStore>>,
+    allow_sensitive_paths: bool,
 ) -> HostWorkspacePatchChange {
     let Some(label) = patch.new_path.as_ref().or(patch.old_path.as_ref()) else {
         return failed(
@@ -196,11 +208,17 @@ fn apply_file_patch(
     {
         return failed(kind, label, "rename patches are not supported");
     }
-    if let Err(error) = reject_sensitive_path(label) {
+    if !allow_sensitive_paths && let Err(error) = reject_sensitive_path(label) {
         return failed(kind, label, &error.message);
     }
 
     let existing = patch.old_path.is_some();
+    if existing
+        && std::path::Path::new(label).is_absolute()
+        && let Err(error) = reject_symlink_target(std::path::Path::new(label), capability)
+    {
+        return failed(kind, label, &error.message);
+    }
     let path = if existing {
         match resolve_existing_path(root, label, capability) {
             Ok(path) => path,
@@ -235,6 +253,11 @@ fn apply_file_patch(
     if matches!(kind, HostWorkspacePatchChangeKind::Deleted) {
         if !lines.is_empty() {
             return failed(kind, label, "delete patch does not remove the full file");
+        }
+        if std::path::Path::new(label).is_absolute()
+            && let Err(error) = reject_symlink_target(std::path::Path::new(label), capability)
+        {
+            return failed(kind, label, &error.message);
         }
         return match std::fs::remove_file(&path) {
             Ok(()) => succeeded(kind, label, format!("deleted {}", path.display())),
@@ -491,6 +514,37 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("existing.txt"))
                 .expect("existing unchanged"),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_delete_rejects_a_symlink_without_deleting_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let target = outside.path().join("target.txt");
+        let link = outside.path().join("link.txt");
+        std::fs::write(&target, "keep\n").expect("seed target");
+        symlink(&target, &link).expect("create symlink");
+        let link = link.to_str().expect("utf-8 link");
+
+        let output = apply_patch(
+            workspace.path().to_str().expect("utf-8 workspace"),
+            HostWorkspaceApplyPatchRequest {
+                patch: format!("--- {link}\n+++ /dev/null\n@@ -1 +0,0 @@\n-keep\n"),
+            },
+            "workspace patch",
+            None,
+        )
+        .expect("parse patch");
+
+        assert!(!output.changes[0].applied);
+        assert!(std::path::Path::new(link).is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(target).expect("target remains"),
             "keep\n"
         );
     }

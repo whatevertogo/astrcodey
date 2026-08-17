@@ -988,13 +988,16 @@ class _Driver:
     ) -> None:
         pending.terminal = True
         self._pending.pop(request_id, None)
-        try:
-            pending.queue.put_nowait(error)
-        except asyncio.QueueFull:
-            pass
+        self._enqueue_stream_terminal(pending, error)
         if cancel_reason is not None:
             self._tombstone(request_id)
             self._enqueue_best_effort(cancel_message(request_id, cancel_reason))
+
+    @staticmethod
+    def _enqueue_stream_terminal(pending: _StreamPending, terminal: S5rError) -> None:
+        if pending.queue.full():
+            pending.queue.get_nowait()
+        pending.queue.put_nowait(terminal)
 
     def _route_cancel(self, message: CancelMsg) -> None:
         entry = self._inbound.get(message.id)
@@ -1025,23 +1028,12 @@ class _Driver:
         self._inbound[message.id] = (task, token)
 
     def _validate_inbound(self, message: InvokeMsg) -> ErrorPayload | None:
-        if not message.operation:
-            return ErrorPayload(WireErrorCode.INVALID_REQUEST, "operation must not be empty")
-        if message.parent_invoke_id is not None:
-            if FEATURE_NESTED_INVOKE_V1 not in self._negotiated_features:
-                return ErrorPayload(
-                    WireErrorCode.UNSUPPORTED_FEATURE, "nested invoke was not negotiated"
-                )
-            if message.parent_invoke_id not in self._pending:
-                return ErrorPayload(
-                    WireErrorCode.UNKNOWN_PARENT_INVOKE,
-                    f"parent invoke {message.parent_invoke_id} is not active",
-                )
-        if message.stream and FEATURE_MODEL_STREAM_V1 not in self._negotiated_features:
-            return ErrorPayload(
-                WireErrorCode.UNSUPPORTED_FEATURE, "model stream was not negotiated"
-            )
-        return None
+        return self._negotiation_error(
+            message.operation,
+            message.parent_invoke_id,
+            stream=message.stream,
+            parent_table=self._pending,
+        )
 
     async def _run_inbound(self, message: InvokeMsg, token: CancelToken) -> None:
         try:
@@ -1102,24 +1094,40 @@ class _Driver:
     def _validate_outbound(
         self, operation: str, parent_invoke_id: str | None, *, stream: bool
     ) -> None:
+        error = self._negotiation_error(
+            operation,
+            parent_invoke_id,
+            stream=stream,
+            parent_table=self._inbound,
+        )
+        if error is not None:
+            raise S5rError.of(error.code, error.message)
+
+    def _negotiation_error(
+        self,
+        operation: str,
+        parent_invoke_id: str | None,
+        *,
+        stream: bool,
+        parent_table: Mapping[str, Any],
+    ) -> ErrorPayload | None:
         if not operation:
-            raise S5rError.of(
-                WireErrorCode.INVALID_REQUEST, "operation must not be empty"
-            )
+            return ErrorPayload(WireErrorCode.INVALID_REQUEST, "operation must not be empty")
         if parent_invoke_id is not None:
             if FEATURE_NESTED_INVOKE_V1 not in self._negotiated_features:
-                raise S5rError.of(
+                return ErrorPayload(
                     WireErrorCode.UNSUPPORTED_FEATURE, "nested invoke was not negotiated"
                 )
-            if parent_invoke_id not in self._inbound:
-                raise S5rError.of(
+            if parent_invoke_id not in parent_table:
+                return ErrorPayload(
                     WireErrorCode.UNKNOWN_PARENT_INVOKE,
                     f"parent invoke {parent_invoke_id} is not active",
                 )
         if stream and FEATURE_MODEL_STREAM_V1 not in self._negotiated_features:
-            raise S5rError.of(
+            return ErrorPayload(
                 WireErrorCode.UNSUPPORTED_FEATURE, "model stream was not negotiated"
             )
+        return None
 
     def _allocate_request_id(self) -> str:
         self._next_request_id += 1
@@ -1177,16 +1185,17 @@ class _Driver:
                         )
                     )
             else:
-                try:
-                    pending.queue.put_nowait(
-                        S5rError.of(
-                            WireErrorCode.PEER_CLOSED,
-                            "peer closed before the stream completed",
-                        )
-                    )
-                except asyncio.QueueFull:
-                    pass
+                self._enqueue_stream_terminal(
+                    pending,
+                    S5rError.of(
+                        WireErrorCode.PEER_CLOSED,
+                        "peer closed before the stream completed",
+                    ),
+                )
         self._pending.clear()
-        await self._write_queue.put(None)
+        if not writer.done():
+            if self._write_queue.full():
+                self._write_queue.get_nowait()
+            self._write_queue.put_nowait(None)
         await asyncio.gather(writer, return_exceptions=True)
         await self._transport.aclose()

@@ -12,6 +12,9 @@ use tempfile::NamedTempFile;
 
 use crate::{ToolResultArtifactInput, ToolResultArtifactRef, durable_write::sync_directory};
 
+/// 同一工具结果文件名碰撞时的最大尝试后缀数（磁盘与内存实现共享）。
+pub(crate) const MAX_ARTIFACT_NAME_COLLISIONS: usize = 1000;
+
 pub(crate) fn validate_tool_result_artifact_id(artifact_id: &str) -> Result<(), &'static str> {
     let mut components = Path::new(artifact_id).components();
     if artifact_id.is_empty()
@@ -65,7 +68,7 @@ pub(crate) fn write_tool_result_file(
     temporary.write_all(input.content.as_bytes())?;
     temporary.as_file().sync_all()?;
 
-    for suffix in 0..1000 {
+    for suffix in 0..MAX_ARTIFACT_NAME_COLLISIONS {
         let file_name = tool_result_artifact_id(&input.tool_name, &input.call_id, suffix);
         let path = dir.join(&file_name);
         match temporary.persist_noclobber(&path) {

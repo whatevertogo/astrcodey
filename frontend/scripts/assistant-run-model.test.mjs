@@ -160,10 +160,9 @@ assert.equal(
 )
 
 const longRunBlocks = [
-  assistant('a-long', '', 'streaming'),
-  ...Array.from({ length: 50 }, (_, index) =>
-    tool(`t-long-${index}`, 'read', index === 49 ? 'streaming' : 'complete')
-  ),
+  assistant('a-long', ''),
+  ...Array.from({ length: 50 }, (_, index) => tool(`t-long-${index}`, 'read')),
+  assistant('a-long-final', 'finished', 'complete', { storageSeq: 99 }),
 ]
 const longRunItems = buildMessageListItems([
   { kind: 'user', id: 'u-long', text: 'inspect everything' },
@@ -171,6 +170,30 @@ const longRunItems = buildMessageListItems([
 ])
 const longRunModel = buildAssistantRunModel(longRunBlocks)
 assert.equal(longRunItems[1].id, 'assistant-run:a-long')
+const longRunChunks = longRunItems.filter(
+  (item) => item.type === 'assistantRun'
+)
+assert.equal(longRunChunks.length, 2)
+assert.ok(
+  longRunChunks.every((item) => item.blocks.length <= 32),
+  'a long assistant run must be split into bounded virtual list items'
+)
+assert.equal(longRunChunks[0].actionBlocks, null)
+assert.equal(
+  longRunChunks[1].actionBlocks?.length,
+  longRunBlocks.length,
+  'only the final chunk owns actions for the complete logical run'
+)
+assert.ok(
+  longRunChunks[1].actionBlocks?.every(
+    (block, index) => block === longRunBlocks[index]
+  )
+)
+assert.equal(
+  longRunItems.at(-1),
+  longRunChunks[1],
+  'the final chunk must keep the turn action instead of adding a fallback row'
+)
 assert.equal(longRunModel.segments[0].id, 'process:t-long-0')
 assert.equal(longRunModel.processEntries.length, 50)
 

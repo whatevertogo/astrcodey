@@ -270,12 +270,12 @@ impl SessionGroup {
         let mut events = match request.cursor.as_ref() {
             Some(cursor) => {
                 reader
-                    .replay_from_limited(&session_id, cursor, request.limit + 1)
+                    .replay_from_active_or_recycled_limited(&session_id, cursor, request.limit + 1)
                     .await
             },
             None => {
                 reader
-                    .replay_from_start_limited(&session_id, request.limit + 1)
+                    .replay_from_start_active_or_recycled_limited(&session_id, request.limit + 1)
                     .await
             },
         }
@@ -471,7 +471,7 @@ impl SessionGroup {
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
         let session_id = astrcode_core::types::SessionId::new(access.target_session_id);
         let events = reader
-            .replay_events(&session_id)
+            .replay_events_active_or_recycled(&session_id)
             .await
             .map_err(storage_read_error)?;
         let mut total_tokens = 0u64;

@@ -125,11 +125,3 @@ def tool_text(content: str, is_error: bool = False) -> HandlerResult:
     return HandlerResult.of(
         HandlerEffect.TOOL_OUTCOME, {"content": content, "is_error": is_error}
     )
-
-
-def hook_continuation(on: str, input: Any = None) -> dict[str, Any]:
-    return {"call": "hook", "on": on, "input": input}
-
-
-def tool_continuation(name: str, input: Any = None) -> dict[str, Any]:
-    return {"call": "tool", "name": name, "input": input}

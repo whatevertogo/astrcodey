@@ -12,10 +12,7 @@ use astrcode_core::{
 };
 use tokio::{sync::oneshot, task::JoinSet};
 
-use super::{
-    ToolCalls,
-    events::{finish_tool_call, tool_result_for_output},
-};
+use super::{ToolCalls, events::finish_tool_call};
 use crate::{
     permission::APPROVAL_TIMEOUT_SECS,
     tool_exec::execute_tool_call,
@@ -68,14 +65,14 @@ impl ToolCalls {
             }
             let call = input.batch.calls[position].clone();
 
-            // 只有「无预执行结果的并行调用」能加入当前并行批次；其余调用必须先 flush：
+            // 并行调用加入当前并行批次；其余调用必须先 flush：
             // 并行批次在 flush 时才执行并提交，串行/审批/去重复用调用必须等它完成，
             // 否则 durable 事件乱序；去重复用还依赖 flush 中 finalize 主调用结果，
             // 顺序颠倒会死锁。
             let joins_parallel = matches!(
                 &call.disposition,
                 PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel
-            ) && !input.batch.pre_executed.contains_key(&call.index);
+            );
             if !joins_parallel {
                 discovered_tools.extend(
                     self.flush_and_commit_parallel_batch(
@@ -111,24 +108,16 @@ impl ToolCalls {
                     .await?,
                 ),
                 PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel => {
-                    if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
-                        Some(outcome)
-                    } else {
-                        if parallel_batch_start.is_none() {
-                            parallel_batch_start = Some(position);
-                        }
-                        parallel_batch.push(call.to_executable());
-                        None
+                    if parallel_batch_start.is_none() {
+                        parallel_batch_start = Some(position);
                     }
+                    parallel_batch.push(call.to_executable());
+                    None
                 },
                 PreparedToolDisposition::Execute => {
-                    let outcome =
-                        if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
-                            outcome
-                        } else {
-                            self.execute_single_tool(call.to_executable(), Arc::clone(&tools))
-                                .await
-                        };
+                    let outcome = self
+                        .execute_single_tool(call.to_executable(), Arc::clone(&tools))
+                        .await;
                     Some(outcome)
                 },
             };
@@ -197,9 +186,6 @@ impl ToolCalls {
                 continue;
             }
             uncommitted_calls.remove(&call.call_id);
-            input
-                .state
-                .record_tool_result(tool_result_for_output(&outcome));
         }
     }
 

@@ -63,6 +63,9 @@ pub(crate) enum ConfigUpdateError<E> {
     Transaction(#[from] ConfigTransactionError),
 }
 
+/// 无 mutation 闭包的路径（apply/initialize/reload）使用的错误类型。
+pub(crate) type PreparedConfigError = ConfigUpdateError<std::convert::Infallible>;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigTransactionError {
     #[error(
@@ -365,10 +368,10 @@ impl ConfigManager {
         }
     }
 
-    pub(crate) async fn apply_loaded_config<E>(
+    pub(crate) async fn apply_loaded_config(
         &self,
         config: Config,
-    ) -> Result<(), ConfigUpdateError<E>> {
+    ) -> Result<(), PreparedConfigError> {
         let update = Arc::clone(&self.update_lock).lock_owned().await;
         let prepared = Self::prepare(config)?;
         let publication = self.start_publication_transaction(
@@ -379,7 +382,7 @@ impl ConfigManager {
         Self::await_publication(publication).await
     }
 
-    pub(crate) async fn initialize_extensions<E>(&self) -> Result<(), ConfigUpdateError<E>> {
+    pub(crate) async fn initialize_extensions(&self) -> Result<(), PreparedConfigError> {
         let update = Arc::clone(&self.update_lock).lock_owned().await;
         let prepared = Self::prepare(self.raw_config_snapshot())?;
         let publication = self.start_publication_transaction(
@@ -390,7 +393,7 @@ impl ConfigManager {
         Self::await_publication(publication).await
     }
 
-    pub(crate) async fn reload_extensions<E>(&self) -> Result<(), ConfigUpdateError<E>> {
+    pub(crate) async fn reload_extensions(&self) -> Result<(), PreparedConfigError> {
         self.initialize_extensions().await
     }
 

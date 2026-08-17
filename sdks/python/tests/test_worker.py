@@ -34,6 +34,12 @@ from s5r.protocol import (
     encode_message,
 )
 from s5r.results import FileOperation, HostResource
+from s5r.worker import (
+    _STREAM_BUFFER_CAPACITY,
+    _WRITE_QUEUE_CAPACITY,
+    _Driver,
+    _StreamPending,
+)
 
 EXT_ID = "test-extension"
 SCOPE = {"session_id": "session-1", "working_dir": "/workspace"}
@@ -533,6 +539,35 @@ class ParseHelperTest(unittest.TestCase):
     def test_parse_tool_arguments_raw(self) -> None:
         self.assertEqual(parse_tool_arguments({"a": 1}), {"a": 1})
 
+
+class DriverBackpressureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_saturated_stream_queue_retains_the_terminal_failure(self) -> None:
+        transport, _ = MemoryTransport.pair()
+        driver = _Driver(transport, Worker(EXT_ID, "0.1.0"), set(), [])
+        pending = _StreamPending()
+        driver._pending["stream-1"] = pending
+        for index in range(_STREAM_BUFFER_CAPACITY):
+            pending.queue.put_nowait({"type": "content_delta", "content": str(index)})
+
+        driver._fail_stream(
+            "stream-1",
+            pending,
+            S5rError.of(WireErrorCode.PEER_OVERLOADED, "queue full"),
+            cancel_reason=None,
+        )
+
+        items = [pending.queue.get_nowait() for _ in range(_STREAM_BUFFER_CAPACITY)]
+        self.assertIsInstance(items[-1], S5rError)
+
+    async def test_shutdown_does_not_wait_on_a_full_queue_after_writer_exit(self) -> None:
+        transport, _ = MemoryTransport.pair()
+        driver = _Driver(transport, Worker(EXT_ID, "0.1.0"), set(), [])
+        for index in range(_WRITE_QUEUE_CAPACITY):
+            driver._write_queue.put_nowait({"index": index})
+        writer = asyncio.create_task(asyncio.sleep(0))
+        await writer
+
+        await asyncio.wait_for(driver._shutdown(writer), timeout=0.1)
 
 if __name__ == "__main__":
     unittest.main()

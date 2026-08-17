@@ -1439,17 +1439,18 @@ mod tests {
     #[tokio::test]
     async fn tool_resource_lease_rejects_actual_access_outside_the_approved_plan() {
         let workspace = tempfile::tempdir().expect("workspace");
-        std::fs::write(workspace.path().join("approved.txt"), "approved").expect("seed approved");
+        std::fs::write(workspace.path().join(".env"), "approved").expect("seed approved");
         std::fs::write(workspace.path().join("other.txt"), "other").expect("seed other");
         let root = workspace.path().to_string_lossy().into_owned();
         let lease = ResourceLease::from_plan(&astrcode_core::tool::access::ToolPlan::new([
-            ResourceAccess::read_file(workspace.path().join("approved.txt")),
+            ResourceAccess::read_file(workspace.path().join(".env")),
         ]));
         let router = HostRouter::from_backends(HostBackends {
             default_working_dir: Some(root.clone()),
             ..Default::default()
         });
         let ctx = InvokeContext {
+            extension_id: "astrcode-coding".into(),
             working_dir: Some(root),
             declared_capabilities: vec![
                 ExtensionCapability::WorkspaceRead,
@@ -1460,14 +1461,24 @@ mod tests {
         };
 
         let approved = router
-            .invoke(
-                "astrcode.workspace.read",
-                json!({"path": "approved.txt"}),
-                &ctx,
-            )
+            .invoke("astrcode.workspace.read", json!({"path": ".env"}), &ctx)
             .await
             .expect("approved read");
         assert_eq!(approved["content"], "approved");
+
+        let untrusted = InvokeContext {
+            extension_id: "third-party".into(),
+            ..ctx.clone()
+        };
+        let error = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({"path": ".env"}),
+                &untrusted,
+            )
+            .await
+            .expect_err("non-coding extensions cannot bypass sensitive path protection");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
 
         for (operation, input) in [
             ("astrcode.workspace.read", json!({"path": "other.txt"})),
@@ -1490,7 +1501,7 @@ mod tests {
         let error = router
             .invoke(
                 "astrcode.workspace.read",
-                json!({"path": "approved.txt"}),
+                json!({"path": ".env"}),
                 &planning,
             )
             .await

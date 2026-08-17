@@ -8,6 +8,12 @@ use super::{CommandHandler, HandlerError, PromptSubmission, slash};
 use crate::session_command_contract::{ParsedSlashCommand, parse_slash_command};
 
 impl CommandHandler {
+    /// 发送错误通知并原样返回错误，供 handler 的 `send_error + return Err` 两步合并。
+    fn report_error(&self, code: i32, error: HandlerError) -> HandlerError {
+        self.send_error(code, &error.to_string());
+        error
+    }
+
     pub(super) async fn submit_prompt(
         &mut self,
         text: String,
@@ -23,8 +29,7 @@ impl CommandHandler {
             match self.execute_command_for_session(sid.clone(), command).await {
                 Ok(_) => return Ok(()),
                 Err(error) => {
-                    self.send_error(slash::command_error_code(&error), &error.to_string());
-                    return Err(error);
+                    return Err(self.report_error(slash::command_error_code(&error), error));
                 },
             }
         }
@@ -33,10 +38,7 @@ impl CommandHandler {
         }
         match self.session_commands.submit_input(sid, input).await {
             Ok(_) => Ok(()),
-            Err(error) => {
-                self.send_error(slash::command_error_code(&error), &error.to_string());
-                Err(error)
-            },
+            Err(error) => Err(self.report_error(slash::command_error_code(&error), error)),
         }
     }
 
@@ -54,8 +56,7 @@ impl CommandHandler {
         text: String,
     ) -> Result<(), HandlerError> {
         if !self.scheduler.registry().has_active(sid) {
-            self.send_error(40400, "No active turn");
-            return Err(HandlerError::NoActiveTurn);
+            return Err(self.report_error(40400, HandlerError::NoActiveTurn));
         }
         self.inject_input_for_session(sid.clone(), text)
             .await

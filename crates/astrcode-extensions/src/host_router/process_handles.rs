@@ -55,15 +55,26 @@ impl IncrementalOutput {
         }
     }
 
-    fn take(&mut self) -> (String, usize) {
-        let bytes = std::mem::take(&mut self.bytes);
+    fn take(&mut self, retain_incomplete_utf8: bool) -> (String, usize) {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        if retain_incomplete_utf8 && let Some(incomplete_start) = incomplete_utf8_start(&bytes) {
+            self.bytes = bytes.split_off(incomplete_start);
+        }
         let dropped = std::mem::take(&mut self.dropped_bytes);
         (String::from_utf8_lossy(&bytes).into_owned(), dropped)
     }
 
     fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.dropped_bytes == 0
+            && (self.bytes.is_empty() || incomplete_utf8_start(&self.bytes) == Some(0))
     }
+}
+
+fn incomplete_utf8_start(bytes: &[u8]) -> Option<usize> {
+    (bytes.len().saturating_sub(3)..bytes.len()).find(|start| {
+        std::str::from_utf8(&bytes[*start..])
+            .is_err_and(|error| error.valid_up_to() == 0 && error.error_len().is_none())
+    })
 }
 
 #[derive(Default)]
@@ -118,9 +129,10 @@ impl ProcessEntry {
 
     fn take_output(&self) -> HostProcessReadOutput {
         let mut output = self.output.lock();
-        let (stdout, stdout_dropped) = output.stdout.take();
-        let (stderr, stderr_dropped) = output.stderr.take();
-        let (combined, combined_dropped) = output.combined.take();
+        let retain_incomplete_utf8 = output.running;
+        let (stdout, stdout_dropped) = output.stdout.take(retain_incomplete_utf8);
+        let (stderr, stderr_dropped) = output.stderr.take(retain_incomplete_utf8);
+        let (combined, combined_dropped) = output.combined.take(retain_incomplete_utf8);
         HostProcessReadOutput {
             id: self.id.clone(),
             stdout,
@@ -528,44 +540,89 @@ async fn run_pipe_process(
     cancellation: CancellationToken,
     timeout: Duration,
 ) {
-    let stdout_reader = pump_output(stdout, Arc::clone(&entry), false);
-    let stderr_reader = pump_output(stderr, Arc::clone(&entry), true);
-    let wait = async {
-        tokio::select! {
-            status = child.wait() => (
-                status.ok().and_then(|status| status.code()),
-                ProcessTermination::Exited,
-            ),
-            () = cancellation.cancelled() => {
-                let termination = entry
-                    .requested_termination
-                    .lock()
-                    .unwrap_or(ProcessTermination::Killed);
-                (
+    let readers = async {
+        tokio::join!(
+            pump_output(stdout, Arc::clone(&entry), false),
+            pump_output(stderr, Arc::clone(&entry), true),
+        );
+    };
+    tokio::pin!(readers);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    enum FirstCompletion {
+        Child(Option<i32>),
+        Readers,
+        Terminate(ProcessTermination),
+    }
+
+    let first = tokio::select! {
+        status = child.wait() => FirstCompletion::Child(status.ok().and_then(|status| status.code())),
+        () = &mut readers => FirstCompletion::Readers,
+        termination = requested_termination(Arc::clone(&entry), cancellation.clone(), deadline) => {
+            FirstCompletion::Terminate(termination)
+        },
+    };
+    let (status, termination) = match first {
+        FirstCompletion::Child(status) => {
+            let termination = tokio::select! {
+                () = &mut readers => ProcessTermination::Exited,
+                termination = requested_termination(Arc::clone(&entry), cancellation, deadline) => {
+                    let status = child
+                        .terminate(TERMINATION_GRACE)
+                        .await
+                        .ok()
+                        .and_then(|status| status.code())
+                        .or(status);
+                    readers.await;
+                    stdin.lock().await.take();
+                    entry.finish(status, termination);
+                    return;
+                },
+            };
+            (status, termination)
+        },
+        FirstCompletion::Readers => {
+            tokio::select! {
+                status = child.wait() => (
+                    status.ok().and_then(|status| status.code()),
+                    ProcessTermination::Exited,
+                ),
+                termination = requested_termination(Arc::clone(&entry), cancellation, deadline) => (
                     child.terminate(TERMINATION_GRACE).await.ok().and_then(|status| status.code()),
                     termination,
-                )
-            },
-            () = call_owner_cancelled(Arc::clone(&entry)) => {
-                (
-                    child.terminate(TERMINATION_GRACE).await.ok().and_then(|status| status.code()),
-                    ProcessTermination::Cancelled,
-                )
-            },
-            () = tokio::time::sleep(timeout) => {
-                (
-                    child.terminate(TERMINATION_GRACE).await.ok().and_then(|status| status.code()),
-                    ProcessTermination::TimedOut,
-                )
-            },
-        }
+                ),
+            }
+        },
+        FirstCompletion::Terminate(termination) => {
+            let status = child
+                .terminate(TERMINATION_GRACE)
+                .await
+                .ok()
+                .and_then(|status| status.code());
+            readers.await;
+            (status, termination)
+        },
     };
-    let (_, _, (status, termination)) = tokio::join!(stdout_reader, stderr_reader, wait);
     stdin.lock().await.take();
     entry.finish(status, termination);
 }
 
-async fn call_owner_cancelled(entry: Arc<ProcessEntry>) {
+async fn requested_termination(
+    entry: Arc<ProcessEntry>,
+    cancellation: CancellationToken,
+    deadline: tokio::time::Instant,
+) -> ProcessTermination {
+    tokio::select! {
+        () = cancellation.cancelled() => entry
+            .requested_termination
+            .lock()
+            .unwrap_or(ProcessTermination::Killed),
+        () = call_owner_cancelled(&entry) => ProcessTermination::Cancelled,
+        () = tokio::time::sleep_until(deadline) => ProcessTermination::TimedOut,
+    }
+}
+
+async fn call_owner_cancelled(entry: &ProcessEntry) {
     let cancellation = {
         let owner = entry.lifetime_owner.lock();
         match &*owner {
@@ -659,6 +716,19 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn incremental_output_retains_incomplete_utf8_until_the_next_read() {
+        let mut output = IncrementalOutput::default();
+        let character = "你".as_bytes();
+        output.append(&character[..2]);
+
+        assert_eq!(output.take(true), (String::new(), 0));
+        assert!(output.is_empty());
+
+        output.append(&character[2..]);
+        assert_eq!(output.take(true), ("你".into(), 0));
+    }
 
     #[tokio::test]
     async fn call_owned_process_requires_invocation_cancellation() {
@@ -924,7 +994,7 @@ mod tests {
         store.cleanup_extension(replacement_owner);
 
         let mut timeout_request = HostProcessStartRequest::new("/bin/sh");
-        timeout_request.args = vec!["-c".into(), "sleep 1".into()];
+        timeout_request.args = vec!["-c".into(), "sleep 1 & printf parent-exited".into()];
         timeout_request.timeout_ms = Some(10);
         let timed_out = store
             .start(
@@ -936,10 +1006,10 @@ mod tests {
             )
             .await
             .expect("start timed process");
-        let timeout_output = store
+        let first_timeout_output = store
             .read(
                 HostProcessReadRequest {
-                    id: timed_out.id,
+                    id: timed_out.id.clone(),
                     wait_ms: Some(3_000),
                 },
                 "session-a",
@@ -947,11 +1017,28 @@ mod tests {
                 None,
             )
             .await
-            .expect("read timed process");
-        assert!(!timeout_output.state.is_running());
-        assert!(matches!(
-            timeout_output.state,
-            HostProcessState::TimedOut { .. }
-        ));
+            .expect("read direct child output");
+        let mut combined = first_timeout_output.combined;
+        let state = if first_timeout_output.state.is_running() {
+            let timeout_output = store
+                .read(
+                    HostProcessReadRequest {
+                        id: timed_out.id,
+                        wait_ms: Some(3_000),
+                    },
+                    "session-a",
+                    owner,
+                    None,
+                )
+                .await
+                .expect("read timed process");
+            combined.push_str(&timeout_output.combined);
+            timeout_output.state
+        } else {
+            first_timeout_output.state
+        };
+        assert!(!state.is_running());
+        assert!(matches!(state, HostProcessState::TimedOut { .. }));
+        assert_eq!(combined, "parent-exited");
     }
 }

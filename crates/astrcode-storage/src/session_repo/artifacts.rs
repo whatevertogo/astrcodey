@@ -39,16 +39,11 @@ impl ToolResultArtifactStore for FileSystemSessionRepository {
             ));
         }
         let artifact_id = artifact_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        crate::durable_write::spawn_blocking_storage("tool result artifact reader", move || {
             read_tool_result_file(&canonical_path, &artifact_id, byte_offset, max_bytes)
+                .map_err(StorageError::Io)
         })
         .await
-        .map_err(|error| {
-            StorageError::Io(std::io::Error::other(format!(
-                "tool result artifact reader stopped: {error}"
-            )))
-        })?
-        .map_err(StorageError::Io)
     }
 
     async fn write_tool_result_artifact(
@@ -58,13 +53,9 @@ impl ToolResultArtifactStore for FileSystemSessionRepository {
     ) -> Result<ToolResultArtifactRef, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let dir = meta.dir.join("tool-results");
-        tokio::task::spawn_blocking(move || write_tool_result_file(&dir, &artifact))
-            .await
-            .map_err(|error| {
-                StorageError::Io(std::io::Error::other(format!(
-                    "tool result artifact writer stopped: {error}"
-                )))
-            })?
-            .map_err(StorageError::Io)
+        crate::durable_write::spawn_blocking_storage("tool result artifact writer", move || {
+            write_tool_result_file(&dir, &artifact).map_err(StorageError::Io)
+        })
+        .await
     }
 }

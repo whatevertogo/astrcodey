@@ -84,3 +84,23 @@ pub use crate::{
     manifest::{ExtensionManifest, ExtensionManifestError},
     transport::TransportFeature,
 };
+
+/// 反序列化工具参数，失败时生成带 JSON path 与 schema hint 的 `InvalidInput`。
+///
+/// 供 [`ToolContext::arguments`] 与 [`ToolPlanContext::arguments`] 共用。
+pub(crate) fn parse_tool_arguments<T: serde::de::DeserializeOwned>(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<T, ExtensionError> {
+    serde_path_to_error::deserialize(arguments).map_err(|error| {
+        let path = error.path().to_string();
+        let path = if path.is_empty() { "$" } else { path.as_str() };
+        ExtensionError::invalid_input(
+            format!(
+                "tool `{tool_name}` arguments at `{path}`: {}",
+                error.into_inner()
+            ),
+            format!("check the `{tool_name}` tool arguments against its declared JSON schema"),
+        )
+    })
+}

@@ -3,6 +3,7 @@ use astrcode_core::{
     types::SessionId,
 };
 use tempfile::tempdir;
+use tokio::time::{Duration, timeout};
 
 use super::{
     EventLog, parse_event_line, read_summary_at_path, replay_events_at_path, sync_existing_log,
@@ -84,6 +85,38 @@ async fn event_log_batch_is_atomic_and_assigns_consecutive_sequences() {
         stored.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![1, 2]
     );
+}
+
+#[test]
+fn idle_event_logs_do_not_occupy_the_blocking_pool() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        timeout(Duration::from_secs(10), async {
+            let dir = tempdir().unwrap();
+            let mut logs = Vec::new();
+            for index in 0..16 {
+                let session_id = SessionId::new(format!("session-{index}"));
+                let path = dir.path().join(format!("events-{index}.jsonl"));
+                let (log, _) = EventLog::create(path, started_event(&session_id))
+                    .await
+                    .unwrap();
+                logs.push((session_id, log));
+            }
+
+            for (session_id, log) in &logs {
+                log.append(user_event(session_id, "message")).await.unwrap();
+                log.force_sync().await.unwrap();
+            }
+        })
+        .await
+        .expect("idle logs must not exhaust the shared blocking pool");
+    });
 }
 
 #[test]

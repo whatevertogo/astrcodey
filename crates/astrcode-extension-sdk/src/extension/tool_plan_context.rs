@@ -10,8 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::ExtensionError;
-use crate::WireErrorCode;
+use super::{ExtensionError, parse_tool_arguments};
 
 /// Immutable facts available while an extension plans a tool invocation.
 ///
@@ -89,22 +88,7 @@ impl ToolPlanContext {
     }
 
     pub fn arguments<T: DeserializeOwned>(&self) -> Result<T, ExtensionError> {
-        serde_path_to_error::deserialize(&self.arguments).map_err(|error| {
-            let path = error.path().to_string();
-            let path = if path.is_empty() { "$" } else { path.as_str() };
-            ExtensionError::InvalidInput {
-                code: WireErrorCode::InvalidInput.as_str().into(),
-                message: format!(
-                    "tool `{}` arguments at `{path}`: {}",
-                    self.tool_name,
-                    error.into_inner()
-                ),
-                hint: Some(format!(
-                    "check the `{}` tool arguments against its declared JSON schema",
-                    self.tool_name
-                )),
-            }
-        })
+        parse_tool_arguments(&self.tool_name, &self.arguments)
     }
 
     pub fn cancellation(&self) -> &CancellationToken {

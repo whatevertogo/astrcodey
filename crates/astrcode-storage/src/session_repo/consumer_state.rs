@@ -18,11 +18,7 @@ pub(super) fn event_consumer_state_path(
     session_dir: &Path,
     consumer_id: &str,
 ) -> Result<PathBuf, StorageError> {
-    if consumer_id.is_empty() {
-        return Err(StorageError::InvalidId(
-            "event consumer id cannot be empty".into(),
-        ));
-    }
+    crate::traits::validate_event_consumer_id(consumer_id)?;
     let digest = Sha256::digest(consumer_id.as_bytes());
     Ok(session_dir
         .join("event-consumers")
@@ -111,14 +107,10 @@ pub(super) async fn write_event_consumer_state(
     state.validate_audit_bounds()?;
     let bytes = serde_json::to_vec(&PersistedEventConsumerState::from(state))?;
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || replace_durable_file(&path, &bytes))
-        .await
-        .map_err(|error| {
-            StorageError::Io(std::io::Error::other(format!(
-                "event consumer state writer stopped: {error}"
-            )))
-        })?
-        .map_err(StorageError::Io)
+    crate::durable_write::spawn_blocking_storage("event consumer state writer", move || {
+        replace_durable_file(&path, &bytes).map_err(StorageError::Io)
+    })
+    .await
 }
 
 /// consumer 状态编辑的结果:`Changed` 先把变更后的状态落盘再返回,

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, OnceLock, Weak},
+    sync::{Arc, Weak},
     time::Duration,
 };
 
@@ -15,7 +15,7 @@ use super::{
 };
 
 pub(super) struct GenerationPublicHttpDispatcher {
-    index: OnceLock<Weak<HandlerIndex>>,
+    index: parking_lot::RwLock<Weak<HandlerIndex>>,
     diagnostics: Arc<parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>>,
     operation_timeout: Duration,
     call_context_factory: ExtensionCallContextFactory,
@@ -39,7 +39,7 @@ impl ExtensionView {
         index: &Arc<HandlerIndex>,
     ) -> Arc<dyn crate::host_router::PublicHttpDispatcher> {
         let dispatcher = Arc::new(GenerationPublicHttpDispatcher {
-            index: OnceLock::new(),
+            index: parking_lot::RwLock::new(Weak::new()),
             diagnostics: Arc::clone(&self.diagnostics),
             operation_timeout: self.operation_timeout,
             call_context_factory: self.call_context_factory.clone(),
@@ -47,7 +47,7 @@ impl ExtensionView {
             custom_event_lanes: Arc::clone(&self.custom_event_lanes),
             custom_event_quiescing: Arc::clone(&self.custom_event_quiescing),
         });
-        dispatcher.bind_once(index);
+        dispatcher.bind(index);
         dispatcher
     }
 
@@ -185,7 +185,7 @@ impl ExtensionView {
 impl GenerationPublicHttpDispatcher {
     pub(super) fn for_candidate(runner: &ExtensionRunner) -> Arc<Self> {
         Arc::new(Self {
-            index: OnceLock::new(),
+            index: parking_lot::RwLock::new(Weak::new()),
             diagnostics: Arc::clone(&runner.diagnostics),
             operation_timeout: runner.operation_timeout,
             call_context_factory: runner.extension_call_context_factory(),
@@ -195,12 +195,12 @@ impl GenerationPublicHttpDispatcher {
         })
     }
 
-    pub(super) fn bind_once(&self, index: &Arc<HandlerIndex>) {
-        self.index.get_or_init(|| Arc::downgrade(index));
+    pub(super) fn bind(&self, index: &Arc<HandlerIndex>) {
+        *self.index.write() = Arc::downgrade(index);
     }
 
     fn extension_view(&self) -> Result<ExtensionView, ExtensionError> {
-        let index = self.index.get().and_then(Weak::upgrade).ok_or_else(|| {
+        let index = self.index.read().upgrade().ok_or_else(|| {
             ExtensionError::NotFound("extension HTTP generation is no longer available".into())
         })?;
         Ok(ExtensionView {

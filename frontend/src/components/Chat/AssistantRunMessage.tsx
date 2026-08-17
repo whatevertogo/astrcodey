@@ -27,6 +27,7 @@ import { isPendingAskUser } from './tools/askUser'
 
 interface AssistantRunMessageProps {
   blocks: AssistantLikeBlock[]
+  actionBlocks: AssistantLikeBlock[] | null
   sessionId: string | null
 }
 
@@ -299,10 +300,17 @@ function PendingAskUserPrompts({
   )
 }
 
-function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
+function AssistantRunMessage({
+  blocks,
+  actionBlocks,
+  sessionId,
+}: AssistantRunMessageProps) {
   const runModel = buildAssistantRunModel(blocks)
-  const completedReply = assistantRunCompletedReply(blocks)
-  const copyText = completedReply ? assistantRunCopyText(blocks) : ''
+  const completedReply = actionBlocks
+    ? assistantRunCompletedReply(actionBlocks)
+    : null
+  const copyText =
+    completedReply && actionBlocks ? assistantRunCopyText(actionBlocks) : ''
 
   return (
     <div className="flex items-start animate-message-enter motion-reduce:animate-none">

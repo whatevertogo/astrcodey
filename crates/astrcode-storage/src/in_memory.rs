@@ -49,12 +49,7 @@ struct InMemorySession {
 }
 
 fn validate_event_consumer_id(consumer_id: &str) -> Result<(), StorageError> {
-    if consumer_id.is_empty() {
-        return Err(StorageError::InvalidId(
-            "event consumer id cannot be empty".into(),
-        ));
-    }
-    Ok(())
+    crate::traits::validate_event_consumer_id(consumer_id)
 }
 
 impl InMemoryEventStore {
@@ -182,7 +177,7 @@ impl ToolResultArtifactStore for InMemoryEventStore {
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        for suffix in 0..1000 {
+        for suffix in 0..crate::tool_artifacts::MAX_ARTIFACT_NAME_COLLISIONS {
             let artifact_id =
                 tool_result_artifact_id(&artifact.tool_name, &artifact.call_id, suffix);
             match session.tool_results.get(&artifact_id) {
@@ -214,14 +209,10 @@ impl ToolResultArtifactStore for InMemoryEventStore {
 impl SessionPathResolver for InMemoryEventStore {
     async fn session_store_dir(
         &self,
-        session_id: &SessionId,
+        _session_id: &SessionId,
     ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        let map = self.sessions.lock().await;
-        if map.contains_key(session_id) {
-            Ok(None)
-        } else {
-            Err(StorageError::NotFound(session_id.clone()))
-        }
+        // 内存实现没有磁盘目录；与磁盘实现的「缺失 → Ok(None)」语义一致。
+        Ok(None)
     }
 
     async fn planned_session_store_dir(

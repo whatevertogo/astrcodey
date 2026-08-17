@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
 from .errors import ErrorPayload, S5rError, WireErrorCode
+from .protocol import TERMINAL_STREAM_EVENTS
 
 
 class HostOperation:
@@ -129,9 +130,11 @@ async def _collect(stream: AsyncIterator[dict[str, Any]]) -> Any:
     output = None
     async for event in stream:
         event_type = event.get("type")
+        if event_type not in TERMINAL_STREAM_EVENTS:
+            continue
         if event_type == "completed":
             output = event.get("output")
-        elif event_type == "failed":
+        else:
             raise S5rError(ErrorPayload.from_json(event["error"]))
     return output
 

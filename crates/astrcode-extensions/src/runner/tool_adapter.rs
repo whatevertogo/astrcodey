@@ -354,7 +354,9 @@ impl Tool for HandlerTool {
         let execution = match self.execution_policy.timeout {
             Some(timeout) => match tokio::time::timeout(timeout, execution).await {
                 Ok(result) => result,
-                Err(_) => Err(ExtensionError::Timeout(timeout.as_millis() as u64)),
+                Err(_) => Err(ExtensionError::Timeout(
+                    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                )),
             },
             None => execution.await,
         };

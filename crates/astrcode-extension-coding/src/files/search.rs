@@ -310,13 +310,10 @@ fn validate_page_size(value: Option<usize>, name: &str) -> Result<(), ExtensionE
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: astrcode_extension_sdk::WireErrorCode::InvalidInput
-            .as_str()
-            .into(),
-        message: message.into(),
-        hint: Some("narrow the search and follow the tool parameter schema".into()),
-    }
+    ExtensionError::invalid_input(
+        message,
+        Some("narrow the search and follow the tool parameter schema".to_string()),
+    )
 }
 
 fn host_pattern(args: &GrepArgs) -> String {

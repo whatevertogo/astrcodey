@@ -63,15 +63,12 @@ impl CodingExtension {
     fn parse_config(config: &ExtensionConfig) -> Result<CodingConfig, ExtensionError> {
         let config = config.deserialize_or_default::<CodingConfig>()?;
         if !(1..=MAX_SHELL_TIMEOUT_SECS).contains(&config.shell_timeout_secs) {
-            return Err(ExtensionError::InvalidInput {
-                code: astrcode_extension_sdk::WireErrorCode::InvalidInput
-                    .as_str()
-                    .into(),
-                message: format!("shellTimeoutSecs must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"),
-                hint: Some(format!(
+            return Err(ExtensionError::invalid_input(
+                format!("shellTimeoutSecs must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"),
+                Some(format!(
                     "set extensions.{EXTENSION_ID}.shellTimeoutSecs to a valid number of seconds"
                 )),
-            });
+            ));
         }
         Ok(config)
     }

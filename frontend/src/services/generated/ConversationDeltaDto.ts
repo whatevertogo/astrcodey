@@ -10,7 +10,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * SSE conversation 增量。
  */
-export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "resetBlock", blockId: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "patchArguments", blockId: string, arguments: string,
+export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "appendTransientBlock", turnId: string, block: ConversationBlockDto, } | { "kind": "clearTransientBlocks", turnId: string, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "resetBlock", blockId: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "patchArguments", blockId: string, arguments: string,
 /**
  * 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
  */

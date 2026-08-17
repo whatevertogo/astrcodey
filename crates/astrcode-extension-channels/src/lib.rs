@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::BuildHasher,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -27,10 +28,12 @@ use astrcode_extension_sdk::{
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
 const EXTENSION_ID: &str = "astrcode-channels";
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+const TELEGRAM_SESSIONS_FILE: &str = "telegram-sessions.json";
 const CONFIG_SLEEP_SECS: u64 = 5;
 
 pub fn extension() -> Arc<dyn Extension> {
@@ -154,7 +157,18 @@ impl Extension for TelegramChannelsExtension {
         })?;
 
         let api = Arc::new(HttpTelegramApi::new());
-        let runtime = Arc::new(TelegramRuntime::new(config, session_control, api));
+        let sessions_path = ctx
+            .paths()
+            .global_data_dir()
+            .map(|data_dir| data_dir.join(TELEGRAM_SESSIONS_FILE));
+        let sessions = load_telegram_sessions(sessions_path.as_deref())?;
+        let runtime = Arc::new(TelegramRuntime::new(
+            config,
+            session_control,
+            api,
+            sessions_path,
+            sessions,
+        ));
         ctx.tasks().spawn(
             "telegram-channel-poll",
             poll_telegram(Arc::clone(&runtime), ctx.cancellation().clone()),
@@ -175,7 +189,8 @@ impl Extension for TelegramChannelsExtension {
 
 struct TelegramRuntime {
     config: ParkingMutex<ChannelsConfig>,
-    sessions_by_chat: ParkingMutex<HashMap<String, String>>,
+    sessions: ParkingMutex<TelegramSessionsState>,
+    sessions_path: Option<PathBuf>,
     session_control: SessionControlClient,
     telegram: Arc<dyn TelegramApi>,
 }
@@ -185,10 +200,13 @@ impl TelegramRuntime {
         config: ChannelsConfig,
         session_control: SessionControlClient,
         telegram: Arc<dyn TelegramApi>,
+        sessions_path: Option<PathBuf>,
+        sessions: TelegramSessionsState,
     ) -> Self {
         Self {
             config: ParkingMutex::new(config),
-            sessions_by_chat: ParkingMutex::new(HashMap::new()),
+            sessions: ParkingMutex::new(sessions),
+            sessions_path,
             session_control,
             telegram,
         }
@@ -223,7 +241,7 @@ impl TelegramRuntime {
             return self.send_reply(cfg, &inbound.chat_id, reply).await;
         }
 
-        let session_id = self.session_for_chat(&inbound.chat_id).await?;
+        let session_id = self.session_for_chat(cfg, &inbound.chat_id).await?;
         let result = self
             .session_control
             .submit_root_turn(HostRootSubmitTurnRequest::new(session_id, inbound.text))
@@ -239,13 +257,26 @@ impl TelegramRuntime {
         self.send_reply(cfg, &inbound.chat_id, &reply).await
     }
 
-    async fn session_for_chat(&self, chat_id: &str) -> Result<String, ExtensionError> {
-        let cached_session_id = self.sessions_by_chat.lock().get(chat_id).cloned();
+    async fn session_for_chat(
+        &self,
+        cfg: &TelegramChannelConfig,
+        chat_id: &str,
+    ) -> Result<String, ExtensionError> {
+        let bot_fingerprint = telegram_bot_fingerprint(&resolve_bot_token(cfg)?);
+        let cached_session_id = self
+            .sessions
+            .lock()
+            .by_bot
+            .get(&bot_fingerprint)
+            .and_then(|sessions| sessions.get(chat_id))
+            .cloned();
         if let Some(session_id) = cached_session_id {
             if self.cached_session_alive(&session_id).await {
                 return Ok(session_id);
             }
-            self.sessions_by_chat.lock().remove(chat_id);
+            if let Some(sessions) = self.sessions.lock().by_bot.get_mut(&bot_fingerprint) {
+                sessions.remove(chat_id);
+            }
         }
         let handle = self
             .session_control
@@ -253,10 +284,41 @@ impl TelegramRuntime {
             .await
             .map_err(|e| ExtensionError::Internal(format!("create telegram session: {e}")))?;
 
-        self.sessions_by_chat
+        self.sessions
             .lock()
+            .by_bot
+            .entry(bot_fingerprint.clone())
+            .or_default()
             .insert(chat_id.to_owned(), handle.session_id.clone());
+        self.persist_sessions(bot_fingerprint).await?;
         Ok(handle.session_id)
+    }
+
+    async fn persist_sessions(&self, bot_fingerprint: String) -> Result<(), ExtensionError> {
+        let Some(path) = &self.sessions_path else {
+            return Ok(());
+        };
+        let path = path.clone();
+        let sessions = self
+            .sessions
+            .lock()
+            .by_bot
+            .get(&bot_fingerprint)
+            .cloned()
+            .unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            astrcode_extension_sdk::hostpaths::update_json_state(
+                &path,
+                |state: Option<TelegramSessionsState>| {
+                    let mut state = state.unwrap_or_default();
+                    state.by_bot.insert(bot_fingerprint, sessions);
+                    Ok((Some(state), ()))
+                },
+            )
+        })
+        .await
+        .map_err(|error| ExtensionError::Internal(format!("persist telegram sessions: {error}")))?
+        .map_err(|error| ExtensionError::Internal(format!("persist telegram sessions: {error}")))
     }
 
     async fn cached_session_alive(&self, session_id: &str) -> bool {
@@ -285,6 +347,25 @@ impl TelegramRuntime {
         }
         Ok(())
     }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramSessionsState {
+    by_bot: HashMap<String, HashMap<String, String>>,
+}
+
+fn load_telegram_sessions(path: Option<&Path>) -> Result<TelegramSessionsState, ExtensionError> {
+    let Some(path) = path else {
+        return Ok(TelegramSessionsState::default());
+    };
+    Ok(astrcode_extension_sdk::hostpaths::read_json_state(path)
+        .map_err(|error| ExtensionError::Internal(format!("load telegram sessions: {error}")))?
+        .unwrap_or_default())
+}
+
+fn telegram_bot_fingerprint(bot_token: &str) -> String {
+    format!("{:x}", Sha256::digest(bot_token.as_bytes()))
 }
 
 #[derive(Default)]
@@ -799,6 +880,14 @@ mod tests {
 
     impl TestHarness {
         fn new(allowed_chat_ids: &[&str], allow_all_chats: bool) -> Self {
+            Self::with_sessions_path(allowed_chat_ids, allow_all_chats, None)
+        }
+
+        fn with_sessions_path(
+            allowed_chat_ids: &[&str],
+            allow_all_chats: bool,
+            sessions_path: Option<PathBuf>,
+        ) -> Self {
             let session_host = Arc::new(FakeSessionHost::default());
             let host = extension_host(
                 session_host.clone(),
@@ -815,6 +904,7 @@ mod tests {
             );
             let session_control = host.session_control().unwrap();
             let telegram = Arc::new(FakeTelegram::default());
+            let sessions = load_telegram_sessions(sessions_path.as_deref()).unwrap();
             let runtime = TelegramRuntime::new(
                 ChannelsConfig {
                     telegram: TelegramChannelConfig {
@@ -831,6 +921,8 @@ mod tests {
                 },
                 session_control,
                 telegram.clone(),
+                sessions_path,
+                sessions,
             );
             Self {
                 runtime,
@@ -892,6 +984,22 @@ mod tests {
         assert!(!cfg.telegram.allow_all_chats);
         assert_eq!(cfg.telegram.request_timeout_secs, 30);
         assert_eq!(cfg.telegram.poll_timeout_secs, 25);
+    }
+
+    #[tokio::test]
+    async fn config_reload_reuses_the_persisted_chat_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions_path = directory.path().join(TELEGRAM_SESSIONS_FILE);
+        let first = TestHarness::with_sessions_path(&["42"], false, Some(sessions_path.clone()));
+        first.handle("42", "first").await;
+        assert_eq!(first.root_create_count(), 1);
+        drop(first);
+
+        let replacement = TestHarness::with_sessions_path(&["42"], false, Some(sessions_path));
+        replacement.handle("42", "second").await;
+
+        assert_eq!(replacement.root_create_count(), 0);
+        assert_eq!(replacement.submitted_prompts(), ["second"]);
     }
 
     #[test]

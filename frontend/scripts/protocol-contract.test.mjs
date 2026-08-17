@@ -63,6 +63,26 @@ assert.equal(patchArguments.delta.kind, 'patchArguments')
 assert.equal(patchArguments.delta.blockId, 'tool-1')
 assert.equal(patchArguments.delta.arguments, 'Cargo.toml')
 
+const transientTool = decodeConversationDelta({
+  kind: 'appendTransientBlock',
+  turnId: 'turn-1',
+  block: {
+    kind: 'toolCall',
+    id: 'tool-preview',
+    name: 'read',
+    arguments: '',
+    text: '',
+    status: 'streaming',
+  },
+})
+assert.equal(transientTool.kind, 'appendTransientBlock')
+assert.equal(transientTool.turnId, 'turn-1')
+assert.equal(transientTool.block.id, 'tool-preview')
+assert.deepEqual(
+  decodeConversationDelta({ kind: 'clearTransientBlocks', turnId: 'turn-1' }),
+  { kind: 'clearTransientBlocks', turnId: 'turn-1' }
+)
+
 const agentSession = decodeConversationStreamEnvelope({
   sessionId: 'parent-session',
   cursor: { value: '8' },

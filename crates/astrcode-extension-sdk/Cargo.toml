@@ -29,5 +29,8 @@ tokio = { workspace = true, features = ["io-util", "io-std", "process", "rt", "s
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

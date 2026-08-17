@@ -39,7 +39,6 @@ use crate::{
     session::Session,
     session_runtime_services::RuntimeGenerationView,
     steer::absorbable_inputs_for_turn,
-    tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
     tool_types::ExecuteToolBatch,
@@ -101,12 +100,22 @@ impl TurnLoop {
         self.cancellation_token.clone()
     }
 
-    fn max_parallel_tool_calls(&self) -> usize {
-        self.runtime_generation.max_parallel_tool_calls()
-    }
-
     fn shared(&self) -> &SharedTurnContext {
         self.tools.shared()
+    }
+
+    fn compaction_host<'a>(
+        &'a self,
+        extension_runner: &'a dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+    ) -> CompactionHost<'a> {
+        CompactionHost {
+            session: &self.session,
+            llm: &self.llm,
+            context_assembler: self.runtime_generation.context_assembler(),
+            hook_call: self.shared().hook_call_context(),
+            extension_runner,
+            breaker: self.session.runtime().compact_circuit_breaker(),
+        }
     }
 
     async fn recover_context_overflow(
@@ -120,14 +129,7 @@ impl TurnLoop {
         }
 
         state.mark_reactive_compact_used();
-        let host = CompactionHost {
-            session: &self.session,
-            llm: &self.llm,
-            context_assembler: self.runtime_generation.context_assembler(),
-            hook_call: self.shared().hook_call_context(),
-            extension_runner,
-            breaker: self.session.runtime().compact_circuit_breaker(),
-        };
+        let host = self.compaction_host(extension_runner);
         run_reactive_compaction(&host, state, publisher).await
     }
 
@@ -330,36 +332,24 @@ impl TurnLoop {
             Err(error) => return Err(error),
         };
 
-        // ToolCallRequested 是现有的 durable effect intent。只读工具可安全提前执行；
-        // 其它工具必须在完整 assistant 消息和 intent 都提交后执行，避免进程在流式
-        // 早执行与事件提交之间退出后无法判断副作用是否发生。
+        // Provider 流只产生临时预览。工具在完整 assistant 消息和 durable intent
+        // 提交后执行，避免进程退出后无法判断副作用是否发生。
         let request = LlmRequestSnapshot {
             request_id: prepared.request_id.clone(),
             messages: prepared.messages.clone(),
             context_window: prepared.llm.model_limits().max_input_tokens,
             acknowledgements: prepared.acknowledgements.clone(),
         };
-        let dedup_for_early = state.tool_deduplicator_mut();
-        let outcome = match timed_stage(
-            "llm",
-            self.llm_stage(
-                prepared,
-                &visible_tools,
-                publisher,
-                Some(dedup_for_early),
-                visible_tools.clone(),
-            ),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
-                return self
-                    .recover_or_fail(extension_runner, state, publisher)
-                    .await;
-            },
-            Err(error) => return Err(error),
-        };
+        let outcome =
+            match timed_stage("llm", self.llm_stage(prepared, &visible_tools, publisher)).await {
+                Ok(outcome) => outcome,
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                    return self
+                        .recover_or_fail(extension_runner, state, publisher)
+                        .await;
+                },
+                Err(error) => return Err(error),
+            };
 
         let hooks = StepHooks {
             extension_runner,
@@ -473,7 +463,6 @@ impl TurnLoop {
             text,
             reasoning_content,
             tool_calls,
-            early_results,
             message_id,
             message_started,
             usage,
@@ -505,8 +494,7 @@ impl TurnLoop {
         self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
             .await?;
 
-        self.tools_stage(hooks, request, state, &tool_calls, early_results)
-            .await?;
+        self.tools_stage(hooks, request, state, &tool_calls).await?;
 
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
         Ok(StepOutcome::Continue)
@@ -536,14 +524,7 @@ impl TurnLoop {
         visible_tools: &[ToolDefinition],
         publisher: &Arc<TurnEvents>,
     ) -> Result<PreparedProviderRequest, TurnError> {
-        let host = CompactionHost {
-            session: &self.session,
-            llm: &self.llm,
-            context_assembler: self.runtime_generation.context_assembler(),
-            hook_call: self.shared().hook_call_context(),
-            extension_runner,
-            breaker: self.session.runtime().compact_circuit_breaker(),
-        };
+        let host = self.compaction_host(extension_runner);
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
@@ -610,8 +591,6 @@ impl TurnLoop {
         prepared: PreparedProviderRequest,
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
-        deduplicator: Option<&mut ToolCallDeduplicator>,
-        visible_tools: Vec<ToolDefinition>,
     ) -> Result<StreamOutcome, TurnError> {
         let request_messages = prepared.messages.clone();
         let rx = self
@@ -625,26 +604,7 @@ impl TurnLoop {
             .await?;
         let message_id = new_message_id();
 
-        // 构建 early exec context（需要 deduplicator 和 visible_tools）
-        let early_exec = deduplicator.map(|dedup| {
-            let max_parallel = self.max_parallel_tool_calls();
-            crate::llm_stream::EarlyExecContext {
-                pipeline: &self.tools,
-                visible_tools,
-                deduplicator: dedup,
-                max_parallel,
-            }
-        });
-
-        match consume_llm_stream(
-            rx,
-            publisher,
-            message_id,
-            &self.cancellation_token,
-            early_exec,
-        )
-        .await
-        {
+        match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
             Ok(outcome) => Ok(self
                 .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
                 .await),
@@ -790,7 +750,6 @@ impl TurnLoop {
         request: LlmRequestSnapshot,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::StreamedToolCall],
-        early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
     ) -> Result<(), TurnError> {
         let LlmRequestSnapshot {
             request_id,
@@ -811,7 +770,7 @@ impl TurnLoop {
 
         let plan = self
             .tools
-            .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
+            .prepare_tool_batch(tool_calls, &visible_tools, state)
             .await?;
         self.tools
             .declare_tool_batch(&plan, hooks.publisher)
@@ -860,11 +819,10 @@ impl TurnLoop {
         extension_runner
             .emit_lifecycle(LifecycleEvent::TurnEnd, end_ctx)
             .await?;
-        let (text, tool_results) = state.take_output_parts();
+        let text = state.take_output_text();
         Ok(TurnOutput {
             text,
             finish_reason,
-            tool_results,
         })
     }
 
@@ -1092,7 +1050,6 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
 pub struct TurnOutput {
     pub text: String,
     pub finish_reason: String,
-    pub tool_results: Vec<astrcode_core::tool::ToolResult>,
 }
 
 /// 单个 agent step 的结果：`Continue` 进入下一 step，`Finished` 结束 turn。

@@ -213,26 +213,6 @@ class CustomEventSubscription:
     event_type: str
     source: dict[str, Any] = field(default_factory=lambda: {"kind": "any"})
 
-    @classmethod
-    def any(cls, event_type: str, consumer_version: int = 1) -> CustomEventSubscription:
-        return cls(
-            id=event_type,
-            consumer_version=consumer_version,
-            event_type=event_type,
-            source={"kind": "any"},
-        )
-
-    @classmethod
-    def from_extension(
-        cls, subscription_id: str, event_type: str, extension_id: str, consumer_version: int = 1
-    ) -> CustomEventSubscription:
-        return cls(
-            id=subscription_id,
-            consumer_version=consumer_version,
-            event_type=event_type,
-            source={"kind": "extension", "extension_id": extension_id},
-        )
-
     def to_manifest(self) -> dict[str, Any]:
         return {
             "id": self.id,

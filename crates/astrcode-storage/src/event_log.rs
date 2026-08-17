@@ -147,11 +147,7 @@ fn parse_event_line(
     let trimmed = line.trim();
     let event = serde_json::from_str::<StoredEvent>(trimmed).map_err(|error| {
         let preview = if trimmed.len() > 100 {
-            let mut end = 100;
-            while end > 0 && !trimmed.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &trimmed[..end])
+            format!("{}...", crate::traits::truncate_utf8(trimmed, 100))
         } else {
             trimmed.to_string()
         };
@@ -450,46 +446,83 @@ impl WriterState {
     }
 }
 
-fn write_loop(
+fn apply_write_command(cmd: WriteCommand, state: &mut WriterState, next_seq: &AtomicU64) -> bool {
+    match cmd {
+        #[cfg(test)]
+        WriteCommand::AppendBatch { events, done } => {
+            let result = state.append_batch(events);
+            if result.is_ok() {
+                next_seq.store(state.next_seq, Ordering::Release);
+            }
+            let _ = done.send(result);
+        },
+        WriteCommand::AppendPreparedBatch { batch, done } => {
+            let result = state.append_stored_batch(batch.events()).map(|()| batch);
+            if result.is_ok() {
+                next_seq.store(state.next_seq, Ordering::Release);
+            }
+            let _ = done.send(result);
+        },
+        WriteCommand::FlushSync { done } => {
+            let _ = done.send(state.flush_and_sync());
+        },
+        #[cfg(any(test, feature = "testing"))]
+        WriteCommand::FailNextSync { done } => {
+            state.fail_next_sync = true;
+            let _ = done.send(());
+        },
+        WriteCommand::Shutdown => return true,
+    }
+    false
+}
+
+async fn write_loop(
     mut rx: mpsc::Receiver<WriteCommand>,
     mut state: WriterState,
     next_seq: Arc<AtomicU64>,
 ) {
-    while let Some(cmd) = rx.blocking_recv() {
-        match cmd {
-            #[cfg(test)]
-            WriteCommand::AppendBatch { events, done } => {
-                let result = state.append_batch(events);
-                if result.is_ok() {
-                    next_seq.store(state.next_seq, Ordering::Release);
+    while let Some(cmd) = rx.recv().await {
+        let path = state.path.clone();
+        let next_seq = Arc::clone(&next_seq);
+        let operation = tokio::task::spawn_blocking(move || {
+            let shutdown = apply_write_command(cmd, &mut state, &next_seq);
+            (state, shutdown)
+        });
+        match operation.await {
+            Ok((next_state, shutdown)) => {
+                state = next_state;
+                if shutdown {
+                    break;
                 }
-                let _ = done.send(result);
             },
-            WriteCommand::AppendPreparedBatch { batch, done } => {
-                let result = state.append_stored_batch(batch.events()).map(|()| batch);
-                if result.is_ok() {
-                    next_seq.store(state.next_seq, Ordering::Release);
-                }
-                let _ = done.send(result);
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "event log writer task failed; pending writes may be lost"
+                );
+                return;
             },
-            WriteCommand::FlushSync { done } => {
-                let _ = done.send(state.flush_and_sync());
-            },
-            #[cfg(any(test, feature = "testing"))]
-            WriteCommand::FailNextSync { done } => {
-                state.fail_next_sync = true;
-                let _ = done.send(());
-            },
-            WriteCommand::Shutdown => break,
         }
     }
 
-    if let Err(e) = state.flush_and_sync() {
-        tracing::warn!(
-            path = %state.path.display(),
-            error = %e,
-            "failed to flush event log on writer thread shutdown"
-        );
+    let path = state.path.clone();
+    match tokio::task::spawn_blocking(move || state.flush_and_sync()).await {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to flush event log on writer task shutdown"
+            );
+        },
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "event log shutdown task failed"
+            );
+        },
     }
 }
 
@@ -670,7 +703,7 @@ fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
     )))
 }
 
-/// An append-only JSONL event log backed by a dedicated writer thread.
+/// An append-only JSONL event log backed by an asynchronous writer actor.
 ///
 /// Each session has one event log file. Events are written as newline-delimited
 /// JSON objects and never modified. Storage assigns `seq` at append time.
@@ -680,9 +713,10 @@ fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
 /// ```text
 /// EventLog
 ///   ├── tx (bounded channel, 1024 capacity)
-///   │     └── write_loop (spawn_blocking)
-///   │           ├── File (pre-encoded atomic batches)
-///   │           └── dirty tracking (deferred fsync)
+///   │     └── write_loop (idle without occupying a thread)
+///   │           └── shared blocking pool (one operation at a time)
+///   │                 ├── File (pre-encoded atomic batches)
+///   │                 └── dirty tracking (deferred fsync)
 ///   └── next_seq (AtomicU64, lock-free count)
 /// ```
 pub(crate) struct EventLog {
@@ -729,31 +763,14 @@ impl EventLog {
         let next_seq = Arc::new(AtomicU64::new(state.next_seq));
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let next_seq_clone = Arc::clone(&next_seq);
-        let panic_path = state.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                write_loop(rx, state, next_seq_clone);
-            }));
-            if let Err(e) = result {
-                let msg: String = e
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| e.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic payload".to_string());
-                tracing::error!(
-                    path = %panic_path.display(),
-                    panic = %msg,
-                    "event log writer thread panicked; pending writes may be lost"
-                );
-            }
-        });
+        tokio::spawn(write_loop(rx, state, next_seq_clone));
         Self { path, tx, next_seq }
     }
 
     /// Append a durable event to the log and return it with its assigned seq.
     ///
-    /// Sends the event to a dedicated writer thread via a bounded channel.
-    /// The writer thread assigns `seq`, serializes, and writes the line —
+    /// Sends the event to the per-log writer actor via a bounded channel.
+    /// The actor assigns `seq`, serializes, and writes the line on the shared blocking pool —
     /// no mutex contention on the write path.
     /// Writes to the OS page cache immediately; call [`force_sync`] for fsync.
     #[cfg(test)]

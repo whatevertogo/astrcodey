@@ -57,6 +57,6 @@
 | 1000 事件 | 869 µs | 1.09 ms(1.25×) | 1.03 ms(1.24×) |
 | 10000 事件 | 7.28–7.56 ms | 9.44 ms(1.25×) | 8.90 ms(1.22×) |
 
-已做:`snapshot.rs` 的 `to_vec_pretty` → `to_vec`(快照是机器读的恢复加速器,pretty 空白纯膨胀,收益 ~5%)。
+**后续(已执行)**:`snapshot.rs` 的 `to_vec_pretty` → `to_vec`(快照是机器读的恢复加速器,pretty 空白纯膨胀,收益 ~5%)。
 
-**建议(需设计决策,未执行)**:移除 snapshot 恢复与 `SessionStore::checkpoint` 机制。涉及 `SessionStore` trait、`session_manager.rs:1695`、`compaction/persistence.rs:38`、`session.rs:127`、in_memory 实现与架构文档(「快照是恢复加速器」的论述需要改写为测量结论)。删除前如需保留紧凑恢复能力,方向是把快照内容缩减为「身份 + 消息 + 最小状态」的紧格式,但应先 profile 确认模型反序列化的主要构成。
+**结论(已在 s5r3-phase-0 执行)**:基于上述测量,snapshot 恢复与 `SessionStore::checkpoint` 机制已移除(`SessionStore` trait、`session_manager.rs`、`compaction/persistence.rs`、`session.rs`、in_memory 实现同步删除),架构文档中「快照是恢复加速器」的论述以本文件的测量结论为准。如需恢复紧凑恢复能力,方向是把快照内容缩减为「身份 + 消息 + 最小状态」的紧格式,但应先 profile 确认模型反序列化的主要构成。

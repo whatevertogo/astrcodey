@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 use astrcode_core::{
     permission::ApprovalSource,
@@ -11,13 +11,12 @@ use astrcode_extension_sdk::extension::{
 use super::{ToolCalls, events::declare_tool_batch};
 use crate::{
     deferred_tools::{tool_is_visible, unavailable_tool_guidance},
-    early_tool_scheduler::EarlyExecutionEntry,
     permission::{PermissionContext, PermissionResolution},
     tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
         PreparedToolApproval, PreparedToolDisposition, PreparedToolInvocation, StreamedToolCall,
-        ToolBatch, ToolExecutionOutcome,
+        ToolBatch,
     },
     turn_context::TurnError,
     turn_publish::TurnEvents,
@@ -26,9 +25,7 @@ use crate::{
 
 impl ToolCalls {
     /// 准备单个工具调用：JSON 解析、可见性检查、PreToolUse 钩子、权限链、去重。
-    ///
-    /// 提取为独立方法以支持流式工具调用场景中 per-tool 增量准备。
-    pub(crate) async fn prepare_single_tool_call(
+    async fn prepare_single_tool_call(
         &self,
         tc: &StreamedToolCall,
         index: usize,
@@ -191,26 +188,12 @@ impl ToolCalls {
     pub(crate) async fn prepare_tool_batch(
         &self,
         tool_calls: &[StreamedToolCall],
-        early_results: Vec<EarlyExecutionEntry>,
         visible_tools: &[ToolDefinition],
         state: &mut TurnState,
     ) -> Result<ToolBatch, TurnError> {
-        let mut pre_executed: HashMap<usize, ToolExecutionOutcome> = HashMap::new();
-        let mut early_entries: HashMap<usize, _> = early_results
-            .into_iter()
-            .map(|entry| (entry.prepared.index, entry))
-            .collect();
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
         for (index, tool_call) in tool_calls.iter().enumerate() {
-            if let Some(entry) = early_entries.remove(&index) {
-                if let Some(outcome) = entry.outcome {
-                    pre_executed.insert(entry.prepared.index, outcome);
-                }
-                prepared.push(entry.prepared);
-                continue;
-            }
-
             let prepared_call = self
                 .prepare_single_tool_call(
                     tool_call,
@@ -222,17 +205,13 @@ impl ToolCalls {
             prepared.push(prepared_call);
         }
 
-        Ok(ToolBatch {
-            calls: prepared,
-            pre_executed,
-        })
+        Ok(ToolBatch { calls: prepared })
     }
 
     /// Persist provider tool requests after the assistant message has been durably recorded.
     ///
-    /// Streaming early execution may prepare and even execute tools before the provider stream is
-    /// fully drained, but the durable transcript must preserve the provider protocol order:
-    /// assistant(tool_calls) -> tool results.
+    /// The durable transcript preserves the provider protocol order:
+    /// assistant(tool_calls) -> tool requests -> tool results.
     pub(crate) async fn declare_tool_batch(
         &self,
         batch: &ToolBatch,

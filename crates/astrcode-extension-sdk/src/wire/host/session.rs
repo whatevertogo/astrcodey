@@ -58,9 +58,6 @@ pub struct HostSessionTokenUsageOutput {
     pub usage: Option<HostSessionTokenUsage>,
 }
 
-/// `astrcode.process.spawn` 的线缆请求。
-///
-/// `stdin` 最大为 [`HOST_PROCESS_MAX_STDIN_BYTES`] 个 UTF-8 字节，`timeout_ms` 必须位于
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionInputRequest {

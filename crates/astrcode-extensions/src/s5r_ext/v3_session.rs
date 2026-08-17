@@ -209,7 +209,7 @@ impl S5rV3Session {
         let stdin = child.take_stdin().ok_or("S5R 3.0 child missing stdin")?;
         let stdout = child.take_stdout().ok_or("S5R 3.0 child missing stdout")?;
         let stderr = child.take_stderr().ok_or("S5R 3.0 child missing stderr")?;
-        let stderr_task = tokio::spawn(drain_stderr(stderr));
+        let stderr_task = tokio::spawn(drain_stderr(stderr, extension_id.to_owned()));
 
         let peer = Peer::new(
             StdioFrameTransport::new(stdin, stdout),
@@ -548,7 +548,7 @@ async fn run_with_cancellation(
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    return Err(ExtensionError::Cancelled);
+                    Err(ExtensionError::Cancelled)
                 },
                 result = invoke => result.map_err(invoke_error_to_extension_error),
             }
@@ -556,14 +556,13 @@ async fn run_with_cancellation(
             invoke.await.map_err(invoke_error_to_extension_error)
         }
     };
-    let result = if let Some(timeout) = timeout {
+    if let Some(timeout) = timeout {
         tokio::time::timeout(timeout, invoke)
             .await
             .map_err(|_| ExtensionError::Timeout(timeout.as_millis() as u64))?
     } else {
         invoke.await
-    };
-    result
+    }
 }
 
 fn invoke_error_to_extension_error(error: InvokeError) -> ExtensionError {

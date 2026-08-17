@@ -20,14 +20,14 @@ mod prompts;
 mod store;
 mod tools;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
         CommandContext, CommandHandler, CompactContributions, CompactRetainedContext, Extension,
         ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionManifest, ExtensionPaths, PreCompactContext, PreCompactHandler, PreCompactResult,
+        ExtensionManifest, PreCompactContext, PreCompactHandler, PreCompactResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
         PreparedProviderEffect, ProviderContext, ProviderContributionHandler,
         ProviderContributionId, ProviderSettlementContext, Registrar, SlashCommand,
@@ -37,12 +37,6 @@ use astrcode_extension_sdk::{
     permission::ApprovalMode,
     tool::{HostResource, ToolPlan, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata},
 };
-
-fn session_data_dir(paths: &ExtensionPaths) -> Result<&Path, ExtensionError> {
-    paths
-        .session_data_dir()
-        .map_err(|error| ExtensionError::Internal(error.to_string()))
-}
 use serde_json::json;
 
 use crate::{
@@ -147,7 +141,7 @@ impl ToolHandler for ModeToolHandler {
         &self,
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let extension_data_dir = session_data_dir(ctx.paths())?;
+        let extension_data_dir = ctx.paths().require_session_data_dir()?;
         let mode_root = store::mode_dir_from_base(extension_data_dir);
         let plan_dir = store::plan_dir_from_base(extension_data_dir);
         let tool_name = ctx.tool_name();
@@ -181,7 +175,7 @@ impl PreToolUseHandler for ModePreToolUseHandler {
             return Ok(PreToolUseResult::Allow);
         }
 
-        let base = session_data_dir(ctx.paths())?;
+        let base = ctx.paths().require_session_data_dir()?;
         let mode_root = store::mode_dir_from_base(base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
@@ -210,7 +204,7 @@ struct ModePreCompactHandler;
 #[async_trait::async_trait]
 impl PreCompactHandler for ModePreCompactHandler {
     async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
-        let plan_dir = store::plan_dir_from_base(session_data_dir(ctx.paths())?);
+        let plan_dir = store::plan_dir_from_base(ctx.paths().require_session_data_dir()?);
         let Some(plan) = store::load_plan(&plan_dir).map_err(ExtensionError::Internal)? else {
             return Ok(PreCompactResult::Allow);
         };
@@ -232,7 +226,7 @@ struct ModeSlashCommandHandler {
 #[async_trait::async_trait]
 impl CommandHandler for ModeSlashCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
-        let extension_data_dir = session_data_dir(ctx.paths())?;
+        let extension_data_dir = ctx.paths().require_session_data_dir()?;
         let mode_root = store::mode_dir_from_base(extension_data_dir);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
@@ -290,7 +284,7 @@ impl ProviderContributionHandler for ModeProviderHandler {
         &self,
         ctx: ProviderContext,
     ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
-        let base = session_data_dir(ctx.paths())?;
+        let base = ctx.paths().require_session_data_dir()?;
         let mode_root = store::mode_dir_from_base(base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
@@ -305,7 +299,7 @@ impl ProviderContributionHandler for ModeProviderHandler {
     }
 
     async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
-        let base = session_data_dir(ctx.paths())?;
+        let base = ctx.paths().require_session_data_dir()?;
         let mode_root = store::mode_dir_from_base(base);
         store::acknowledge_mode_transition(&mode_root, ctx.contribution_id().as_str())
             .map_err(ExtensionError::Internal)

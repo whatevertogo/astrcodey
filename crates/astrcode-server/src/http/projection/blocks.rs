@@ -348,16 +348,12 @@ fn push_tool_result_block(
         }
         blocks.push(SequencedConversationBlock {
             seq,
-            block: ConversationBlockDto::ToolCall {
-                id: tool_call_id.clone(),
-                name: fallback_name.clone(),
-                arguments: String::new(),
-                text: content.clone(),
+            block: fallback_tool_block(
+                tool_call_id.clone(),
+                fallback_name.clone(),
+                content.clone(),
                 status,
-                metadata: None,
-                approval: None,
-                arguments_json: None,
-            },
+            ),
         });
         pushed_result = true;
     }
@@ -365,17 +361,32 @@ fn push_tool_result_block(
     if !pushed_result {
         blocks.push(SequencedConversationBlock {
             seq,
-            block: ConversationBlockDto::ToolCall {
-                id: fallback_id,
-                name: fallback_name,
-                arguments: String::new(),
-                text: visible_ui_text(message),
-                status: tool_status_from_message(origin),
-                metadata: None,
-                approval: None,
-                arguments_json: None,
-            },
+            block: fallback_tool_block(
+                fallback_id,
+                fallback_name,
+                visible_ui_text(message),
+                tool_status_from_message(origin),
+            ),
         });
+    }
+}
+
+/// 无匹配 block 时的兜底 ToolCall 呈现，字段除 id/name/text/status 外均为空。
+fn fallback_tool_block(
+    id: String,
+    name: String,
+    text: String,
+    status: ToolCallStatusDto,
+) -> ConversationBlockDto {
+    ConversationBlockDto::ToolCall {
+        id,
+        name,
+        arguments: String::new(),
+        text,
+        status,
+        metadata: None,
+        approval: None,
+        arguments_json: None,
     }
 }
 

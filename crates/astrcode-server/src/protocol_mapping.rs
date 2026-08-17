@@ -186,15 +186,7 @@ pub(crate) fn command_info_to_stdio_dto(command: CommandInfo) -> ExtensionComman
 }
 
 pub(crate) fn command_info_to_http_dto(command: CommandInfo) -> SlashCommandInfoDto {
-    SlashCommandInfoDto {
-        name: command.name,
-        extension_id: command.extension_id,
-        description: command.description,
-        needs_argument: command.needs_argument,
-        requires_idle: command.requires_idle,
-        argument_completions: command.argument_completions,
-        priority: command.priority,
-    }
+    command_info_to_stdio_dto(command).into()
 }
 
 pub(crate) fn extension_slash_command_to_dto(command: SlashCommand) -> ExtensionSlashCommandDto {

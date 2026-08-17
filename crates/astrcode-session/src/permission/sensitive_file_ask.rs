@@ -78,7 +78,7 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
                 };
             }
         }
-        if let Some(pattern) = sensitive_grep_glob(ctx, self.globset.as_ref()) {
+        if let Some(pattern) = sensitive_search_pattern(ctx, self.globset.as_ref()) {
             return PolicyDecision::Ask {
                 prompt: format!("Search sensitive path pattern `{pattern}`?"),
                 rule_key: Some(format!("sensitive:{pattern}")),
@@ -88,14 +88,16 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
     }
 }
 
-fn sensitive_grep_glob<'a>(
+fn sensitive_search_pattern<'a>(
     ctx: &'a PermissionContext<'_>,
     globset: Option<&GlobSet>,
 ) -> Option<&'a str> {
-    if ctx.tool_name != "grep" {
-        return None;
-    }
-    let pattern = ctx.tool_input.get("glob")?.as_str()?.trim();
+    let field = match ctx.tool_name {
+        "grep" => "glob",
+        "glob" => "pattern",
+        _ => return None,
+    };
+    let pattern = ctx.tool_input.get(field)?.as_str()?.trim();
     (!pattern.is_empty()
         && globset
             .is_none_or(|globset| has_unescaped_glob_meta(pattern) || globset.is_match(pattern)))
@@ -168,18 +170,23 @@ mod tests {
     }
 
     #[test]
-    fn grep_glob_filters_targeting_sensitive_files_trigger_ask() {
+    fn search_patterns_targeting_sensitive_files_trigger_ask() {
         let policy = SensitiveFileAskPolicy::new();
-        for (glob, should_ask) in [
-            ("**/.npmrc", true),
-            (".aws/**", true),
-            ("**/*.pem", true),
-            ("**/.npmr?", true),
-            ("src/lib.rs", false),
+        for (tool_name, field, glob, should_ask) in [
+            ("grep", "glob", "**/.npmrc", true),
+            ("grep", "glob", ".aws/**", true),
+            ("grep", "glob", "**/*.pem", true),
+            ("grep", "glob", "**/.npmr?", true),
+            ("grep", "glob", "src/lib.rs", false),
+            ("glob", "pattern", "**/.env", true),
         ] {
-            let input = serde_json::json!({"path": ".", "glob": glob});
+            let mut input = serde_json::json!({"path": "."});
+            input
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), serde_json::json!(glob));
             let ctx = PermissionContext {
-                tool_name: "grep",
+                tool_name,
                 tool_input: &input,
                 working_dir: std::path::Path::new("/project"),
                 resource_accesses: &[],
@@ -189,7 +196,7 @@ mod tests {
             assert_eq!(
                 matches!(policy.evaluate(&ctx), PolicyDecision::Ask { .. }),
                 should_ask,
-                "unexpected decision for grep glob {glob}"
+                "unexpected decision for {tool_name} pattern {glob}"
             );
         }
     }

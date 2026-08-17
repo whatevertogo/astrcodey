@@ -85,12 +85,11 @@ impl EventPublisher for SessionScopedEventPublisher {
 }
 
 // 与 `turn_publish.rs` ingress worker 的错误映射互指：这里的源错误
-// `SessionEventPublishError` 带 Closed/Full 变体故可区分；turn 路径的 `TurnError`
+// `SessionEventPublishError` 带 Closed 变体故可区分；turn 路径的 `TurnError`
 // 无此信息，统一折叠为 `PublishFailed`，两处不宜强行收敛。
 fn map_event_publish_error(error: SessionEventPublishError) -> EventSendError {
     match error {
         SessionEventPublishError::Closed => EventSendError::Closed,
-        SessionEventPublishError::Full { .. } => EventSendError::Full,
         error => EventSendError::PublishFailed(error.to_string()),
     }
 }

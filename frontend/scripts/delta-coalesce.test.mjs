@@ -47,21 +47,11 @@ const created = applyCoalescedDeltas(
   ]
 )
 
-assert.equal(created.length, 2)
-assert.deepEqual(created[0], {
-  kind: 'assistant',
-  id: 'assistant-1',
-  text: 'hello',
-  status: 'streaming',
-})
-assert.deepEqual(created[1], {
-  kind: 'toolCall',
-  id: 'tool-1',
-  name: '',
-  arguments: '',
-  text: 'out',
-  status: 'streaming',
-})
+assert.deepEqual(
+  created,
+  [],
+  'orphan patches must not manufacture blocks without a start or durable request'
+)
 
 const retriedAssistant = reduceConversationDeltas(
   {
@@ -74,6 +64,7 @@ const retriedAssistant = reduceConversationDeltas(
         status: 'streaming',
       },
     ],
+    transientBlockOwners: { 'assistant-retry': 'turn-retry' },
     control: null,
     cursor: '1',
     compactSubmitting: false,
@@ -127,19 +118,89 @@ const patchedCreatedTool = applyCoalescedDeltas(
   ]
 )
 
-assert.equal(patchedCreatedTool.length, 1)
-assert.deepEqual(patchedCreatedTool[0], {
-  kind: 'toolCall',
-  id: 'tool-2',
-  name: '',
-  arguments: 'run command',
-  argumentsJson: { command: 'test' },
-  text: 'ready',
-  status: 'streaming',
-})
+assert.deepEqual(
+  patchedCreatedTool,
+  [],
+  'tool output must target a durable or explicitly transient tool block'
+)
+
+const transientLifecycle = reduceConversationDeltas(
+  {
+    blocks: [],
+    transientBlockOwners: {},
+    control: null,
+    cursor: '1',
+    compactSubmitting: false,
+    agentSessions: [],
+    statusItems: {},
+    statusItemRevisions: {},
+    pendingAskUserQuestions: {},
+    resolvedAskUserCallIds: {},
+    pendingAskUserRefreshInFlight: false,
+    askUserEventRevision: 0,
+    transientHint: null,
+  },
+  [
+    {
+      kind: 'appendTransientBlock',
+      turnId: 'turn-1',
+      block: {
+        kind: 'assistant',
+        id: 'assistant-preview',
+        text: '',
+        status: 'streaming',
+      },
+    },
+    {
+      kind: 'appendTransientBlock',
+      turnId: 'turn-1',
+      block: {
+        kind: 'toolCall',
+        id: 'tool-promoted',
+        name: 'read',
+        arguments: '',
+        text: '',
+        status: 'streaming',
+      },
+    },
+    {
+      kind: 'appendBlock',
+      block: {
+        kind: 'toolCall',
+        id: 'tool-promoted',
+        name: 'read',
+        arguments: 'README.md',
+        text: '',
+        status: 'streaming',
+      },
+    },
+    { kind: 'clearTransientBlocks', turnId: 'turn-1' },
+  ],
+  '2'
+)
+
+assert.deepEqual(transientLifecycle.transientBlockOwners, {})
+assert.deepEqual(transientLifecycle.blocks, [
+  {
+    kind: 'toolCall',
+    id: 'tool-promoted',
+    name: 'read',
+    arguments: 'README.md',
+    text: '',
+    status: 'streaming',
+  },
+])
 
 const frameState = {
-  blocks: [],
+  blocks: [
+    {
+      kind: 'assistant',
+      id: 'assistant-frame',
+      text: '',
+      status: 'streaming',
+    },
+  ],
+  transientBlockOwners: { 'assistant-frame': 'turn-frame' },
   control: null,
   cursor: '1',
   compactSubmitting: false,

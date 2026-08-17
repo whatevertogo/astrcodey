@@ -235,7 +235,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         &cwd,
     );
     config_manager
-        .initialize_extensions::<std::convert::Infallible>()
+        .initialize_extensions()
         .await
         .map_err(|error| BootstrapError::Extension(error.to_string()))?;
     if let Err(error) = session_manager
@@ -283,7 +283,7 @@ impl ServerRuntime {
     pub async fn reload_extensions(&self) -> Vec<String> {
         let errors = self
             .config_manager()
-            .reload_extensions::<std::convert::Infallible>()
+            .reload_extensions()
             .await
             .err()
             .map(|error| vec![error.to_string()])

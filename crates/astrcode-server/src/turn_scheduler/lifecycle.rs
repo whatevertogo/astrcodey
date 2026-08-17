@@ -11,7 +11,6 @@ use astrcode_session::{
     payload::{TURN_FINISH_INTERRUPTED, agent_run_completed_payload, turn_completed_payload},
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel};
-use astrcode_storage::StorageError;
 
 #[cfg(any(test, feature = "testing"))]
 use super::CompletedRecycleOutcome;
@@ -374,8 +373,9 @@ impl TurnScheduler {
             tree.nodes[next_node].closure.wait_for_starts().await;
             let model = match self.session_manager.read_model(&session_id).await {
                 Ok(model) => model,
-                Err(SessionManagerError::Storage(StorageError::NotFound(_)))
-                    if tree.nodes[next_node].parent_session_id.is_some() =>
+                Err(error)
+                    if error.is_not_found()
+                        && tree.nodes[next_node].parent_session_id.is_some() =>
                 {
                     tree.nodes[next_node].exists = false;
                     next_node += 1;
@@ -427,7 +427,7 @@ impl TurnScheduler {
         }
         let parent_model = match self.session_manager.read_model(parent_session_id).await {
             Ok(model) => model,
-            Err(SessionManagerError::Storage(StorageError::NotFound(_))) => return Ok(()),
+            Err(error) if error.is_not_found() => return Ok(()),
             Err(error) => return Err(error.into()),
         };
         if parent_model.agent_sessions.iter().any(|link| {
@@ -652,6 +652,9 @@ impl TurnScheduler {
             .read_model()
             .await
             .map_err(TurnScheduleError::Session)?;
+        if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
+            return Ok(None);
+        }
         let (Some(turn_id), Some(step)) = (
             state.execution.unsettled_turn_id.clone(),
             state.execution.active_step.as_ref(),

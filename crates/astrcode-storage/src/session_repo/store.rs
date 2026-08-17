@@ -205,7 +205,7 @@ impl SessionStore for FileSystemSessionRepository {
         {
             let extension_name = extension_dir
                 .file_name()
-                .unwrap_or_default()
+                .ok_or_else(|| StorageError::InvalidId("unexpected session dir path".into()))?
                 .to_string_lossy();
             let recycled = subagents_dir
                 .join(".recycled")

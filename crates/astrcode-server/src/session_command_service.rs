@@ -118,9 +118,9 @@ impl SessionCommandService {
             .open(session_id.clone())
             .await
             .map_err(|error| match error {
-                crate::session_manager::SessionManagerError::Storage(
-                    astrcode_storage::StorageError::NotFound(_),
-                ) => HandlerError::SessionNotFound(session_id.to_string()),
+                error if error.is_not_found() => {
+                    HandlerError::SessionNotFound(session_id.to_string())
+                },
                 error => HandlerError::SessionManager(error),
             })?;
         self.runtime

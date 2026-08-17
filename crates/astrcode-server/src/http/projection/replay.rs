@@ -47,9 +47,18 @@ pub(in crate::http) fn event_to_replay_deltas(
             }]
         },
         DurableEventPayload::TurnCompleted { .. } => {
-            vec![ConversationDeltaDto::UpdateControlState {
+            let mut deltas = event
+                .turn_id
+                .as_ref()
+                .map(|turn_id| ConversationDeltaDto::ClearTransientBlocks {
+                    turn_id: turn_id.to_string(),
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_phase(Phase::Idle, has_messages),
-            }]
+            });
+            deltas
         },
         DurableEventPayload::ToolApprovalRequested {
             call_id,

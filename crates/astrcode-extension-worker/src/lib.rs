@@ -74,7 +74,7 @@ pub mod worker_prelude {
             continuation_handler_args, custom_event_handler, custom_event_handler_args,
             hook_handler, hook_handler_args, http_handler, llm_chat_request, parse_hook_input,
             parse_tool_arguments, tool_handler, tool_handler_args, tool_planner, tool_planner_args,
-            tool_result, tool_text,
+            tool_text,
         },
     };
 }

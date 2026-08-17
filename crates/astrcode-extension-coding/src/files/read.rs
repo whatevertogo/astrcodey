@@ -201,11 +201,10 @@ fn validate(args: &ReadArgs) -> Result<(), ExtensionError> {
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
-    ExtensionError::InvalidInput {
-        code: WireErrorCode::InvalidInput.as_str().into(),
-        message: message.into(),
-        hint: Some("follow the read tool parameter schema".into()),
-    }
+    ExtensionError::invalid_input(
+        message,
+        Some("follow the read tool parameter schema".to_string()),
+    )
 }
 
 pub(super) fn definition() -> ToolDefinition {

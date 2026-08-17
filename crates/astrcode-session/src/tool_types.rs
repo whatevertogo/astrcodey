@@ -2,7 +2,7 @@
 //!
 //! 包含工具调用从 LLM 流式响应中积累、预处理、到最终执行各阶段的类型。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use astrcode_core::{
     permission::ApprovalSource,
@@ -34,11 +34,9 @@ pub(crate) struct PreparedToolInvocation {
 
 /// 一个 agent step 中已完成预处理、待执行的工具调用集合（prepare 阶段的纯数据产物）。
 ///
-/// `calls` 保持 provider 原始顺序；`pre_executed` 携带早期调度器抢先执行完成的结果
-/// （按 index 索引）。该批次被 `execute_and_commit` 消费后即失效。
+/// `calls` 保持 provider 原始顺序。该批次被 `execute_and_commit` 消费后即失效。
 pub(crate) struct ToolBatch {
     pub(crate) calls: Vec<PreparedToolInvocation>,
-    pub(crate) pre_executed: HashMap<usize, ToolExecutionOutcome>,
 }
 
 /// 执行阶段的批次包装：批数据 + 执行所需的运行期依赖。

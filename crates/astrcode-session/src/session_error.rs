@@ -1,6 +1,6 @@
 //! Session error type.
 
-use astrcode_core::types::SessionId;
+use astrcode_core::types::{SessionId, ToolCallId, TurnId};
 use astrcode_extension_sdk::extension::ExtensionError;
 use astrcode_storage::StorageError;
 
@@ -21,6 +21,11 @@ pub enum SessionError {
     ParentCycle { session_id: SessionId },
     #[error("session creation task failed: {0}")]
     CreationTask(String),
+    #[error("turn {turn_id} cannot complete with unsettled tool calls: {call_ids:?}")]
+    UnsettledToolCalls {
+        turn_id: TurnId,
+        call_ids: Vec<ToolCallId>,
+    },
 }
 
 impl SessionError {

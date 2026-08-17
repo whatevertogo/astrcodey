@@ -278,9 +278,7 @@ impl McpShared {
     where
         F: FnOnce() -> McpConfig + Send,
     {
-        // TODO(optional): measure how often tool discovery reaches this load_config
-        // path. If it becomes a hot path, add an mtime cache for config files;
-        // the current disk-read cost is acceptable.
+        // 当前磁盘读取成本可接受；若 tool discovery 频繁触达此路径，再加 mtime 缓存。
         let config = load_config();
         if self.entry_is_current(working_dir, config.fingerprint) {
             self.mark_warm_complete(working_dir).await;
