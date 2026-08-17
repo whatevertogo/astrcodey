@@ -197,6 +197,50 @@ assert.equal(
 assert.equal(longRunModel.segments[0].id, 'process:t-long-0')
 assert.equal(longRunModel.processEntries.length, 50)
 
+const latestPageBlocks = Array.from({ length: 40 }, (_, index) =>
+  tool(`latest-page-${index}`, 'read')
+)
+const latestPageBreaks = new Set([latestPageBlocks[0].id])
+const latestPageItems = buildMessageListItems(
+  latestPageBlocks,
+  latestPageBreaks
+).filter((item) => item.type === 'assistantRun')
+const allPrependedPageItems = buildMessageListItems(
+  [
+    ...Array.from({ length: 17 }, (_, index) =>
+      tool(`older-page-${index}`, 'read')
+    ),
+    ...latestPageBlocks,
+  ],
+  latestPageBreaks
+)
+const prependedPageItems = allPrependedPageItems.filter(
+  (item) =>
+    item.type === 'assistantRun' &&
+    item.blocks[0]?.id.startsWith('latest-page-')
+)
+assert.deepEqual(
+  prependedPageItems.map((item) => item.id),
+  latestPageItems.map((item) => item.id),
+  'prepending a page must preserve the existing page virtual row identities'
+)
+assert.ok(
+  allPrependedPageItems
+    .filter(
+      (item) =>
+        item.type === 'assistantRun' &&
+        item.blocks[0]?.id.startsWith('older-page-')
+    )
+    .every((item) => item.actionBlocks === null),
+  'a page boundary must not create a false completed-turn action'
+)
+assert.equal(
+  allPrependedPageItems.filter((item) => item.type === 'assistantRun').at(-1)
+    ?.actionBlocks?.length,
+  57,
+  'only the final page segment owns actions for the complete logical run'
+)
+
 assert.equal(
   assistantVisibleText(
     assistant('a7', '<think-block>hidden</think-block>\nvisible')

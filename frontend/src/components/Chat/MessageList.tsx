@@ -29,6 +29,7 @@ interface MessageListProps {
   hasOlderHistory: boolean
   historyLoading: boolean
   detachedFromLatest: boolean
+  historyPageBlockIds: string[][]
   onLoadOlderHistory: () => Promise<void>
   onReturnToLatest: () => Promise<void>
 }
@@ -126,6 +127,7 @@ export default function MessageList({
   hasOlderHistory,
   historyLoading,
   detachedFromLatest,
+  historyPageBlockIds,
   onLoadOlderHistory,
   onReturnToLatest,
 }: MessageListProps) {
@@ -133,15 +135,19 @@ export default function MessageList({
   const positionedSessionRef = useRef<string | null>(null)
   const previousScrollTopRef = useRef<number | null>(null)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
-  const allItems = useMemo(() => buildMessageListItems(blocks), [blocks])
-  const allItemsRef = useRef(allItems)
-  allItemsRef.current = allItems
-  const pendingPrependAnchorRef = useRef<{
-    sessionId: string
-    itemId: string
-    itemIndex: number
-    offset: number
-  } | null>(null)
+  const assistantRunBreaks = useMemo(
+    () =>
+      new Set(
+        historyPageBlockIds
+          .map((pageBlockIds) => pageBlockIds[0])
+          .filter((blockId): blockId is string => blockId != null)
+      ),
+    [historyPageBlockIds]
+  )
+  const allItems = useMemo(
+    () => buildMessageListItems(blocks, assistantRunBreaks),
+    [assistantRunBreaks, blocks]
+  )
   const getItemKey = useCallback(
     (index: number) => allItems[index]?.id ?? index,
     [allItems]
@@ -203,39 +209,6 @@ export default function MessageList({
     }
   }, [allItems.length, sessionId, virtualizer])
 
-  useLayoutEffect(() => {
-    const pending = pendingPrependAnchorRef.current
-    if (!pending) return
-    if (pending.sessionId !== sessionId) {
-      pendingPrependAnchorRef.current = null
-      return
-    }
-    const anchorIndex = allItems.findIndex((item) => item.id === pending.itemId)
-    if (anchorIndex === -1 || anchorIndex === pending.itemIndex) return
-
-    virtualizer.scrollToIndex(anchorIndex, {
-      align: 'start',
-      behavior: 'instant',
-    })
-    let attempts = 0
-    const restoreAnchor = () => {
-      if (pendingPrependAnchorRef.current !== pending) return
-      const anchor = virtualizer
-        .getVirtualItems()
-        .find((item) => item.index === anchorIndex)
-      const current = listRef.current
-      if (!anchor || !current || positionedSessionRef.current !== sessionId) {
-        attempts += 1
-        if (attempts < 3) requestAnimationFrame(restoreAnchor)
-        return
-      }
-      current.scrollTop = anchor.start - pending.offset
-      previousScrollTopRef.current = current.scrollTop
-      pendingPrependAnchorRef.current = null
-    }
-    requestAnimationFrame(restoreAnchor)
-  }, [allItems, sessionId, virtualizer])
-
   const virtualItems = virtualizer.getVirtualItems()
   const handleScroll = useCallback(() => {
     const element = listRef.current
@@ -252,50 +225,8 @@ export default function MessageList({
     ) {
       return
     }
-    const anchorVirtualItem = virtualizer
-      .getVirtualItems()
-      .find((item) => item.end > element.scrollTop)
-    const anchorItemId =
-      anchorVirtualItem == null ? null : allItems[anchorVirtualItem.index]?.id
-    const anchorOffset =
-      anchorVirtualItem == null
-        ? 0
-        : anchorVirtualItem.start - element.scrollTop
-    if (
-      anchorItemId != null &&
-      anchorVirtualItem != null &&
-      sessionId != null
-    ) {
-      const pending = {
-        sessionId,
-        itemId: anchorItemId,
-        itemIndex: anchorVirtualItem.index,
-        offset: anchorOffset,
-      }
-      pendingPrependAnchorRef.current = pending
-      void onLoadOlderHistory().then(() => {
-        window.setTimeout(() => {
-          if (
-            pendingPrependAnchorRef.current === pending &&
-            allItemsRef.current.findIndex(
-              (item) => item.id === pending.itemId
-            ) === pending.itemIndex
-          ) {
-            pendingPrependAnchorRef.current = null
-          }
-        }, 500)
-      })
-      return
-    }
     void onLoadOlderHistory()
-  }, [
-    allItems,
-    hasOlderHistory,
-    historyLoading,
-    onLoadOlderHistory,
-    sessionId,
-    virtualizer,
-  ])
+  }, [hasOlderHistory, historyLoading, onLoadOlderHistory, sessionId])
 
   const handleJumpToLatest = useCallback(() => {
     if (!detachedFromLatest) {

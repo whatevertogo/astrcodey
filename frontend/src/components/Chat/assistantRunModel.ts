@@ -115,7 +115,8 @@ const ASSISTANT_RUN_CHUNK_BLOCK_LIMIT = 32
 function appendAssistantRunItems(
   items: MessageListItem[],
   blocks: AssistantLikeBlock[],
-  firstIndex: number
+  firstIndex: number,
+  actionBlocks: AssistantLikeBlock[] | null
 ) {
   for (
     let offset = 0;
@@ -128,14 +129,15 @@ function appendAssistantRunItems(
       type: 'assistantRun',
       id: `assistant-run:${chunk[0].id}`,
       blocks: chunk,
-      actionBlocks: isLastChunk ? blocks : null,
+      actionBlocks: isLastChunk ? actionBlocks : null,
       index: firstIndex + offset,
     })
   }
 }
 
 export function buildMessageListItems(
-  blocks: ConversationBlock[]
+  blocks: ConversationBlock[],
+  assistantRunBreaks: ReadonlySet<string> = new Set()
 ): MessageListItem[] {
   const items: MessageListItem[] = []
   let index = 0
@@ -149,7 +151,20 @@ export function buildMessageListItems(
         runBlocks.push(blocks[index] as AssistantLikeBlock)
         index += 1
       }
-      appendAssistantRunItems(items, runBlocks, firstIndex)
+      let segmentStart = 0
+      for (let offset = 1; offset <= runBlocks.length; offset += 1) {
+        const atRunEnd = offset === runBlocks.length
+        if (!atRunEnd && !assistantRunBreaks.has(runBlocks[offset].id)) {
+          continue
+        }
+        appendAssistantRunItems(
+          items,
+          runBlocks.slice(segmentStart, offset),
+          firstIndex + segmentStart,
+          atRunEnd ? runBlocks : null
+        )
+        segmentStart = offset
+      }
       continue
     }
 

@@ -24,6 +24,7 @@ export default function ChatView({
   const timelineDetachedFromLatest = useAppStore(
     (s) => s.timelineDetachedFromLatest
   )
+  const timelinePageBlockIds = useAppStore((s) => s.timelinePageBlockIds)
   const loadOlderConversationItems = useAppStore(
     (s) => s.loadOlderConversationItems
   )
@@ -71,6 +72,7 @@ export default function ChatView({
             hasOlderHistory={timelineHasOlder}
             historyLoading={timelineLoading}
             detachedFromLatest={timelineDetachedFromLatest}
+            historyPageBlockIds={timelinePageBlockIds}
             onLoadOlderHistory={loadOlderConversationItems}
             onReturnToLatest={returnToLatestConversation}
           />
