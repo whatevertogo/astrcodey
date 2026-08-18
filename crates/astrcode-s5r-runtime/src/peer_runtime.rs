@@ -9,6 +9,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use astrcode_extension_sdk::wire::{
+    FrameTransport, TerminalStream, WireErrorCode,
+    protocol::{
+        ErrorPayload, FeatureName, InvokeMsg, ModelStreamEvent, ResultKind, ResultMsg, StreamMsg,
+        WireMessage, encode_wire_message, parse_wire_message,
+    },
+};
 use futures_util::Stream;
 use serde_json::Value;
 use tokio::{
@@ -18,13 +25,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::wire::{
-    FrameTransport, TerminalStream, WireErrorCode,
+use crate::{
+    frame::{read_traced_frame, write_traced_frame},
     peer::{PeerError, Ready},
-    protocol::{
-        ErrorPayload, FeatureName, InvokeMsg, ModelStreamEvent, ResultKind, ResultMsg, StreamMsg,
-        WireMessage, encode_wire_message, parse_wire_message,
-    },
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 256;
@@ -762,7 +765,7 @@ where
                 }
                 cancelled.insert(id.clone());
                 self.write_pump.try_write(WireMessage::Cancel(
-                    crate::wire::protocol::CancelMsg {
+                    astrcode_extension_sdk::wire::protocol::CancelMsg {
                         id,
                         reason: reason.into(),
                     },
@@ -853,11 +856,13 @@ where
     }
 }
 
-async fn read_next_frame<T>(transport: Arc<T>) -> Result<Vec<u8>, crate::wire::frame::FrameError>
+async fn read_next_frame<T>(
+    transport: Arc<T>,
+) -> Result<Vec<u8>, astrcode_extension_sdk::wire::frame::FrameError>
 where
     T: FrameTransport + 'static,
 {
-    crate::wire::frame::read_traced_frame(transport.as_ref()).await
+    read_traced_frame(transport.as_ref()).await
 }
 
 async fn run_inbound<H>(
@@ -1226,7 +1231,7 @@ where
     T: FrameTransport + ?Sized,
 {
     let payload = encode_wire_message(message)?;
-    crate::wire::frame::write_traced_frame(transport, &payload).await?;
+    write_traced_frame(transport, &payload).await?;
     Ok(())
 }
 
@@ -1375,16 +1380,16 @@ mod tests {
         sync::atomic::{AtomicBool, AtomicUsize},
     };
 
-    use futures_util::StreamExt;
-    use tokio::sync::{Mutex as AsyncMutex, Notify};
-
-    use super::*;
-    use crate::wire::{
+    use astrcode_extension_sdk::wire::{
         HostInitialization, Peer, PeerInfo, WorkerInitialization,
         frame::FrameError,
         manifest::InitializeManifest,
         protocol::{FeatureName, InvokeMsg, ModelStreamEvent, WireMessage, encode_wire_message},
     };
+    use futures_util::StreamExt;
+    use tokio::sync::{Mutex as AsyncMutex, Notify};
+
+    use super::*;
 
     struct WriteGate {
         armed: AtomicBool,

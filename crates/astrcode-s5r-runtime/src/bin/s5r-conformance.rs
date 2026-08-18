@@ -3,14 +3,16 @@ use std::{
 };
 
 use astrcode_extension_sdk::wire::{
-    FeatureName, HostInitialization, InboundInvoke, InvocationResponse, InvokeError, Peer,
-    PeerInfo, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
+    FeatureName, PeerInfo, StdioFrameTransport, WireErrorCode,
     frame::MAX_FRAME_BYTES,
     protocol::{
         CAP_RUNTIME_PING, CONFORMANCE_HOST_ECHO, CONFORMANCE_NESTED, CONFORMANCE_STREAM,
         CONFORMANCE_UNARY, CONFORMANCE_UNKNOWN_ERROR, CONFORMANCE_WAIT_FOR_CANCEL, ErrorPayload,
         ModelStreamEvent,
     },
+};
+use astrcode_s5r_runtime::{
+    HostInitialization, InboundInvoke, InvocationResponse, InvokeError, Peer, PeerInvokeHandler,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};

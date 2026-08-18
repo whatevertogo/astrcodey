@@ -9,8 +9,7 @@ use astrcode_extension_sdk::{
         HostProcessReadRequest, HostProcessStartRequest, HostProcessState, HostProcessStatusOutput,
         HostProcessTargetRequest,
     },
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 use parking_lot::Mutex;
 use tokio::{

@@ -37,7 +37,7 @@ use crate::{
             validate_extension_http_route,
         },
     },
-    s5r::{
+    wire::{
         ErrorPayload, HandlerEffect, HandlerId, HandlerInvokeRequest, HandlerKind, HandlerResult,
     },
 };

@@ -13,8 +13,6 @@ pub mod frame;
 pub mod host;
 pub mod manifest;
 pub mod operation;
-pub mod peer;
-pub mod peer_runtime;
 pub mod protocol;
 pub mod session;
 pub mod session_inspect;
@@ -39,14 +37,6 @@ pub use manifest::{CompactEvent, HookMode, LifecycleEvent};
 pub use operation::{
     HOST_OPERATION_SPECS, HostBackendRequirement, HostContextRequirement, HostOp, HostOperation,
     HostOperationGroup, HostOperationSpec, operations,
-};
-pub use peer::{
-    HostInitialization, HostInitialized, Peer, PeerError, Ready, Uninitialized,
-    WorkerInitialization, WorkerInitialized, WorkerReady,
-};
-pub use peer_runtime::{
-    InboundInvoke, InvocationCancellation, InvocationResponse, InvokeError, ModelEventStream,
-    PeerDriver, PeerHandle, PeerInvokeHandler, PeerStream,
 };
 pub use protocol::{
     ActivateMsg, ActivateOutput, ErrorPayload, FeatureName, HandlerId, HandlerInvokeRequest,

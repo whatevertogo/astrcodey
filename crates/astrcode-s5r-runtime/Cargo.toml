@@ -1,0 +1,25 @@
+[package]
+name = "astrcode-s5r-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "S5R subprocess extension runtime: peer state machine, I/O driver, and conformance harness"
+
+[features]
+default = []
+conformance = ["tokio/macros"]
+
+[[bin]]
+name = "s5r-conformance"
+path = "src/bin/s5r-conformance.rs"
+required-features = ["conformance"]
+
+[dependencies]
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

@@ -8,9 +8,9 @@ use astrcode_extension_sdk::{
         HostLlmChatOutput, HostLlmChatRequest, HostOperation,
         internal::{HostOperationGroup, llm_messages_from_wire},
     },
-    s5r::ErrorPayload,
-    wire::{ModelEventStream, WireErrorCode, protocol::ModelStreamEvent},
+    wire::{ErrorPayload, WireErrorCode, protocol::ModelStreamEvent},
 };
+use astrcode_s5r_runtime::ModelEventStream;
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::time::Instant;

@@ -12,8 +12,8 @@ use astrcode_extension_sdk::{
         CustomEventDeclaration, CustomEventDelivery, ExtensionHttpDispatchRequest,
         ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
     },
-    s5r::{CallContinuation, ErrorPayload, HandlerEffect, HandlerResult},
     tool::ExecutionMode,
+    wire::{CallContinuation, ErrorPayload, HandlerEffect, HandlerResult},
 };
 use astrcode_extension_worker::worker_prelude::*;
 use futures_util::StreamExt;

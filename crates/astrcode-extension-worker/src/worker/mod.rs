@@ -6,8 +6,8 @@ mod registry;
 
 use std::{collections::BTreeSet, future::Future, io, pin::Pin, sync::Arc};
 
-pub use astrcode_extension_sdk::wire::InvocationCancellation as CancelToken;
 use astrcode_extension_sdk::wire::ProcessStdioTransport;
+pub use astrcode_s5r_runtime::InvocationCancellation as CancelToken;
 pub use builder::{
     command_handler, continuation_handler, continuation_handler_args, continue_after_stop_handler,
     custom_event_handler, custom_event_handler_args, hook_handler, hook_handler_args, http_handler,
@@ -65,7 +65,7 @@ use crate::{
         CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
         HookMode, LifecycleEvent, TransportFeature,
     },
-    s5r::{HandlerEffect, HandlerResult},
+    wire::{HandlerEffect, HandlerResult},
     worker::{
         host::{V3PeerHostApi, with_host_api},
         registry::HandlerRegistry,
@@ -312,8 +312,9 @@ impl Worker {
 
     /// 注册 durable rewrite 成功后的 post-compact 通知 hook。
     ///
-    /// Handler 必须返回 [`HandlerResult::ok`](crate::s5r::HandlerResult::ok)；宿主拒绝任何
-    /// contribution 或附带数据的结果。
+    /// Handler 必须返回
+    /// [`astrcode_extension_sdk::wire::HandlerResult::ok`](astrcode_extension_sdk::wire::HandlerResult::ok)；
+    /// 宿主拒绝任何 contribution 或附带数据的结果。
     pub fn on_post_compact(
         &mut self,
         handler: HookHandlerFn,
@@ -324,7 +325,7 @@ impl Worker {
         Ok(self.hook_registration(index))
     }
 
-    /// 注册仅由 [`CallContinuation::Hook`](crate::s5r::CallContinuation::Hook) 调用的 handler。
+    /// 注册仅由 [`astrcode_extension_sdk::wire::CallContinuation::Hook`](astrcode_extension_sdk::wire::CallContinuation::Hook) 调用的 handler。
     ///
     /// 该 handler 不会声明为宿主事件订阅；需要订阅宿主事件时使用 [`Self::hook`]。
     pub fn continuation_hook_handler(
@@ -374,9 +375,8 @@ impl Worker {
 
     /// Runs this worker over the S5R 3.0 stdio transport.
     pub async fn run_stdio(mut self) -> Result<(), ErrorPayload> {
-        use astrcode_extension_sdk::wire::{
-            FeatureName, Peer as V3Peer, PeerInfo as V3PeerInfo, WorkerInitialization,
-        };
+        use astrcode_extension_sdk::wire::{FeatureName, PeerInfo as V3PeerInfo};
+        use astrcode_s5r_runtime::{Peer as V3Peer, WorkerInitialization};
 
         let extension_id = self.registry.extension_id().to_owned();
         let supported = BTreeSet::from([
@@ -418,7 +418,7 @@ impl Worker {
         });
         let driver_result = match driver.run(handler).await {
             Ok(()) => Ok(()),
-            Err(astrcode_extension_sdk::wire::PeerError::Frame(
+            Err(astrcode_s5r_runtime::PeerError::Frame(
                 astrcode_extension_sdk::wire::frame::FrameError::Io(error),
             )) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
             Err(error) => Err(v3_peer_error_to_payload(error)),
@@ -442,29 +442,30 @@ async fn run_shutdown_hook(
     }
 }
 
-type ErrorPayload = crate::s5r::ErrorPayload;
+type ErrorPayload = crate::wire::ErrorPayload;
 
 struct V3WorkerInvokeHandler {
     registry: Arc<HandlerRegistry>,
 }
 
 #[async_trait::async_trait]
-impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
+impl astrcode_s5r_runtime::PeerInvokeHandler for V3WorkerInvokeHandler {
     async fn invoke(
         &self,
-        invocation: astrcode_extension_sdk::wire::InboundInvoke,
+        invocation: astrcode_s5r_runtime::InboundInvoke,
     ) -> Result<
-        astrcode_extension_sdk::wire::InvocationResponse,
+        astrcode_s5r_runtime::InvocationResponse,
         astrcode_extension_sdk::wire::protocol::ErrorPayload,
     > {
-        if invocation.request.operation == crate::s5r::CAP_RUNTIME_PING {
-            return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
+        if invocation.request.operation == astrcode_extension_sdk::wire::protocol::CAP_RUNTIME_PING
+        {
+            return Ok(astrcode_s5r_runtime::InvocationResponse::Unary(
                 json!({ "ok": true }),
             ));
         }
         match invocation.request.operation.as_str() {
             astrcode_extension_sdk::wire::protocol::CONFORMANCE_UNARY => {
-                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
+                return Ok(astrcode_s5r_runtime::InvocationResponse::Unary(
                     invocation.request.input,
                 ));
             },
@@ -480,9 +481,9 @@ impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
                     },
                     astrcode_extension_sdk::wire::protocol::ModelStreamEvent::Completed { output },
                 ]);
-                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Stream(
-                    Box::pin(events),
-                ));
+                return Ok(astrcode_s5r_runtime::InvocationResponse::Stream(Box::pin(
+                    events,
+                )));
             },
             astrcode_extension_sdk::wire::protocol::CONFORMANCE_NESTED => {
                 let output = invocation
@@ -498,9 +499,7 @@ impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
                             error.to_string(),
                         )
                     })?;
-                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
-                    output,
-                ));
+                return Ok(astrcode_s5r_runtime::InvocationResponse::Unary(output));
             },
             astrcode_extension_sdk::wire::protocol::CONFORMANCE_WAIT_FOR_CANCEL => {
                 invocation.cancellation.cancelled().await;
@@ -520,7 +519,9 @@ impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
             },
             _ => {},
         }
-        if invocation.request.operation != crate::s5r::CAP_HANDLER_INVOKE {
+        if invocation.request.operation
+            != astrcode_extension_sdk::wire::protocol::CAP_HANDLER_INVOKE
+        {
             return Err(astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
                 WireErrorCode::UnknownCapability,
                 format!(
@@ -543,15 +544,13 @@ impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
                 format!("serialize S5R 3.0 handler result: {error}"),
             )
         })?;
-        Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
-            output,
-        ))
+        Ok(astrcode_s5r_runtime::InvocationResponse::Unary(output))
     }
 }
 
-fn v3_peer_error_to_payload(error: astrcode_extension_sdk::wire::PeerError) -> ErrorPayload {
+fn v3_peer_error_to_payload(error: astrcode_s5r_runtime::PeerError) -> ErrorPayload {
     match error {
-        astrcode_extension_sdk::wire::PeerError::Remote(error) => error,
+        astrcode_s5r_runtime::PeerError::Remote(error) => error,
         error => ErrorPayload::new(WireErrorCode::Transport, error.to_string()),
     }
 }

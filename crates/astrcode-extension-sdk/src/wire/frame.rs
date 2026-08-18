@@ -5,7 +5,6 @@ use tokio::{
     process::{ChildStdin, ChildStdout},
     sync::Mutex,
 };
-use tracing::Instrument;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRAME_HEADER_BYTES: usize = 32;
@@ -95,37 +94,6 @@ pub enum FrameError {
 pub trait FrameTransport: Send + Sync {
     async fn read_frame(&self) -> Result<Vec<u8>, FrameError>;
     async fn write_frame(&self, payload: &[u8]) -> Result<(), FrameError>;
-}
-
-pub(crate) async fn read_traced_frame<T>(transport: &T) -> Result<Vec<u8>, FrameError>
-where
-    T: FrameTransport + ?Sized,
-{
-    async {
-        let frame = transport.read_frame().await?;
-        tracing::Span::current().record("bytes", frame.len());
-        Ok(frame)
-    }
-    .instrument(tracing::trace_span!(
-        "s5r.frame",
-        direction = "inbound",
-        bytes = tracing::field::Empty,
-    ))
-    .await
-}
-
-pub(crate) async fn write_traced_frame<T>(transport: &T, payload: &[u8]) -> Result<(), FrameError>
-where
-    T: FrameTransport + ?Sized,
-{
-    transport
-        .write_frame(payload)
-        .instrument(tracing::trace_span!(
-            "s5r.frame",
-            direction = "outbound",
-            bytes = payload.len(),
-        ))
-        .await
 }
 
 pub struct StdioFrameTransport {

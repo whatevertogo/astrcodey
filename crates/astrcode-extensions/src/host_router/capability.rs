@@ -8,8 +8,7 @@ use astrcode_extension_sdk::{
         HostOperation,
         internal::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperationSpec},
     },
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 
 pub(super) fn lookup(name: &str) -> Result<&'static HostOperationSpec, ErrorPayload> {

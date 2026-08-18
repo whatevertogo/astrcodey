@@ -312,6 +312,11 @@ pub type UserMessageEnvelopeContext = HookContext<UserMessageEnvelopePayload>;
 pub type RuntimeUserMessageEnvelopeContext = HookInput<UserMessageEnvelopePayload>;
 
 /// PreToolUse hook payload.
+///
+/// In-process counterpart of [`crate::s5r::hooks::ToolUseHookInput`]: the host
+/// converts that wire DTO into this payload in `astrcode-extensions::s5r_ext`
+/// before invoking bundled handlers, so both families must stay
+/// field-compatible. Keep them in sync when either changes.
 #[derive(Clone, Debug)]
 pub struct PreToolUsePayload {
     call_id: ToolCallId,

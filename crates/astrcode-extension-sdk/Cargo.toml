@@ -7,13 +7,7 @@ description = "Stable authoring surface for AstrCode extensions"
 
 [features]
 default = []
-conformance = ["tokio/macros"]
 testing = []
-
-[[bin]]
-name = "s5r-conformance"
-path = "src/bin/s5r-conformance.rs"
-required-features = ["conformance"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }

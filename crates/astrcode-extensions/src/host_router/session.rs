@@ -29,7 +29,6 @@ use astrcode_extension_sdk::{
         HostSessionTranscriptMessage,
         internal::{HostOperationGroup, llm_message_to_wire, llm_messages_to_wire},
     },
-    s5r::ErrorPayload,
     session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
         HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
@@ -39,7 +38,7 @@ use astrcode_extension_sdk::{
         SessionMessageOriginDto, SessionToolSelectionDto, tool_selection_to_dto,
     },
     wire::{
-        WireErrorCode,
+        ErrorPayload, WireErrorCode,
         session_inspect::{
             HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
             SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,

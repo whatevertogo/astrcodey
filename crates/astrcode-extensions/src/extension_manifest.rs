@@ -10,10 +10,9 @@ use astrcode_extension_sdk::{
         ToolHookTarget,
         internal::{fixed_hook_mode, hook_mode_is_supported},
     },
-    s5r::HandlerId,
     tool::{ExecutionMode, ToolDefinition, ToolExecutionPolicy, ToolOrigin},
     wire::{
-        FeatureName,
+        FeatureName, HandlerId,
         manifest::{
             InitializeManifest, ManifestHook, ManifestHookEvent, ManifestHttpRoute, ManifestTool,
             ManifestToolMode, ToolHookManifest,

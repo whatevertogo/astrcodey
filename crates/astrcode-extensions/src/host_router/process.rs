@@ -8,8 +8,7 @@ use astrcode_extension_sdk::{
         HostProcessInputRequest, HostProcessOutput, HostProcessReadRequest, HostProcessRequest,
         HostProcessStartRequest, HostProcessTargetRequest, internal::HostOperationGroup,
     },
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 use serde_json::Value;
 use tokio::{

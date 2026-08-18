@@ -10,6 +10,7 @@ astrcode-core = { path = "../astrcode-core" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+astrcode-s5r-runtime = { path = "../astrcode-s5r-runtime" }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

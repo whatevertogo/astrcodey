@@ -19,8 +19,7 @@ use astrcode_extension_sdk::{
             OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
         },
     },
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 use futures_util::StreamExt;
 use reqwest::{

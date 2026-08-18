@@ -12,6 +12,7 @@ testing = []
 
 [dependencies]
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+astrcode-s5r-runtime = { path = "../astrcode-s5r-runtime" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }

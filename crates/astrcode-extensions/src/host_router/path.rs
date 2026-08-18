@@ -1,6 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 
-use astrcode_extension_sdk::{self, s5r::ErrorPayload, wire::WireErrorCode};
+use astrcode_extension_sdk::{
+    self,
+    wire::{ErrorPayload, WireErrorCode},
+};
 
 use super::io_error;
 

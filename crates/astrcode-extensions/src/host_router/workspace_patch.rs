@@ -8,7 +8,7 @@ use astrcode_extension_sdk::{
         HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspacePatchChange,
         HostWorkspacePatchChangeKind, is_patch_metadata, normalize_unified_diff_path,
     },
-    s5r::ErrorPayload,
+    wire::ErrorPayload,
 };
 
 use super::workspace::{

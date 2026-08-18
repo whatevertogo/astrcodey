@@ -1,7 +1,7 @@
 //! Worker-side S5R runtime. Authoring contracts remain owned by the SDK and contract crates.
 
 pub(crate) use astrcode_extension_sdk::{
-    WireErrorCode, builder, event, extension, host, llm, model_stream, s5r, session, tool,
+    WireErrorCode, builder, event, extension, host, llm, model_stream, s5r, session, tool, wire,
 };
 
 mod worker;
@@ -46,12 +46,13 @@ pub mod worker_prelude {
         },
         llm::LlmMessage,
         model_stream::{ModelStream, ModelStreamEvent},
-        s5r::{
+        session::tool_selection_to_dto,
+        tool::{HostResource, ResourceAccess, ToolPlan, ToolPresentation, ToolResult},
+        wire::session::{SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto},
+        wire::{
             CallContinuation, ErrorPayload, HandlerEffect, HandlerResult, ProviderContributionData,
             ProviderContributionEffect,
         },
-        session::{SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto},
-        tool::{HostResource, ResourceAccess, ToolPlan, ToolPresentation, ToolResult},
         // worker 模块的 pub 面(HostClient、Host* DTO、context、handler 构造器)即
         // worker 作者面,在此整体导出,避免两处手工清单漂移。
         worker::*,

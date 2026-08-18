@@ -14,7 +14,7 @@ use crate::{
         TypedToolResultClient, TypedWorkspaceClient,
     },
     model_stream::ModelStream,
-    s5r::ErrorPayload,
+    wire::ErrorPayload,
 };
 #[cfg(test)]
 use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
@@ -40,7 +40,7 @@ pub use crate::{
         HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceWriteOutput,
         HostWorkspaceWriteRequest, llm_chat_request,
     },
-    session::{
+    wire::session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
         HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
         HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
@@ -70,11 +70,11 @@ pub trait HostApi: Send + Sync {
 }
 
 pub(crate) struct V3PeerHostApi {
-    peer: astrcode_extension_sdk::wire::PeerHandle,
+    peer: astrcode_s5r_runtime::PeerHandle,
 }
 
 impl V3PeerHostApi {
-    pub fn new(peer: astrcode_extension_sdk::wire::PeerHandle) -> Self {
+    pub fn new(peer: astrcode_s5r_runtime::PeerHandle) -> Self {
         Self { peer }
     }
 }
@@ -364,7 +364,7 @@ mod host_tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{s5r::ErrorPayload, session::SessionToolSelectionDto};
+    use crate::{session::SessionToolSelectionDto, wire::ErrorPayload};
 
     struct MockHost {
         marker: &'static str,
@@ -1131,12 +1131,12 @@ mod host_tests {
     }
 
     #[async_trait]
-    impl astrcode_extension_sdk::wire::PeerInvokeHandler for RootStateHostHandler {
+    impl astrcode_s5r_runtime::PeerInvokeHandler for RootStateHostHandler {
         async fn invoke(
             &self,
-            invocation: astrcode_extension_sdk::wire::InboundInvoke,
+            invocation: astrcode_s5r_runtime::InboundInvoke,
         ) -> Result<
-            astrcode_extension_sdk::wire::InvocationResponse,
+            astrcode_s5r_runtime::InvocationResponse,
             astrcode_extension_sdk::wire::protocol::ErrorPayload,
         > {
             self.parents
@@ -1144,27 +1144,25 @@ mod host_tests {
                 .unwrap()
                 .push(invocation.request.parent_invoke_id.clone());
             assert_eq!(invocation.request.operation, "astrcode.session.root.state");
-            Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
-                json!({
-                    "lifecycle": "active",
-                    "phase": "idle",
-                    "active_turn_id": null,
-                    "queued_inputs": 0,
-                    "message_count": 0
-                }),
-            ))
+            Ok(astrcode_s5r_runtime::InvocationResponse::Unary(json!({
+                "lifecycle": "active",
+                "phase": "idle",
+                "active_turn_id": null,
+                "queued_inputs": 0,
+                "message_count": 0
+            })))
         }
     }
 
     struct RejectAllWorkerHandler;
 
     #[async_trait]
-    impl astrcode_extension_sdk::wire::PeerInvokeHandler for RejectAllWorkerHandler {
+    impl astrcode_s5r_runtime::PeerInvokeHandler for RejectAllWorkerHandler {
         async fn invoke(
             &self,
-            _invocation: astrcode_extension_sdk::wire::InboundInvoke,
+            _invocation: astrcode_s5r_runtime::InboundInvoke,
         ) -> Result<
-            astrcode_extension_sdk::wire::InvocationResponse,
+            astrcode_s5r_runtime::InvocationResponse,
             astrcode_extension_sdk::wire::protocol::ErrorPayload,
         > {
             Err(astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
@@ -1176,10 +1174,8 @@ mod host_tests {
 
     #[tokio::test]
     async fn background_host_invokes_over_real_peer_without_parent_invoke_id() {
-        use astrcode_extension_sdk::wire::{
-            FeatureName, HostInitialization, Peer, PeerInfo, WorkerInitialization,
-            manifest::InitializeManifest,
-        };
+        use astrcode_extension_sdk::wire::{FeatureName, PeerInfo, manifest::InitializeManifest};
+        use astrcode_s5r_runtime::{HostInitialization, Peer, WorkerInitialization};
 
         let features = std::collections::BTreeSet::from([
             FeatureName::nested_invoke_v1(),

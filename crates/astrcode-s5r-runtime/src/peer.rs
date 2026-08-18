@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::wire::{
+use astrcode_extension_sdk::wire::{
     WireErrorCode,
-    frame::{FrameError, FrameTransport, read_traced_frame, write_traced_frame},
+    frame::{FrameError, FrameTransport},
     manifest::InitializeManifest,
     protocol::{
         ActivateMsg, ActivateOutput, ErrorPayload, FeatureName, InitializeMsg, InitializeOutput,
@@ -10,6 +10,8 @@ use crate::wire::{
         encode_wire_message, negotiate_features, parse_wire_message,
     },
 };
+
+use crate::frame::{read_traced_frame, write_traced_frame};
 
 pub struct Uninitialized {
     local_peer: PeerInfo,
@@ -309,8 +311,8 @@ where
     T: FrameTransport + 'static,
 {
     /// Split a ready peer into a cloneable call handle and its explicitly-owned I/O driver.
-    pub fn into_runtime(self) -> (crate::wire::PeerHandle, crate::wire::PeerDriver<T>) {
-        crate::wire::peer_runtime::runtime_parts(self.transport, self.state, Vec::new())
+    pub fn into_runtime(self) -> (crate::PeerHandle, crate::PeerDriver<T>) {
+        crate::peer_runtime::runtime_parts(self.transport, self.state, Vec::new())
     }
 }
 
@@ -319,12 +321,12 @@ where
     T: FrameTransport + 'static,
 {
     /// Split a ready worker peer into a cloneable call handle and its explicitly-owned I/O driver.
-    pub fn into_runtime(self) -> (crate::wire::PeerHandle, crate::wire::PeerDriver<T>) {
+    pub fn into_runtime(self) -> (crate::PeerHandle, crate::PeerDriver<T>) {
         let WorkerReady {
             negotiated_features,
             host_operations,
         } = self.state;
-        crate::wire::peer_runtime::runtime_parts(
+        crate::peer_runtime::runtime_parts(
             self.transport,
             Ready {
                 negotiated_features,
@@ -525,13 +527,13 @@ impl From<serde_json::Error> for PeerError {
 mod tests {
     use std::sync::Arc;
 
+    use astrcode_extension_sdk::wire::frame::FrameTransport;
     use tokio::{
         io::{DuplexStream, ReadHalf, WriteHalf},
         sync::Mutex,
     };
 
     use super::*;
-    use crate::wire::frame::FrameTransport;
 
     #[derive(Clone)]
     struct DuplexTransport {
@@ -570,7 +572,7 @@ mod tests {
                 }
                 header.push(byte);
             }
-            let size = crate::wire::frame::parse_frame_header(&header)?;
+            let size = astrcode_extension_sdk::wire::frame::parse_frame_header(&header)?;
             let mut payload = vec![0; size];
             reader.read_exact(&mut payload).await?;
             Ok(payload)
@@ -580,7 +582,9 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let mut writer = self.writer.lock().await;
             writer
-                .write_all(&crate::wire::frame::frame_payload(payload)?)
+                .write_all(&astrcode_extension_sdk::wire::frame::frame_payload(
+                    payload,
+                )?)
                 .await?;
             writer.flush().await?;
             Ok(())
@@ -707,7 +711,7 @@ mod tests {
         let (_host, _worker_peer, _manifest) = host.unwrap();
         let worker = worker.unwrap();
 
-        let message = WireMessage::Invoke(crate::wire::protocol::InvokeMsg {
+        let message = WireMessage::Invoke(astrcode_extension_sdk::wire::protocol::InvokeMsg {
             id: "invoke-1".into(),
             operation: "astrcode.test".into(),
             input: serde_json::Value::Null,

@@ -19,8 +19,7 @@ use astrcode_extension_sdk::{
         HostSessionStateReadRequest, HostSessionStateWriteRequest, internal::HostOperationGroup,
     },
     hostpaths::write_file_atomic,
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};

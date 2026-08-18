@@ -6,10 +6,10 @@
 //! [`crate::wire::frame`]). Version negotiation, feature negotiation, handler
 //! invocation, streaming, and cancellation ship together as protocol 3.0.
 //!
-//! This module is the extension-facing half of that protocol. The host-side
-//! implementation lives in `astrcode-extensions::s5r_ext`, and extension authors
-//! normally consume these types through `astrcode-extension-worker` instead of
-//! importing the protocol directly.
+//! This module carries the author-facing S5R DTOs (`hooks`, `tool_plan`). The
+//! canonical protocol types themselves live in [`crate::wire`] and
+//! [`crate::wire::protocol`]; this module does not re-export them, so every
+//! wire type has exactly one home.
 
 mod tool_plan;
 
@@ -18,15 +18,4 @@ pub mod hooks;
 pub use tool_plan::{
     FileOperationDto, HostResourceDto, ResourceAccessDto, ToolInvocationPhase,
     ToolInvocationRequest, ToolInvocationScope, ToolPlanDto,
-};
-
-pub use crate::wire::{
-    CallContinuation, HandlerEffect, HandlerResult, ProviderContributionData,
-    ProviderContributionEffect,
-    protocol::{
-        ActivateMsg, ActivateOutput, CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, ErrorPayload,
-        HandlerId, HandlerInvokeRequest, HandlerKind, InitializeMsg, InitializeOutput, InvokeMsg,
-        PeerInfo, ResultKind, ResultMsg, S5R_STACK, S5R_VERSION, StreamMsg, WIRE_CODEC_JSON,
-        WireMessage, encode_wire_message, parse_wire_message,
-    },
 };

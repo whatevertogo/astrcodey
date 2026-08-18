@@ -16,12 +16,15 @@ use crate::{
         PreToolUseResult, PromptContributions, ProviderResult, ToolInputTransformResult,
     },
     llm::LlmMessage,
-    s5r::{ErrorPayload, HandlerEffect, HandlerResult, ProviderContributionData},
     tool::{ToolDefinition, ToolResult},
-    wire::WireErrorCode,
+    wire::{ErrorPayload, HandlerEffect, HandlerResult, ProviderContributionData, WireErrorCode},
 };
 
 /// Wire input for the `pre_tool_use` and `tool_input_transform` hooks.
+///
+/// Wire counterpart of the in-process [`crate::extension::PreToolUsePayload`];
+/// the host converts between the two families in `astrcode-extensions::s5r_ext`,
+/// so both must stay field-compatible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUseHookInput {
@@ -539,7 +542,7 @@ mod tests {
         );
         let contribution = provider_contribution_to_wire(Some(ProviderContributionData {
             contribution_id: "pending-1".into(),
-            effect: crate::s5r::ProviderContributionEffect::Unchanged {},
+            effect: crate::wire::ProviderContributionEffect::Unchanged {},
         }))
         .unwrap();
         assert_eq!(contribution.effect, HandlerEffect::ProviderContribution);

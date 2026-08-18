@@ -47,8 +47,7 @@ use astrcode_extension_sdk::{
         HostOperation,
         internal::{HostOperationGroup, OutboundNetworkService},
     },
-    s5r::ErrorPayload,
-    wire::{HostContextRequirement, WireErrorCode},
+    wire::{ErrorPayload, HostContextRequirement, WireErrorCode},
 };
 use astrcode_storage::{EventReader, SessionReader};
 pub(crate) use capability::supported_operation_catalog;
@@ -457,7 +456,7 @@ impl HostRouter {
         capability: &str,
         input: Value,
         context: &InvokeContext,
-    ) -> Result<astrcode_extension_sdk::wire::ModelEventStream, ErrorPayload> {
+    ) -> Result<astrcode_s5r_runtime::ModelEventStream, ErrorPayload> {
         ensure_invoke_active(context)?;
         ensure_not_planning(context)?;
         let spec = capability::lookup(capability)?;

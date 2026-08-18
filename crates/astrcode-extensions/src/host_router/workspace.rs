@@ -23,8 +23,7 @@ use astrcode_extension_sdk::{
         HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, internal::HostOperationGroup,
     },
     hostpaths::write_file_atomic_bytes,
-    s5r::ErrorPayload,
-    wire::WireErrorCode,
+    wire::{ErrorPayload, WireErrorCode},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{Glob, GlobMatcher};

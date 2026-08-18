@@ -9,10 +9,9 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     host::HostOperation,
-    s5r::ErrorPayload,
     session::tool_selection_to_dto,
     wire::{
-        WireErrorCode,
+        ErrorPayload, WireErrorCode,
         session_inspect::{
             SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
             SessionInspectContent, SessionInspectListItem, SessionInspectListOutput,

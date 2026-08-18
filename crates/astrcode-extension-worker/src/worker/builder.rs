@@ -17,7 +17,7 @@ use crate::{
         PreCompactResult, PreToolUseResult, PromptContributions, ProviderResult,
         ToolInputTransformResult,
     },
-    s5r::{ErrorPayload, HandlerResult, ProviderContributionData},
+    wire::{ErrorPayload, HandlerResult, ProviderContributionData},
     worker::registry::{
         CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn,
         HttpHandlerFn, ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
@@ -276,11 +276,11 @@ typed_hook_handler!(
 
 #[cfg(test)]
 mod tests {
+    use astrcode_extension_sdk::wire::HandlerEffect;
     use serde::Deserialize;
     use serde_json::json;
 
     use super::*;
-    use crate::s5r::HandlerEffect;
 
     #[derive(Deserialize)]
     struct GreetArgs {

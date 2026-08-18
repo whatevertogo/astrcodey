@@ -13,16 +13,16 @@ use std::{
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::HostError,
-    s5r::{
-        CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CallContinuation, ErrorPayload, HandlerId,
-        HandlerInvokeRequest, HandlerKind, HandlerResult,
-    },
     tool::ExecutionMode,
     wire::{
-        FeatureName, HostInitialization, HostInitialized, InboundInvoke, InvocationResponse,
-        InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport,
-        protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
+        CallContinuation, ErrorPayload, FeatureName, HandlerId, HandlerInvokeRequest, HandlerKind,
+        HandlerResult, StdioFrameTransport,
+        protocol::{CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, ModelStreamEvent, PeerInfo, S5R_STACK},
     },
+};
+use astrcode_s5r_runtime::{
+    HostInitialization, HostInitialized, InboundInvoke, InvocationResponse, InvokeError, Peer,
+    PeerHandle, PeerInvokeHandler,
 };
 use futures_util::Stream;
 use parking_lot::{Mutex, RwLock};
@@ -129,7 +129,7 @@ struct V3HostInvokeHandler {
 }
 
 struct GuardedModelStream {
-    stream: astrcode_extension_sdk::wire::ModelEventStream,
+    stream: astrcode_s5r_runtime::ModelEventStream,
     _reentrancy: ReentrancyGuard,
 }
 
@@ -176,7 +176,7 @@ impl PeerInvokeHandler for V3HostInvokeHandler {
 pub(crate) struct S5rV3Session {
     child: Mutex<Option<SupervisedChild>>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
-    driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_extension_sdk::wire::PeerError>>>>,
+    driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_s5r_runtime::PeerError>>>>,
     driver_shutdown: CancellationToken,
     initialized_peer: Mutex<Option<Peer<StdioFrameTransport, HostInitialized>>>,
     handle: RwLock<Option<PeerHandle>>,
