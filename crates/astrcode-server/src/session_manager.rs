@@ -330,9 +330,8 @@ impl SessionManager {
             .map_err(SessionError::from)?;
         let session = match Session::create_with_params(SessionCreateParams {
             working_dir,
-            model_id: model_preference.unwrap_or_else(|| {
-                self.runtime_services.read_effective().llm.model_id.clone()
-            }),
+            model_id: model_preference
+                .unwrap_or_else(|| self.runtime_services.read_effective().llm.model_id.clone()),
             parent_session_id: None,
             tool_selection,
             source_extension,
@@ -2148,7 +2147,10 @@ mod tests {
         );
         let lifecycle_source = lifecycle_manager.create(".").await.unwrap();
 
-        let lifecycle_fork_error = match lifecycle_manager.fork(lifecycle_source.id(), None, None).await {
+        let lifecycle_fork_error = match lifecycle_manager
+            .fork(lifecycle_source.id(), None, None)
+            .await
+        {
             Ok(_) => panic!("fork lifecycle start must fail"),
             Err(error) => error,
         };
@@ -2422,7 +2424,8 @@ mod tests {
 
         let fork_manager = Arc::clone(&manager);
         let fork_source_id = source_id.clone();
-        let fork = tokio::spawn(async move { fork_manager.fork(&fork_source_id, None, None).await });
+        let fork =
+            tokio::spawn(async move { fork_manager.fork(&fork_source_id, None, None).await });
         store.wait_until_read_blocked().await;
         manager.owned_tasks.close_and_wait().await;
         store.release_read();
@@ -2614,10 +2617,11 @@ mod tests {
         let source_id = source.id().clone();
         let create_fork_manager = Arc::clone(&fork_manager);
         let create_fork_source_id = source_id.clone();
-        let fork_task =
-            tokio::spawn(
-                async move { create_fork_manager.fork(&create_fork_source_id, None, None).await },
-            );
+        let fork_task = tokio::spawn(async move {
+            create_fork_manager
+                .fork(&create_fork_source_id, None, None)
+                .await
+        });
         fork_hooks.wait_until_blocked().await;
         fork_store.wait_for_created_sessions(2).await;
         let fork_id = fork_store.created_sessions()[1].clone();
