@@ -602,6 +602,16 @@ host_operations! {
         response: crate::wire::host::Acknowledgement,
         description: "Recycle an owned top-level session",
     }
+    SessionRootFork {
+        name: "astrcode.session.root.fork",
+        required: Some(ExtensionCapability::InputDelivery),
+        context: None,
+        group: Session,
+        backend: SessionOperationsAndReader,
+        request: crate::wire::session::HostForkRootSessionRequest,
+        response: crate::wire::session::HostCreateSessionOutput,
+        description: "Fork a session into a new top-level session owned by the calling extension",
+    }
 }
 
 /// Session/workspace context an operation requires the host to resolve before dispatch.
@@ -705,6 +715,16 @@ mod tests {
         assert_eq!(dispose.group, HostOperationGroup::Session);
         assert_eq!(
             dispose.backend,
+            HostBackendRequirement::SessionOperationsAndReader
+        );
+
+        let fork = HostOperation::SessionRootFork.spec();
+        assert_eq!(fork.name, "astrcode.session.root.fork");
+        assert_eq!(fork.required, Some(ExtensionCapability::InputDelivery));
+        assert_eq!(fork.context, HostContextRequirement::None);
+        assert_eq!(fork.group, HostOperationGroup::Session);
+        assert_eq!(
+            fork.backend,
             HostBackendRequirement::SessionOperationsAndReader
         );
     }

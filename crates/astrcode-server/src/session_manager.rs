@@ -6,9 +6,10 @@ use std::{
 };
 
 use astrcode_core::{
+    config::EffectiveConfig,
     event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
     llm::TranscriptMessage,
-    tool::SessionToolSelection,
+    tool::{CreateRootSessionRequest, SessionToolSelection},
     types::{Cursor, SessionId, TurnId},
 };
 use astrcode_extension_sdk::extension::LifecycleEvent;
@@ -37,6 +38,7 @@ struct ForkCreationInput {
     source_cursor: Cursor,
     first_user_message: Option<String>,
     messages: Vec<TranscriptMessage>,
+    source_extension: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +55,8 @@ pub enum SessionManagerError {
     Creation(#[from] SessionCreationFailed),
     #[error("invalid fork cursor: {0}")]
     InvalidCursor(String),
+    #[error("invalid session request: {0}")]
+    InvalidRequest(String),
     #[error("session close task failed: {0}")]
     CloseTask(String),
     #[error("session creation task failed: {0}")]
@@ -64,6 +68,36 @@ impl SessionManagerError {
     pub(crate) fn is_not_found(&self) -> bool {
         matches!(self, Self::Storage(StorageError::NotFound(_)))
     }
+}
+
+/// 校验扩展提供的 root 模型偏好。
+///
+/// `"inherit"`/空串视为未指定(与子会话路径 `spawn_child` 的过滤一致);
+/// 其余值必须命中运行时实际可切换的模型集合。运行时只有主/小两个
+/// provider 实例,`llm_for_model_id` 对任何其他值都静默回退主 provider——
+/// 后台无人值守的 root 会把 typo 变成静默错模型,因此在创建边界显式拒绝。
+fn validated_root_model_preference(
+    preference: Option<String>,
+    effective: &EffectiveConfig,
+) -> Result<Option<String>, SessionManagerError> {
+    let Some(model_id) = preference.filter(|id| !id.is_empty() && id != "inherit") else {
+        return Ok(None);
+    };
+    let candidates = [
+        effective.llm.model_id.as_str(),
+        effective.small_llm.model_id.as_str(),
+    ];
+    if candidates.contains(&model_id.as_str()) {
+        return Ok(Some(model_id));
+    }
+    Err(SessionManagerError::InvalidRequest(format!(
+        "unknown model_preference {model_id:?}; available models: {}",
+        candidates
+            .into_iter()
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
@@ -214,17 +248,27 @@ impl SessionManager {
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
     ) -> Result<Session, SessionManagerError> {
-        self.create_root_with_options(working_dir, tool_selection, None)
+        self.create_root_with_options(working_dir, tool_selection, None, None, None)
             .await
     }
 
+    /// 创建扩展持有的顶层会话(宿主入口:`SessionOperations::create_root_session`)。
     pub(crate) async fn create_for_extension(
         &self,
-        working_dir: &str,
-        source_extension: Option<String>,
+        request: CreateRootSessionRequest,
     ) -> Result<Session, SessionManagerError> {
-        self.create_root_with_options(working_dir, None, source_extension)
-            .await
+        let model_preference = validated_root_model_preference(
+            request.model_preference,
+            &self.runtime_services.read_effective(),
+        )?;
+        self.create_root_with_options(
+            &request.working_dir,
+            request.tool_selection.as_ref(),
+            request.source_extension,
+            model_preference,
+            request.system_prompt,
+        )
+        .await
     }
 
     async fn create_root_with_options(
@@ -232,6 +276,8 @@ impl SessionManager {
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
         source_extension: Option<String>,
+        model_preference: Option<String>,
+        extra_system_prompt: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let manager = self.clone();
         let working_dir = working_dir.to_owned();
@@ -243,6 +289,8 @@ impl SessionManager {
                 working_dir,
                 tool_selection,
                 source_extension,
+                model_preference,
+                extra_system_prompt,
             ))
             .catch_unwind()
             .await
@@ -271,6 +319,8 @@ impl SessionManager {
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
         source_extension: Option<String>,
+        model_preference: Option<String>,
+        extra_system_prompt: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let runtime = self.runtime_for(&sid);
         let creation = runtime.begin_creation();
@@ -280,11 +330,13 @@ impl SessionManager {
             .map_err(SessionError::from)?;
         let session = match Session::create_with_params(SessionCreateParams {
             working_dir,
-            model_id: self.runtime_services.read_effective().llm.model_id.clone(),
+            model_id: model_preference.unwrap_or_else(|| {
+                self.runtime_services.read_effective().llm.model_id.clone()
+            }),
             parent_session_id: None,
             tool_selection,
             source_extension,
-            extra_system_prompt: None,
+            extra_system_prompt,
             initial_system_prompt: None,
             runtime,
             runtime_services: Arc::clone(&self.runtime_services),
@@ -684,6 +736,7 @@ impl SessionManager {
         &self,
         source_id: &SessionId,
         at_cursor: Option<&Cursor>,
+        source_extension: Option<&str>,
     ) -> Result<Session, SessionManagerError> {
         let source_model = self.event_store.session_read_model(source_id).await?;
 
@@ -729,6 +782,7 @@ impl SessionManager {
                     origin: entry.origin,
                 })
                 .collect(),
+            source_extension: source_extension.map(str::to_owned),
         };
         let new_sid = input.session_id.clone();
         let manager = self.clone();
@@ -768,6 +822,7 @@ impl SessionManager {
             source_cursor,
             first_user_message,
             messages,
+            source_extension,
         } = input;
         let runtime = self.runtime_for(&new_sid);
         let creation = runtime.begin_creation();
@@ -780,7 +835,7 @@ impl SessionManager {
             model_id,
             parent_session_id: None,
             tool_selection: None,
-            source_extension: None,
+            source_extension,
             extra_system_prompt: None,
             initial_system_prompt: Some(initial_system_prompt),
             runtime,
@@ -2061,7 +2116,7 @@ mod tests {
         let source = manager.create(".").await.unwrap();
 
         fork_store.fail_next_append();
-        let fork_error = match manager.fork(source.id(), None).await {
+        let fork_error = match manager.fork(source.id(), None, None).await {
             Ok(_) => panic!("fork link append must fail"),
             Err(error) => error,
         };
@@ -2093,7 +2148,7 @@ mod tests {
         );
         let lifecycle_source = lifecycle_manager.create(".").await.unwrap();
 
-        let lifecycle_fork_error = match lifecycle_manager.fork(lifecycle_source.id(), None).await {
+        let lifecycle_fork_error = match lifecycle_manager.fork(lifecycle_source.id(), None, None).await {
             Ok(_) => panic!("fork lifecycle start must fail"),
             Err(error) => error,
         };
@@ -2367,7 +2422,7 @@ mod tests {
 
         let fork_manager = Arc::clone(&manager);
         let fork_source_id = source_id.clone();
-        let fork = tokio::spawn(async move { fork_manager.fork(&fork_source_id, None).await });
+        let fork = tokio::spawn(async move { fork_manager.fork(&fork_source_id, None, None).await });
         store.wait_until_read_blocked().await;
         manager.owned_tasks.close_and_wait().await;
         store.release_read();
@@ -2424,7 +2479,7 @@ mod tests {
         let caller_manager = Arc::clone(&fork_manager);
         let caller_source_id = source_id.clone();
         let fork_caller =
-            tokio::spawn(async move { caller_manager.fork(&caller_source_id, None).await });
+            tokio::spawn(async move { caller_manager.fork(&caller_source_id, None, None).await });
         fork_hooks.wait_until_blocked().await;
         fork_store.wait_for_created_sessions(2).await;
         let fork_id = fork_store.created_sessions()[1].clone();
@@ -2561,7 +2616,7 @@ mod tests {
         let create_fork_source_id = source_id.clone();
         let fork_task =
             tokio::spawn(
-                async move { create_fork_manager.fork(&create_fork_source_id, None).await },
+                async move { create_fork_manager.fork(&create_fork_source_id, None, None).await },
             );
         fork_hooks.wait_until_blocked().await;
         fork_store.wait_for_created_sessions(2).await;

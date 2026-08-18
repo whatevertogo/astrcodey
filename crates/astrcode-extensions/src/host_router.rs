@@ -826,10 +826,10 @@ mod tests {
         },
         permission::ApprovalDecision,
         tool::{
-            CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionLifecycleState, SessionOperations,
-            SessionReactivation, SessionState, SessionStatus, SessionToolSelection,
-            SubmitTurnRequest, SubmitTurnResult,
+            CreateRootSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionAccess,
+            SessionApiError, SessionDeliveryOutcome, SessionHandle, SessionLifecycleState,
+            SessionOperations, SessionReactivation, SessionState, SessionStatus,
+            SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
         },
         types::MessageId,
     };
@@ -2746,6 +2746,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_create_forwards_customization_fields() {
+        let ops = Arc::new(CapturingSessionOps::default());
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            working_dir: Some("/workspace".into()),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            ..Default::default()
+        };
+
+        let created = router
+            .invoke(
+                "astrcode.session.root.create",
+                json!({
+                    "system_prompt": "nightly reviewer mode",
+                    "model_preference": "mock",
+                    "tool_selection": { "mode": "only", "names": ["read", "grep"] }
+                }),
+                &ctx,
+            )
+            .await
+            .expect("create customized root");
+        assert_eq!(created["session_id"], "root");
+        {
+            let root_creates = ops.root_creates.lock().expect("root creates lock");
+            assert_eq!(root_creates.len(), 1);
+            assert_eq!(
+                root_creates[0].system_prompt.as_deref(),
+                Some("nightly reviewer mode")
+            );
+            assert_eq!(root_creates[0].model_preference.as_deref(), Some("mock"));
+            assert_eq!(
+                root_creates[0].tool_selection,
+                Some(SessionToolSelection::Only {
+                    names: vec!["grep".into(), "read".into()]
+                })
+            );
+        }
+
+        // 空工具名在边界被拒,校验语义与 configure_tools 一致。
+        let invalid = router
+            .invoke(
+                "astrcode.session.root.create",
+                json!({ "tool_selection": { "mode": "only", "names": ["read", " "] } }),
+                &ctx,
+            )
+            .await
+            .expect_err("blank tool names must be rejected");
+        assert_eq!(invalid.code_enum(), Some(WireErrorCode::InvalidInput));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_fork_authorizes_owned_or_context_session_sources() {
+        let store = Arc::new(InMemoryEventStore::new());
+        seed_session(&store, "owned-root", None, Some("channel-a")).await;
+        seed_session(&store, "foreign-root", None, Some("channel-b")).await;
+        seed_session(&store, "context-child", Some("owned-root"), Some("other-ext")).await;
+        let ops = Arc::new(CapturingSessionOps::default());
+        let session_reader: Arc<dyn SessionReader> = store;
+        let router = HostRouter::from_backends(HostBackends {
+            session_reader: Some(session_reader),
+            ..Default::default()
+        });
+        // 后台上下文:无 session 归属,只能分叉自己拥有的顶层会话。
+        let background_ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            ..Default::default()
+        };
+
+        let forked = router
+            .invoke(
+                "astrcode.session.root.fork",
+                json!({ "source_session_id": "owned-root", "at_cursor": "7" }),
+                &background_ctx,
+            )
+            .await
+            .expect("fork an owned top-level session");
+        assert_eq!(forked["session_id"], "forked-root");
+        {
+            let forks = ops.forks.lock().expect("forks lock");
+            assert_eq!(forks.len(), 1);
+            assert_eq!(forks[0].source_session_id, "owned-root");
+            assert_eq!(forks[0].at_cursor.as_deref(), Some("7"));
+            // 归属由宿主从调用上下文注入,payload 无法伪造。
+            assert_eq!(forks[0].source_extension.as_deref(), Some("channel-a"));
+        }
+
+        for source in ["foreign-root", "context-child"] {
+            let error = router
+                .invoke(
+                    "astrcode.session.root.fork",
+                    json!({ "source_session_id": source }),
+                    &background_ctx,
+                )
+                .await
+                .expect_err("background fork must be limited to owned top-level sessions");
+            assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+        }
+        assert_eq!(ops.forks.lock().expect("forks lock").len(), 1);
+
+        // handler 内调用:分叉当前上下文会话(即使是别人的子会话)是唯一放宽。
+        let context_ctx = InvokeContext {
+            extension_id: "channel-a".into(),
+            session_id: Some("context-child".into()),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::InputDelivery],
+            ..Default::default()
+        };
+        router
+            .invoke(
+                "astrcode.session.root.fork",
+                json!({ "source_session_id": "context-child" }),
+                &context_ctx,
+            )
+            .await
+            .expect("fork the invocation-context session");
+        {
+            let forks = ops.forks.lock().expect("forks lock");
+            assert_eq!(forks.len(), 2);
+            assert_eq!(forks[1].source_session_id, "context-child");
+            assert_eq!(forks[1].at_cursor, None);
+        }
+
+        // 归属字段不可从 payload 伪造(deny_unknown_fields)。
+        let spoof = router
+            .invoke(
+                "astrcode.session.root.fork",
+                json!({ "source_session_id": "owned-root", "source_extension": "channel-b" }),
+                &background_ctx,
+            )
+            .await
+            .expect_err("source attribution is host-owned");
+        assert_eq!(spoof.code_enum(), Some(WireErrorCode::InvalidInput));
+
+        // 与其余 root 操作同一能力门。
+        let unauthorized = router
+            .invoke(
+                "astrcode.session.root.fork",
+                json!({ "source_session_id": "owned-root" }),
+                &InvokeContext {
+                    extension_id: "channel-a".into(),
+                    session_ops: ops,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("fork requires input_delivery");
+        assert_eq!(
+            unauthorized.code_enum(),
+            Some(WireErrorCode::PermissionDenied)
+        );
+    }
+
+    #[tokio::test]
     async fn dispose_root_recycles_only_owned_top_level_sessions() {
         let store = Arc::new(InMemoryEventStore::new());
         seed_session(&store, "owned-root", None, Some("channel-a")).await;
@@ -3113,6 +3270,7 @@ mod tests {
     struct CapturingSessionOps {
         root_creates: Mutex<Vec<CreateRootSessionRequest>>,
         creates: Mutex<Vec<CreateSessionRequest>>,
+        forks: Mutex<Vec<ForkSessionRequest>>,
         submits: Mutex<Vec<SubmitTurnRequest>>,
         tool_configurations: Mutex<Vec<(String, String, SessionToolSelection)>>,
         lifecycle_calls: Mutex<Vec<(String, String, String)>>,
@@ -3173,6 +3331,16 @@ mod tests {
             creates.push(request);
             Ok(SessionHandle {
                 session_id: format!("child-{}", creates.len()),
+            })
+        }
+
+        async fn fork_session(
+            &self,
+            request: ForkSessionRequest,
+        ) -> Result<SessionHandle, SessionApiError> {
+            self.forks.lock().expect("forks lock").push(request);
+            Ok(SessionHandle {
+                session_id: "forked-root".into(),
             })
         }
 

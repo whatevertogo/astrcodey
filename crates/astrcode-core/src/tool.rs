@@ -493,6 +493,19 @@ pub trait SessionOperations: Send + Sync {
         request: CreateSessionRequest,
     ) -> Result<SessionHandle, SessionApiError>;
 
+    /// 在指定位置分叉一个 session,产出归属 `source_extension` 的新顶层会话。
+    ///
+    /// working_dir、模型与系统提示词(含指纹)从 source 继承;`at_cursor`
+    /// 省略时在 source 当前头部份分叉,否则按十进制事件 seq 截断。
+    async fn fork_session(
+        &self,
+        _request: ForkSessionRequest,
+    ) -> Result<SessionHandle, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "session fork is not supported by this host".into(),
+        ))
+    }
+
     /// 向目标 session 注入一条 UserMessage。
     async fn inject_message(
         &self,
@@ -627,6 +640,23 @@ pub struct CreateRootSessionRequest {
     /// 工作目录。
     pub working_dir: String,
     /// 创建该 session 的扩展 ID。
+    pub source_extension: Option<String>,
+    /// 追加进持久化稳定系统提示词的额外段落;`None` 保持默认组装。
+    pub system_prompt: Option<String>,
+    /// 模型偏好;`None` 回退 effective 默认模型。
+    pub model_preference: Option<String>,
+    /// 初始工具集选择;`None` 使用默认全量。
+    pub tool_selection: Option<SessionToolSelection>,
+}
+
+/// 分叉会话请求。
+#[derive(Debug, Clone)]
+pub struct ForkSessionRequest {
+    /// 分叉来源 session。
+    pub source_session_id: String,
+    /// 分叉位置(十进制事件 seq);`None` 在当前头部份分叉。
+    pub at_cursor: Option<String>,
+    /// 分叉产出的新顶层会话归属的扩展 ID。
     pub source_extension: Option<String>,
 }
 
@@ -836,6 +866,8 @@ pub struct SessionExecutionView {
 pub enum SessionApiError {
     #[error("session not found: {0}")]
     NotFound(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
     #[error("session busy: {0}")]

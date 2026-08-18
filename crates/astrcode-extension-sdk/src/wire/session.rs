@@ -97,12 +97,38 @@ pub struct HostCreateSessionOutput {
 }
 
 /// `astrcode.session.root.create` 的线缆请求。
+///
+/// 可选定制字段与 `astrcode.session.control.create`(`HostCreateSessionRequest`)
+/// 同名同语义;`name`/`ephemeral` 不适用(root 无 durable 名称面,也无父会话
+/// 回收协调,生命周期由 `session.root.dispose` 显式管理)。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateRootSessionRequest {
     /// 省略时回退到调用上下文的 working_dir(handler 内调用的既有行为)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// 追加进持久化稳定系统提示词的额外段落(KV 稳定前缀内)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// 模型偏好;`None`/`"inherit"`/空串回退 effective 默认模型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preference: Option<String>,
+    /// 初始工具集选择(root 无父选择可继承,按原样生效)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_selection: Option<SessionToolSelectionDto>,
+}
+
+/// `astrcode.session.root.fork` 的线缆请求。
+///
+/// fork 只做「在指定位置分叉」:working_dir、模型、系统提示词(含指纹)从
+/// source 继承,不可覆盖;`at_cursor` 省略时在 source 当前头部份分叉。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostForkRootSessionRequest {
+    pub source_session_id: String,
+    /// 十进制事件 seq;非法值由宿主以 `InvalidInput` 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_cursor: Option<String>,
 }
 
 /// 插件 session control 操作的目标。
@@ -399,11 +425,31 @@ mod tests {
         assert_strict_round_trip(&default);
         assert_strict_round_trip(&HostCreateRootSessionRequest {
             working_dir: Some("/worktree".into()),
+            system_prompt: Some("nightly reviewer".into()),
+            model_preference: Some("small".into()),
+            tool_selection: Some(SessionToolSelectionDto::only(["read", "grep"])),
         });
 
         let explicit_null: HostCreateRootSessionRequest =
             serde_json::from_value(json!({ "working_dir": null })).unwrap();
         assert_eq!(explicit_null, default);
+    }
+
+    #[test]
+    fn fork_root_session_request_round_trip_and_defaults() {
+        let head = HostForkRootSessionRequest {
+            source_session_id: "root-1".into(),
+            at_cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&head).unwrap(),
+            json!({ "source_session_id": "root-1" })
+        );
+        assert_strict_round_trip(&head);
+        assert_strict_round_trip(&HostForkRootSessionRequest {
+            source_session_id: "root-1".into(),
+            at_cursor: Some("41".into()),
+        });
     }
 
     #[test]

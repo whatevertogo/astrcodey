@@ -258,7 +258,7 @@ impl SessionCommandService {
         let session = self
             .runtime
             .session_manager()
-            .fork(&source_id, at_cursor.as_ref())
+            .fork(&source_id, at_cursor.as_ref(), None)
             .await
             .map_err(HandlerError::SessionManager)?;
         let new_session_id = session.id().clone();
