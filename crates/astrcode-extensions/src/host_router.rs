@@ -2803,7 +2803,13 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         seed_session(&store, "owned-root", None, Some("channel-a")).await;
         seed_session(&store, "foreign-root", None, Some("channel-b")).await;
-        seed_session(&store, "context-child", Some("owned-root"), Some("other-ext")).await;
+        seed_session(
+            &store,
+            "context-child",
+            Some("owned-root"),
+            Some("other-ext"),
+        )
+        .await;
         let ops = Arc::new(CapturingSessionOps::default());
         let session_reader: Arc<dyn SessionReader> = store;
         let router = HostRouter::from_backends(HostBackends {
