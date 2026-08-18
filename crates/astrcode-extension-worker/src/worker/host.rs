@@ -42,10 +42,10 @@ pub use crate::{
     },
     session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEvent,
-        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
-        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest,
+        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+        HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
+        HostSubmitTurnOutput, HostSubmitTurnRequest,
     },
 };
 
@@ -246,6 +246,14 @@ impl BackgroundRootSessionClient {
 
     pub async fn dispose_root(&self, target: HostSessionTargetRequest) -> Result<(), ErrorPayload> {
         self.inner.dispose_root(target).await
+    }
+
+    /// Forks a session into a new top-level session owned by this extension.
+    pub async fn fork_root(
+        &self,
+        request: HostForkRootSessionRequest,
+    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
+        self.inner.fork_root(request).await
     }
 }
 
@@ -649,6 +657,7 @@ mod host_tests {
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
             HostOperation::SessionRootDispose,
+            HostOperation::SessionRootFork,
             HostOperation::SessionControlInjectOrStart,
             HostOperation::SessionControlQueueOrStart,
             HostOperation::SessionControlDeferContext,
@@ -757,6 +766,13 @@ mod host_tests {
             expect_backend_error(HostClient::session_control().dispose_root(
                 HostSessionTargetRequest {
                     target_session_id: "root-1".into(),
+                },
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().fork_root(
+                HostForkRootSessionRequest {
+                    source_session_id: "root-1".into(),
+                    at_cursor: None,
                 },
             ))
             .await;
