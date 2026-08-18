@@ -2890,7 +2890,7 @@ mod tests {
                 json!({ "source_session_id": "owned-root" }),
                 &InvokeContext {
                     extension_id: "channel-a".into(),
-                    session_ops: ops,
+                    session_ops: Some(ops),
                     ..Default::default()
                 },
             )

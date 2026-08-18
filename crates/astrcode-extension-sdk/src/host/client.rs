@@ -24,9 +24,9 @@ use crate::{
     },
     llm::LlmMessage,
     session::{
-        HostCreateRootSessionRequest, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEventsPageRequest, HostSessionTargetRequest,
-        HostSubmitTurnRequest,
+        HostCreateRootSessionRequest, HostCreateSessionRequest, HostForkRootSessionRequest,
+        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEventsPageRequest,
+        HostSessionTargetRequest, HostSubmitTurnRequest,
     },
 };
 
@@ -165,6 +165,7 @@ mod tests {
             HostOperation::SessionRootSubmitTurn,
             HostOperation::SessionRootState,
             HostOperation::SessionRootDispose,
+            HostOperation::SessionRootFork,
             HostOperation::SessionControlInjectOrStart,
             HostOperation::SessionControlQueueOrStart,
             HostOperation::SessionControlDeferContext,
@@ -305,6 +306,15 @@ mod tests {
                 target_session_id: "root-1".into(),
             },
         ))
+        .await;
+        expect_backend_error(
+            host.session_control()
+                .unwrap()
+                .fork_root(HostForkRootSessionRequest {
+                    source_session_id: "root-1".into(),
+                    at_cursor: None,
+                }),
+        )
         .await;
         expect_backend_error(host.session_control().unwrap().inject_or_start(input())).await;
         expect_backend_error(host.session_control().unwrap().queue_or_start(input())).await;

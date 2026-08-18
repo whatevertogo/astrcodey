@@ -26,9 +26,10 @@ use crate::{
     model_stream::ModelStream,
     session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEventsPageOutput,
-        HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
-        HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
+        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest,
     },
     wire::{
         HostOp, WireErrorCode, operations,
@@ -227,6 +228,15 @@ impl<T: HostClientTransport> SessionControlClient<T> {
 
     pub async fn dispose_root(&self, request: HostSessionTargetRequest) -> Result<(), T::Error> {
         invoke_ack::<operations::SessionRootDispose, _>(&self.transport, &request).await
+    }
+
+    /// Forks a session into a new top-level session owned by the calling
+    /// extension; see `astrcode.session.root.fork` for the authorization rule.
+    pub async fn fork_root(
+        &self,
+        request: HostForkRootSessionRequest,
+    ) -> Result<HostCreateSessionOutput, T::Error> {
+        invoke::<operations::SessionRootFork, _>(&self.transport, &request).await
     }
 
     pub async fn inject_or_start(
