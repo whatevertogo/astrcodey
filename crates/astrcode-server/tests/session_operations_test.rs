@@ -17,9 +17,9 @@ use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
-        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionAccessPair,
-        SessionDeliveryOutcome, SessionLifecycleState, SessionOperations, SubmitTurnRequest,
-        SubmitTurnResult,
+        CreateRootSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionAccess,
+        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionLifecycleState,
+        SessionOperations, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
@@ -561,60 +561,56 @@ fn build_test_ops_with_llm(
     store: Arc<dyn SessionStore>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Arc<ServerSessionOperations> {
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
+    assemble_test_ops(store, llm_provider.clone(), llm_provider, mock_effective_config())
+}
+
+fn mock_llm_settings(model_id: &str) -> LlmSettings {
+    LlmSettings {
+        provider_kind: "mock".into(),
+        base_url: String::new(),
+        api_key: String::new(),
+        wire_format: ProviderWireFormat::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        model_id: model_id.into(),
+        max_tokens: 1024,
+        context_limit: 1024,
+        connect_timeout_secs: 1,
+        read_timeout_secs: 1,
+        max_retries: 0,
+        retry_base_delay_ms: 0,
+        supports_prompt_cache_key: false,
+        supports_stream_usage: false,
+        supports_strict_tool_use: false,
+        prompt_cache_retention: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
+    }
+}
+
+fn mock_effective_config() -> EffectiveConfig {
+    EffectiveConfig {
+        llm: mock_llm_settings("mock"),
+        small_llm: mock_llm_settings("mock"),
         context: Default::default(),
         agent: Default::default(),
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
-    };
+    }
+}
+
+fn assemble_test_ops(
+    store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LlmProvider>,
+    small_llm: Arc<dyn LlmProvider>,
+    effective: EffectiveConfig,
+) -> Arc<ServerSessionOperations> {
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
-        llm_provider.clone(),
         llm_provider,
+        small_llm,
         effective,
-        extension_runner.clone(),
+        extension_runner,
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
@@ -651,6 +647,9 @@ async fn create_root_session_persists_source_extension_attribution() {
         .create_root_session(CreateRootSessionRequest {
             working_dir: ".".into(),
             source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: None,
+            tool_selection: None,
         })
         .await
         .expect("create attributed root session");
@@ -666,6 +665,222 @@ async fn create_root_session_persists_source_extension_attribution() {
     );
 }
 
+#[tokio::test]
+async fn create_root_session_applies_extension_customization() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let llm = Arc::new(StaticTextLlm {
+        text: "unused",
+    });
+    // 独立的小模型 id 才能证明 model_preference 走的是覆盖路径而非默认值巧合。
+    let mut effective = mock_effective_config();
+    effective.small_llm = mock_llm_settings("mock-small");
+    let ops = assemble_test_ops(Arc::clone(&store), Arc::clone(&llm), llm, effective);
+
+    let created = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+            system_prompt: Some("nightly reviewer mode".into()),
+            model_preference: Some("mock-small".into()),
+            tool_selection: Some(SessionToolSelection::Only {
+                names: vec!["read".into()],
+            }),
+        })
+        .await
+        .expect("create customized root session");
+    let model = store
+        .session_read_model(&SessionId::new(created.session_id))
+        .await
+        .expect("read customized root session");
+
+    assert_eq!(model.identity.model_id, "mock-small");
+    assert_eq!(
+        model.system_prompt.extra.as_deref(),
+        Some("nightly reviewer mode")
+    );
+    assert_eq!(
+        model.identity.tool_selection,
+        SessionToolSelection::Only {
+            names: vec!["read".into()]
+        }
+    );
+
+    // "inherit" 回退 effective 默认模型(与子会话 spawn_child 语义一致)。
+    let inherited = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: Some("inherit".into()),
+            tool_selection: None,
+        })
+        .await
+        .expect("create inherit root session");
+    let inherited_model = store
+        .session_read_model(&SessionId::new(inherited.session_id))
+        .await
+        .expect("read inherit root session");
+    assert_eq!(inherited_model.identity.model_id, "mock");
+    assert_eq!(inherited_model.system_prompt.extra, None);
+}
+
+#[tokio::test]
+async fn create_root_session_rejects_unknown_model_preference() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+
+    let error = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: Some("gpt-9-turbo".into()),
+            tool_selection: None,
+        })
+        .await
+        .expect_err("unknown model must be rejected at the creation boundary");
+    match error {
+        SessionApiError::InvalidInput(message) => {
+            assert!(message.contains("gpt-9-turbo"), "message: {message}");
+            assert!(message.contains("mock"), "message: {message}");
+        },
+        error => panic!("expected InvalidInput, got: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn fork_session_attributes_the_new_root_to_the_requesting_extension() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+    let source = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: None,
+            tool_selection: None,
+        })
+        .await
+        .expect("create source root");
+
+    let forked = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: source.session_id.clone(),
+            at_cursor: None,
+            source_extension: Some("channel-b".into()),
+        })
+        .await
+        .expect("fork owned root");
+    assert_ne!(forked.session_id, source.session_id);
+
+    let source_model = store
+        .session_read_model(&SessionId::new(source.session_id))
+        .await
+        .expect("read source");
+    let fork_model = store
+        .session_read_model(&SessionId::new(forked.session_id))
+        .await
+        .expect("read fork");
+    assert!(fork_model.identity.parent.is_none());
+    assert_eq!(
+        fork_model.identity.source_extension.as_deref(),
+        Some("channel-b")
+    );
+    assert_eq!(fork_model.identity.model_id, source_model.identity.model_id);
+    assert_eq!(
+        fork_model.identity.working_dir,
+        source_model.identity.working_dir
+    );
+    // fork 的意义:继承的 prompt 前缀(text + fingerprint)保证 KV cache 命中。
+    assert_eq!(fork_model.system_prompt.text, source_model.system_prompt.text);
+    assert_eq!(
+        fork_model.system_prompt.fingerprint,
+        source_model.system_prompt.fingerprint
+    );
+}
+
+#[tokio::test]
+async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "truncated reply");
+    let source = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: None,
+            tool_selection: None,
+        })
+        .await
+        .expect("create source root");
+    ops.submit_turn(SubmitTurnRequest::for_session(
+        source.session_id.as_str(),
+        "hello",
+    ))
+    .await
+    .expect("submit source turn");
+    let source_model = store
+        .session_read_model(&SessionId::new(source.session_id.clone()))
+        .await
+        .expect("read source after turn");
+    assert!(
+        !source_model.model_context.messages.is_empty(),
+        "source must carry messages before the truncation assertions"
+    );
+
+    let head = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: source.session_id.clone(),
+            at_cursor: None,
+            source_extension: Some("channel-a".into()),
+        })
+        .await
+        .expect("fork at head");
+    let head_model = store
+        .session_read_model(&SessionId::new(head.session_id))
+        .await
+        .expect("read head fork");
+    assert_eq!(
+        head_model.model_context.messages.len(),
+        source_model.model_context.messages.len()
+    );
+
+    // cursor 指到首个事件之前:transcript 为空但会话仍合法创建。
+    let truncated = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: source.session_id.clone(),
+            at_cursor: Some("0".into()),
+            source_extension: Some("channel-a".into()),
+        })
+        .await
+        .expect("fork at cursor 0");
+    let truncated_model = store
+        .session_read_model(&SessionId::new(truncated.session_id))
+        .await
+        .expect("read truncated fork");
+    assert!(truncated_model.model_context.messages.is_empty());
+
+    let bad_cursor = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: source.session_id.clone(),
+            at_cursor: Some("not-a-seq".into()),
+            source_extension: None,
+        })
+        .await
+        .expect_err("non-decimal cursor must be rejected");
+    assert!(matches!(bad_cursor, SessionApiError::InvalidInput(_)));
+
+    let missing = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: "does-not-exist".into(),
+            at_cursor: None,
+            source_extension: None,
+        })
+        .await
+        .expect_err("missing source must be rejected");
+    assert!(matches!(missing, SessionApiError::NotFound(_)));
+}
+
 /// 开放点固化:`dispose_root` 依赖自指访问对(caller == target)能通过
 /// `verify_access` 的 recycle 校验,server 侧无需额外放宽。
 #[tokio::test]
@@ -676,6 +891,9 @@ async fn recycle_session_accepts_self_referential_access_on_a_root_session() {
         .create_root_session(CreateRootSessionRequest {
             working_dir: ".".into(),
             source_extension: Some("channel-a".into()),
+            system_prompt: None,
+            model_preference: None,
+            tool_selection: None,
         })
         .await
         .expect("create root session");

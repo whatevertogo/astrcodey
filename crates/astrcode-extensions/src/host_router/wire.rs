@@ -56,6 +56,7 @@ impl WireError for SessionApiError {
     fn wire_code(&self) -> WireErrorCode {
         match self {
             Self::NotFound(_) => WireErrorCode::SessionNotFound,
+            Self::InvalidInput(_) => WireErrorCode::InvalidInput,
             Self::PermissionDenied(_) => WireErrorCode::PermissionDenied,
             Self::SessionBusy(_) => WireErrorCode::SessionBusy,
             Self::NoActiveTurn(_) => WireErrorCode::NoActiveTurn,

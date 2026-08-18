@@ -4,11 +4,11 @@ pub use crate::{
     extension::SessionToolSelection,
     wire::session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEvent,
-        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
-        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest, SessionLifecycleStateDto, SessionMessageOriginDto, SessionPhaseDto,
-        SessionToolSelectionDto,
+        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+        HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
+        HostSubmitTurnOutput, HostSubmitTurnRequest, SessionLifecycleStateDto,
+        SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto,
     },
 };
 

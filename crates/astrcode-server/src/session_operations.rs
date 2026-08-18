@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use astrcode_core::{
     tool::{
-        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-        SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionLifecycleState,
-        SessionOperations, SessionReactivation, SessionState, SessionStatus, SessionToolSelection,
-        SubmitTurnRequest, SubmitTurnResult,
+        CreateRootSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionAccess,
+        SessionApiError, SessionDeliveryOutcome, SessionExecutionView, SessionHandle,
+        SessionLifecycleState, SessionOperations, SessionReactivation, SessionState,
+        SessionStatus, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
     types::{SessionId, TurnId},
 };
 
 use crate::{
     child_session::{ChildCleanup, ChildSessionCoordinator},
-    session_manager::SessionManager,
+    session_manager::{SessionManager, SessionManagerError},
     turn_scheduler::{InputDelivery, TurnScheduleError, TurnScheduler},
 };
 
@@ -135,9 +135,43 @@ impl SessionOperations for ServerSessionOperations {
     ) -> Result<SessionHandle, SessionApiError> {
         let session = self
             .session_manager
-            .create_for_extension(&request.working_dir, request.source_extension)
+            .create_for_extension(request)
             .await
-            .map_err(SessionApiError::internal)?;
+            .map_err(|error| match error {
+                SessionManagerError::InvalidRequest(message) => {
+                    SessionApiError::InvalidInput(message)
+                },
+                error => SessionApiError::internal(error),
+            })?;
+
+        Ok(SessionHandle {
+            session_id: session.id().clone().into_string(),
+        })
+    }
+
+    async fn fork_session(
+        &self,
+        request: ForkSessionRequest,
+    ) -> Result<SessionHandle, SessionApiError> {
+        let source_id = SessionId::from(request.source_session_id.as_str());
+        let session = self
+            .session_manager
+            .fork(
+                &source_id,
+                request.at_cursor.as_ref(),
+                request.source_extension.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                SessionManagerError::InvalidCursor(message) => {
+                    SessionApiError::InvalidInput(message)
+                },
+                error if error.is_not_found() => SessionApiError::NotFound(format!(
+                    "session not found: {}",
+                    request.source_session_id
+                )),
+                error => SessionApiError::internal(error),
+            })?;
 
         Ok(SessionHandle {
             session_id: session.id().clone().into_string(),

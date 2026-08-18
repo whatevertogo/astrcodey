@@ -13,9 +13,9 @@ use astrcode_core::{
     session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
-        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
-        SessionLifecycleState, SessionOperations, SessionState, SessionToolSelection,
-        SubmitTurnRequest, SubmitTurnResult,
+        ForkSessionRequest, SessionAccessPair, SessionApiError, SessionDeliveryOutcome,
+        SessionHandle, SessionLifecycleState, SessionOperations, SessionState,
+        SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
     types::SessionId,
 };
@@ -32,11 +32,11 @@ use astrcode_extension_sdk::{
     s5r::ErrorPayload,
     session::{
         HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEvent,
-        HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionReactivateOutput,
-        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest, SessionLifecycleStateDto, SessionMessageOriginDto,
-        SessionToolSelectionDto, tool_selection_to_dto,
+        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+        HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
+        HostSubmitTurnOutput, HostSubmitTurnRequest, SessionLifecycleStateDto,
+        SessionMessageOriginDto, SessionToolSelectionDto, tool_selection_to_dto,
     },
     wire::{
         WireErrorCode,
@@ -109,6 +109,12 @@ impl SessionGroup {
             HostOperation::SessionRootDispose => {
                 Box::pin(dispatch(operation, &input, |request| {
                     self.dispose_root_session(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionRootFork => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.fork_root_session(request, ctx)
                 }))
                 .await
             },
@@ -555,6 +561,44 @@ impl SessionGroup {
         Ok(acknowledgement())
     }
 
+    /// 把一个 session 分叉为归属调用扩展的新顶层会话。
+    ///
+    /// 授权:source 要么是调用扩展拥有的顶层会话(与其余 root 操作同一规则,
+    /// 经 `authorize_owned_root`),要么就是本次调用的上下文会话——正在某个
+    /// turn 内执行的扩展分叉它已在其中的对话。其余一律拒绝。产出的新 root
+    /// 带 `source_extension` 归属,后续 submit/state/dispose 走既有授权。
+    async fn fork_root_session(
+        &self,
+        request: HostForkRootSessionRequest,
+        ctx: &InvokeContext,
+    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
+        let reader = self.session_reader()?;
+        let ops = required_session_ops(ctx)?;
+        let extension_id = required_extension_id(ctx)?.to_owned();
+        let owned_root = authorize_owned_root(&reader, &request.source_session_id, &extension_id)
+            .await
+            .is_ok();
+        let context_session = ctx
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| session_id == request.source_session_id);
+        if !owned_root && !context_session {
+            return Err(ErrorPayload::new(
+                WireErrorCode::PermissionDenied,
+                "fork source must be an owned top-level session or the current session",
+            ));
+        }
+        let handle = ops
+            .fork_session(ForkSessionRequest {
+                source_session_id: request.source_session_id,
+                at_cursor: request.at_cursor,
+                source_extension: Some(extension_id),
+            })
+            .await
+            .map_err(session_api_error)?;
+        Ok(create_session_output(handle))
+    }
+
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
         self.session_reader
             .as_ref()
@@ -734,6 +778,12 @@ async fn create_root_session(
     let request = CoreCreateRootSessionRequest {
         working_dir: working_dir.clone(),
         source_extension: Some(required_extension_id(ctx)?.to_owned()),
+        system_prompt: request.system_prompt,
+        model_preference: request.model_preference,
+        tool_selection: request
+            .tool_selection
+            .map(|selection| map_tool_selection(selection, "tool_selection"))
+            .transpose()?,
     };
     let handle = ops
         .create_root_session(request)
