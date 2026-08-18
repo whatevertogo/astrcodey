@@ -147,6 +147,43 @@ jobs:
         run: node frontend/scripts/prepare-sidecar.mjs
       - run: cargo check --workspace --all-targets --all-features
 
+  # ── Python SDK ────────────────────────────────────────────────────
+
+  python-sdk:
+    name: Python SDK (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run Python SDK tests
+        working-directory: sdks/python
+        run: PYTHONPATH=src python3 -m unittest discover -s tests
+
+  python-conformance:
+    name: Python worker conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: Swatinem/rust-cache@v2
+      - name: Run S5R 3.0 conformance against the Python worker
+        run: >-
+          PYTHONPATH=sdks/python/src
+          cargo run -p astrcode-extension-sdk --features conformance --bin s5r-conformance --
+          --extension-id s5r-echo-example --
+          python3 sdks/python/examples/echo_extension.py
+
   # ── Frontend ──────────────────────────────────────────────────────
 
   frontend-lint:

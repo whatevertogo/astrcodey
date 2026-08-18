@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 from harness import FakeHostBase
 from memory import MemoryTransport
@@ -25,6 +26,8 @@ from s5r import (
     parse_tool_arguments,
     tool_text,
 )
+from s5r import worker as worker_module
+from s5r.context import CancelToken
 from s5r.protocol import (
     CAP_HANDLER_INVOKE,
     CAP_RUNTIME_PING,
@@ -34,10 +37,16 @@ from s5r.protocol import (
     CONFORMANCE_UNKNOWN_ERROR,
     CONFORMANCE_UNARY,
     CONFORMANCE_WAIT_FOR_CANCEL,
+    FEATURE_MODEL_STREAM_V1,
+    StreamMsg,
+    decode_message,
+    encode_message,
 )
 from s5r.results import FileOperation, HostResource
 from s5r.worker import (
+    _MAX_IN_FLIGHT_REQUESTS,
     _STREAM_BUFFER_CAPACITY,
+    _STREAM_FORWARD_BUFFER_CAPACITY,
     _WRITE_QUEUE_CAPACITY,
     _Driver,
     _StreamPending,
@@ -960,6 +969,215 @@ class DriverBackpressureTest(unittest.IsolatedAsyncioTestCase):
         await writer
 
         await asyncio.wait_for(driver._shutdown(writer), timeout=0.1)
+
+
+def make_driver(features=()) -> _Driver:
+    transport, _ = MemoryTransport.pair()
+    return _Driver(transport, Worker(EXT_ID, "0.1.0"), set(features), [])
+
+
+class OutboundWriteFailureTest(unittest.IsolatedAsyncioTestCase):
+    def fill_write_queue(self, driver: _Driver) -> None:
+        for index in range(_WRITE_QUEUE_CAPACITY):
+            driver._write_queue.put_nowait({"index": index})
+
+    async def test_write_is_fail_fast_when_the_queue_is_full(self) -> None:
+        driver = make_driver()
+        self.fill_write_queue(driver)
+        with self.assertRaises(ProtocolError):
+            await driver._write({"type": "noop"})
+
+    async def test_invoke_write_failure_releases_the_pending_entry(self) -> None:
+        driver = make_driver()
+        self.fill_write_queue(driver)
+        with self.assertRaises(ProtocolError):
+            await driver.invoke("astrcode.session.state.read", {})
+        self.assertEqual(driver._pending, {})
+
+    async def test_invoke_stream_write_failure_releases_the_pending_entry(self) -> None:
+        driver = make_driver(features={FEATURE_MODEL_STREAM_V1})
+        self.fill_write_queue(driver)
+        with self.assertRaises(ProtocolError):
+            driver.invoke_stream("astrcode.llm.main_chat", {})
+        self.assertEqual(driver._pending, {})
+
+
+class InboundAdmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_overloaded_inbound_invoke_is_rejected_not_queued(self) -> None:
+        transport, host = MemoryTransport.pair()
+        driver = _Driver(transport, Worker(EXT_ID, "0.1.0"), set(), [])
+        driver_task = asyncio.create_task(driver.run())
+        for index in range(_MAX_IN_FLIGHT_REQUESTS):
+            await host.write_frame(
+                encode_message(
+                    {
+                        "type": "invoke",
+                        "id": f"in-{index}",
+                        "operation": CONFORMANCE_WAIT_FOR_CANCEL,
+                        "input": None,
+                    }
+                )
+            )
+        await host.write_frame(
+            encode_message(
+                {
+                    "type": "invoke",
+                    "id": "overflow",
+                    "operation": CAP_RUNTIME_PING,
+                    "input": None,
+                }
+            )
+        )
+        result = decode_message(await asyncio.wait_for(host.read_frame(), timeout=5))
+        self.assertEqual(result.id, "overflow")
+        self.assertFalse(result.is_success)
+        self.assertEqual(result.error.code, WireErrorCode.PEER_OVERLOADED)
+        self.assertEqual(
+            result.error.message, "peer has reached its in-flight request limit"
+        )
+        host.close_write()
+        await asyncio.wait_for(driver_task, timeout=5)
+
+
+class ProducerStreamEventsTest(unittest.IsolatedAsyncioTestCase):
+    async def write_events(self, payload) -> list[dict]:
+        driver = make_driver()
+        await driver._write_stream_events("r-1", CancelToken(), payload)
+        events = []
+        while not driver._write_queue.empty():
+            events.append(driver._write_queue.get_nowait()["event"])
+        return events
+
+    async def test_event_before_started_is_replaced_by_a_terminal_failure(self) -> None:
+        events = await self.write_events([{"type": "content_delta", "content": "x"}])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "failed")
+        self.assertEqual(events[0]["error"]["code"], WireErrorCode.INVALID_RESPONSE)
+        self.assertEqual(
+            events[0]["error"]["message"], "stream event arrived before started"
+        )
+
+    async def test_second_started_is_replaced_by_a_terminal_failure(self) -> None:
+        events = await self.write_events([{"type": "started"}, {"type": "started"}])
+        self.assertEqual([event["type"] for event in events], ["started", "failed"])
+        self.assertEqual(events[1]["error"]["code"], WireErrorCode.INVALID_RESPONSE)
+        self.assertEqual(
+            events[1]["error"]["message"], "stream started more than once"
+        )
+
+    async def test_producer_close_without_terminal_synthesizes_stream_closed(self) -> None:
+        events = await self.write_events(
+            [{"type": "started"}, {"type": "content_delta", "content": "x"}]
+        )
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["started", "content_delta", "failed"],
+        )
+        self.assertEqual(events[-1]["error"]["code"], WireErrorCode.STREAM_CLOSED)
+
+    async def test_valid_stream_passes_through_unchanged(self) -> None:
+        payload = [
+            {"type": "started"},
+            {"type": "content_delta", "content": "x"},
+            {"type": "completed", "output": {"ok": True}},
+        ]
+        self.assertEqual(await self.write_events(payload), payload)
+
+    async def test_idle_producer_fails_with_stream_idle_timeout(self) -> None:
+        async def slow_events():
+            await asyncio.sleep(5)
+            yield {"type": "started"}
+
+        with mock.patch.object(worker_module, "_STREAM_IDLE_TIMEOUT", 0.05):
+            events = await self.write_events(slow_events())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "failed")
+        self.assertEqual(events[0]["error"]["code"], WireErrorCode.STREAM_IDLE_TIMEOUT)
+
+
+class StreamForwardingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_forward_task_delivers_events_until_the_terminal(self) -> None:
+        driver = make_driver()
+        pending = _StreamPending()
+        driver._pending["s-1"] = pending
+        task = asyncio.create_task(driver._forward_stream("s-1", pending))
+        pending.forward.put_nowait({"type": "started"})
+        pending.forward.put_nowait({"type": "completed", "output": {}})
+        await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(
+            [pending.queue.get_nowait() for _ in range(2)],
+            [{"type": "started"}, {"type": "completed", "output": {}}],
+        )
+
+    async def test_stalled_consumer_fails_with_backpressure_timeout(self) -> None:
+        driver = make_driver()
+        pending = _StreamPending()
+        driver._pending["s-1"] = pending
+        for index in range(_STREAM_BUFFER_CAPACITY):
+            pending.queue.put_nowait({"type": "content_delta", "content": str(index)})
+        pending.forward.put_nowait({"type": "content_delta", "content": "overflow"})
+        with mock.patch.object(worker_module, "_STREAM_BACKPRESSURE_TIMEOUT", 0.05):
+            task = asyncio.create_task(driver._forward_stream("s-1", pending))
+            await asyncio.wait_for(task, timeout=5)
+        self.assertNotIn("s-1", driver._pending)
+        items = [pending.queue.get_nowait() for _ in range(_STREAM_BUFFER_CAPACITY)]
+        self.assertIsInstance(items[-1], S5rError)
+        self.assertEqual(items[-1].code, WireErrorCode.BACKPRESSURE_TIMEOUT)
+        cancel = driver._write_queue.get_nowait()
+        self.assertEqual(
+            cancel, {"type": "cancel", "id": "s-1", "reason": "backpressure_timeout"}
+        )
+
+    async def test_full_forward_buffer_fails_with_peer_overloaded(self) -> None:
+        driver = make_driver()
+        pending = _StreamPending()
+        driver._pending["s-1"] = pending
+        pending.started = True
+        for index in range(_STREAM_FORWARD_BUFFER_CAPACITY):
+            pending.forward.put_nowait({"type": "content_delta", "content": str(index)})
+        driver._route_stream(
+            StreamMsg(id="s-1", event={"type": "content_delta", "content": "x"})
+        )
+        self.assertNotIn("s-1", driver._pending)
+        item = pending.queue.get_nowait()
+        self.assertIsInstance(item, S5rError)
+        self.assertEqual(item.code, WireErrorCode.PEER_OVERLOADED)
+        cancel = driver._write_queue.get_nowait()
+        self.assertEqual(cancel["reason"], "stream_forward_queue_full")
+
+
+class HookPriorityTest(unittest.TestCase):
+    def test_priority_reaches_the_emitted_manifest(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def handler(event, ctx):
+            return HandlerResult.ok()
+
+        worker.on_pre_tool_use(handler, priority=5)
+        worker.on_pre_compact(handler, priority=7)
+        worker.on_continue_after_stop(-1, handler, priority=1)
+        worker.hook("turn_end", "non_blocking", priority=3)(handler)
+        worker.on_post_compact(handler)
+
+        hooks = worker._manifest_json()["hooks"]
+        self.assertEqual([hook.get("priority") for hook in hooks], [5, 7, 1, 3, None])
+        self.assertNotIn("priority", hooks[4])
+        self.assertEqual(hooks[2]["options"], {"max_per_turn": -1})
+
+    def test_negative_priority_rejected(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def handler(event, ctx):
+            return HandlerResult.ok()
+
+        for register in (
+            lambda: worker.on_pre_tool_use(handler, priority=-1),
+            lambda: worker.hook("turn_end", "non_blocking", handler, priority=-2),
+        ):
+            with self.assertRaises(S5rError) as caught:
+                register()
+            self.assertEqual(caught.exception.code, WireErrorCode.INVALID_HOOK_REGISTRATION)
+
 
 if __name__ == "__main__":
     unittest.main()

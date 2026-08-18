@@ -189,6 +189,43 @@ impl Worker {
         Ok(self)
     }
 
+    /// [`Self::hook`] 的 priority 变体：宿主按降序调度，同优先级保持注册顺序。
+    pub fn hook_with_priority(
+        &mut self,
+        on: LifecycleEvent,
+        mode: HookMode,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_hook_with_priority(on, mode, priority, handler)?;
+        Ok(self)
+    }
+
+    /// 固定模式 lifecycle hook 的 priority 变体；非固定模式事件返回错误。
+    pub fn fixed_hook_with_priority(
+        &mut self,
+        on: LifecycleEvent,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook_with_priority(on, priority, handler)?;
+        Ok(self)
+    }
+
+    /// compact hook 的 priority 变体。
+    pub fn compact_hook_with_priority(
+        &mut self,
+        on: CompactEvent,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_compact_hook_with_priority(on, priority, handler)?;
+        Ok(self)
+    }
+
     /// 注册 tool input transform。该 hook 固定为 blocking。
     pub fn on_tool_input_transform(
         &mut self,
@@ -277,6 +314,18 @@ impl Worker {
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry
             .register_continue_after_stop_hook(options, handler)?;
+        Ok(self)
+    }
+
+    /// [`Self::on_continue_after_stop`] 的 priority 变体。
+    pub fn on_continue_after_stop_with_priority(
+        &mut self,
+        options: ContinueAfterStopOptions,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_continue_after_stop_hook_with_priority(options, priority, handler)?;
         Ok(self)
     }
 

@@ -94,6 +94,7 @@ impl Extension for CodingExtension {
             .description(env!("CARGO_PKG_DESCRIPTION"))
             .capability(ExtensionCapability::WorkspaceRead)
             .capability(ExtensionCapability::WorkspaceWrite)
+            .capability(ExtensionCapability::WorkspaceSensitivePaths)
             .capability(ExtensionCapability::ToolResultRead)
             .capability(ExtensionCapability::ProcessSpawn)
             .capability(ExtensionCapability::SessionHistory)
@@ -138,6 +139,7 @@ mod tests {
             [
                 ExtensionCapability::WorkspaceRead,
                 ExtensionCapability::WorkspaceWrite,
+                ExtensionCapability::WorkspaceSensitivePaths,
                 ExtensionCapability::ToolResultRead,
                 ExtensionCapability::ProcessSpawn,
                 ExtensionCapability::SessionHistory,

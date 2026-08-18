@@ -1455,6 +1455,7 @@ mod tests {
             working_dir: Some(root),
             declared_capabilities: vec![
                 ExtensionCapability::WorkspaceRead,
+                ExtensionCapability::WorkspaceSensitivePaths,
                 ExtensionCapability::ProcessSpawn,
             ],
             resource_lease: Some(lease),
@@ -1469,6 +1470,10 @@ mod tests {
 
         let untrusted = InvokeContext {
             extension_id: "third-party".into(),
+            declared_capabilities: vec![
+                ExtensionCapability::WorkspaceRead,
+                ExtensionCapability::ProcessSpawn,
+            ],
             ..ctx.clone()
         };
         let error = router
@@ -1478,7 +1483,7 @@ mod tests {
                 &untrusted,
             )
             .await
-            .expect_err("non-coding extensions cannot bypass sensitive path protection");
+            .expect_err("missing workspace_sensitive_paths capability must not bypass protection");
         assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
 
         for (operation, input) in [
