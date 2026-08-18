@@ -138,6 +138,20 @@ def _ensure_ack(operation: str, output: Any) -> None:
         )
 
 
+async def _dispose_root(
+    invoke: Callable[[str, Any], Awaitable[Any]], target_session_id: str
+) -> None:
+    """Dispose a root session over the given invoke channel (mirrors `invoke_ack`).
+
+    The host must answer `{"ok": true}`.
+    """
+    output = await invoke(
+        HostOperation.SESSION_ROOT_DISPOSE,
+        {"target_session_id": target_session_id},
+    )
+    _ensure_ack(HostOperation.SESSION_ROOT_DISPOSE, output)
+
+
 async def _collect(stream: AsyncIterator[dict[str, Any]]) -> Any:
     output = None
     async for event in stream:
@@ -194,11 +208,7 @@ class SessionControlClient:
 
     async def dispose_root(self, target_session_id: str) -> None:
         """Dispose a root session; the host must answer `{"ok": true}`."""
-        output = await _call(
-            HostOperation.SESSION_ROOT_DISPOSE,
-            {"target_session_id": target_session_id},
-        )
-        _ensure_ack(HostOperation.SESSION_ROOT_DISPOSE, output)
+        await _dispose_root(_call, target_session_id)
 
     async def inject_or_start(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.SESSION_CONTROL_INJECT_OR_START, request)
@@ -400,11 +410,7 @@ class BackgroundRootSessionClient:
         return await self._invoke(HostOperation.SESSION_ROOT_STATE, dict(request))
 
     async def dispose_root(self, target_session_id: str) -> None:
-        output = await self._invoke(
-            HostOperation.SESSION_ROOT_DISPOSE,
-            {"target_session_id": target_session_id},
-        )
-        _ensure_ack(HostOperation.SESSION_ROOT_DISPOSE, output)
+        await _dispose_root(self._invoke, target_session_id)
 
 
 _EVENTS = EventClient()
