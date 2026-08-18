@@ -36,7 +36,7 @@ use astrcode_extension_sdk::{
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::HookSubscription,
+    extension_manifest::{HookSubscriptionKind, ToolHookEvent},
     host_router::{HostRouter, InvokeContext},
     s5r_ext::v3_session::S5rV3Session as S5rSession,
     s5r_handler::{
@@ -171,11 +171,11 @@ impl Extension for S5rExtension {
         }
         for subscription in &registration.subscriptions {
             let event_name = subscription.event_name();
-            let priority = subscription.priority();
+            let priority = subscription.priority;
             let session = Arc::clone(&self.session);
             let ext_id = registration.extension_id.clone();
-            match subscription {
-                HookSubscription::Compact { event, .. } => match event {
+            match &subscription.kind {
+                HookSubscriptionKind::Compact { event } => match event {
                     astrcode_extension_sdk::extension::CompactEvent::PreCompact => {
                         reg.on_pre_compact(
                             priority,
@@ -197,14 +197,14 @@ impl Extension for S5rExtension {
                         );
                     },
                 },
-                HookSubscription::Lifecycle {
+                HookSubscriptionKind::ToolUse {
                     event,
                     mode,
-                    options,
-                    ..
+                    target,
                 } => match event {
-                    LifecycleEvent::ToolInputTransform => {
-                        reg.on_tool_input_transform(
+                    ToolHookEvent::ToolInputTransform => {
+                        reg.on_tool_input_transform_for(
+                            target.clone(),
                             priority,
                             Arc::new(S5rToolInputTransformHandler {
                                 session,
@@ -213,8 +213,9 @@ impl Extension for S5rExtension {
                             }),
                         );
                     },
-                    LifecycleEvent::PreToolUse => {
-                        reg.on_pre_tool_use(
+                    ToolHookEvent::PreToolUse => {
+                        reg.on_pre_tool_use_for(
+                            target.clone(),
                             priority,
                             Arc::new(S5rPreToolUseHandler {
                                 session,
@@ -223,8 +224,9 @@ impl Extension for S5rExtension {
                             }),
                         );
                     },
-                    LifecycleEvent::PostToolUse => {
-                        reg.on_post_tool_use(
+                    ToolHookEvent::PostToolUse => {
+                        reg.on_post_tool_use_for(
+                            target.clone(),
                             *mode,
                             priority,
                             Arc::new(S5rPostToolUseHandler {
@@ -234,6 +236,19 @@ impl Extension for S5rExtension {
                             }),
                         );
                     },
+                },
+                HookSubscriptionKind::ContinueAfterStop { options } => {
+                    reg.on_continue_after_stop(
+                        priority,
+                        *options,
+                        Arc::new(S5rContinueAfterStopHandler {
+                            session,
+                            ext_id,
+                            on: event_name.into(),
+                        }),
+                    );
+                },
+                HookSubscriptionKind::Lifecycle { event, mode } => match event {
                     LifecycleEvent::BeforeProviderRequest => {
                         reg.on_before_provider_request(
                             *mode,
@@ -259,17 +274,6 @@ impl Extension for S5rExtension {
                         reg.on_after_provider_response(
                             priority,
                             Arc::new(S5rProviderHandler {
-                                session,
-                                ext_id,
-                                on: event_name.into(),
-                            }),
-                        );
-                    },
-                    LifecycleEvent::ContinueAfterStop => {
-                        reg.on_continue_after_stop(
-                            priority,
-                            *options,
-                            Arc::new(S5rContinueAfterStopHandler {
                                 session,
                                 ext_id,
                                 on: event_name.into(),

@@ -44,6 +44,7 @@ from .manifest import (
     SlashCommand,
     ToolDefinition,
     ToolMode,
+    TOOL_TARGET_HOOK_EVENTS,
     extension_http_route_patterns_conflict,
     hook_mode_is_supported,
     validate_extension_http_route,
@@ -243,14 +244,17 @@ class Worker:
         handler: HookHandlerFn | None = None,
         *,
         priority: int | None = None,
+        tools: list[str] | None = None,
     ) -> HookHandlerFn | Callable[[HookHandlerFn], HookHandlerFn]:
         """Register a mode-flexible lifecycle hook; fixed-mode events reject this.
 
         `priority` orders hooks across extensions (descending, registration
-        order on ties); omit it to keep the default of 0.
+        order on ties); omit it to keep the default of 0. `tools` narrows a
+        tool hook to exact tool names and is only valid for
+        tool_input_transform / pre_tool_use / post_tool_use.
         """
         if handler is None:
-            return lambda fn: self.hook(on, mode, fn, priority=priority)  # type: ignore[return-value]
+            return lambda fn: self.hook(on, mode, fn, priority=priority, tools=tools)  # type: ignore[return-value]
         if on not in ALL_LIFECYCLE_EVENTS:
             raise S5rError.of(WireErrorCode.UNSUPPORTED_HOOK, f"unknown lifecycle event {on!r}")
         if on == LifecycleEvent.USER_MESSAGE_ENVELOPE:
@@ -273,20 +277,32 @@ class Worker:
             raise S5rError.of(
                 WireErrorCode.INVALID_HOOK_MODE, f"{on} does not support {mode} mode"
             )
-        declaration = _hook_declaration(on, mode, priority)
+        declaration = _hook_declaration(on, mode, priority, tools)
         self._insert_hook(on, handler)
         self._hook_manifest.append(declaration)
         return handler
 
     def on_tool_input_transform(
-        self, handler: HookHandlerFn, *, priority: int | None = None
+        self,
+        handler: HookHandlerFn,
+        *,
+        priority: int | None = None,
+        tools: list[str] | None = None,
     ) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.TOOL_INPUT_TRANSFORM, handler, priority=priority)
+        return self._fixed_hook(
+            LifecycleEvent.TOOL_INPUT_TRANSFORM, handler, priority=priority, tools=tools
+        )
 
     def on_pre_tool_use(
-        self, handler: HookHandlerFn, *, priority: int | None = None
+        self,
+        handler: HookHandlerFn,
+        *,
+        priority: int | None = None,
+        tools: list[str] | None = None,
     ) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.PRE_TOOL_USE, handler, priority=priority)
+        return self._fixed_hook(
+            LifecycleEvent.PRE_TOOL_USE, handler, priority=priority, tools=tools
+        )
 
     def on_after_provider_response(
         self, handler: HookHandlerFn, *, priority: int | None = None
@@ -429,9 +445,14 @@ class Worker:
         return handler
 
     def _fixed_hook(
-        self, event: str, handler: HookHandlerFn, *, priority: int | None = None
+        self,
+        event: str,
+        handler: HookHandlerFn,
+        *,
+        priority: int | None = None,
+        tools: list[str] | None = None,
     ) -> HookHandlerFn:
-        return self._register_hook(event, FIXED_HOOK_MODES[event], handler, priority)
+        return self._register_hook(event, FIXED_HOOK_MODES[event], handler, priority, tools)
 
     def _compact_hook(
         self, event: str, handler: HookHandlerFn, *, priority: int | None = None
@@ -439,9 +460,14 @@ class Worker:
         return self._register_hook(event, HookMode.BLOCKING, handler, priority)
 
     def _register_hook(
-        self, event: str, mode: str, handler: HookHandlerFn, priority: int | None = None
+        self,
+        event: str,
+        mode: str,
+        handler: HookHandlerFn,
+        priority: int | None = None,
+        tools: list[str] | None = None,
     ) -> HookHandlerFn:
-        declaration = _hook_declaration(event, mode, priority)
+        declaration = _hook_declaration(event, mode, priority, tools)
         self._insert_hook(event, handler)
         self._hook_manifest.append(declaration)
         return handler
@@ -1058,15 +1084,35 @@ def _validate_custom_event_subscription(subscription: CustomEventSubscription) -
     return None
 
 
-def _hook_declaration(event: str, mode: str, priority: int | None) -> dict[str, Any]:
+def _hook_declaration(
+    event: str, mode: str, priority: int | None, tools: list[str] | None = None
+) -> dict[str, Any]:
     if priority is not None and priority < 0:
         raise S5rError.of(
             WireErrorCode.INVALID_HOOK_REGISTRATION,
             "hook priority must be non-negative",
         )
+    if tools is not None:
+        if event not in TOOL_TARGET_HOOK_EVENTS:
+            raise S5rError.of(
+                WireErrorCode.INVALID_HOOK_REGISTRATION,
+                f"{event} does not accept a tool target",
+            )
+        if not tools:
+            raise S5rError.of(
+                WireErrorCode.INVALID_HOOK_REGISTRATION,
+                "hook tools target must not be empty when present",
+            )
+        if any(not name for name in tools):
+            raise S5rError.of(
+                WireErrorCode.INVALID_HOOK_REGISTRATION,
+                "hook tools target entries must be non-empty tool names",
+            )
     declaration: dict[str, Any] = {"on": event, "mode": mode}
     if priority is not None:
         declaration["priority"] = priority
+    if tools is not None:
+        declaration["tools"] = sorted(set(tools))
     return declaration
 
 

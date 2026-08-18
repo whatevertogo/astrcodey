@@ -88,6 +88,51 @@ type ActivationHandler = Box<
 type ShutdownHandler =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), ErrorPayload>> + Send>> + Send>;
 
+/// 一次 hook 注册的句柄：注册完成后可链式修饰可选属性。
+///
+/// 不调用任何修饰方法即为缺省行为（priority 0、匹配全部工具）。实现
+/// `Deref/DerefMut<Target = Worker>`,现有的注册链式写法不受影响。
+pub struct HookRegistration<'a> {
+    worker: &'a mut Worker,
+    hook_index: usize,
+}
+
+impl HookRegistration<'_> {
+    /// 设置调度优先级（非负）：宿主按降序调度，同优先级保持注册顺序；0 即缺省。
+    pub fn priority(self, priority: i32) -> Result<Self, ErrorPayload> {
+        self.worker
+            .registry
+            .set_hook_priority(self.hook_index, priority)?;
+        Ok(self)
+    }
+
+    /// 把 hook 限定到精确工具名集合；仅 tool_input_transform / pre_tool_use /
+    /// post_tool_use 可声明，缺省匹配全部工具。
+    pub fn tools(
+        self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, ErrorPayload> {
+        self.worker
+            .registry
+            .set_hook_tool_target(self.hook_index, names.into_iter().map(Into::into).collect())?;
+        Ok(self)
+    }
+}
+
+impl std::ops::Deref for HookRegistration<'_> {
+    type Target = Worker;
+
+    fn deref(&self) -> &Self::Target {
+        self.worker
+    }
+}
+
+impl std::ops::DerefMut for HookRegistration<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.worker
+    }
+}
+
 impl Worker {
     pub fn new(extension_id: impl Into<String>, version: impl Into<String>) -> Self {
         let extension_id = extension_id.into();
@@ -184,73 +229,49 @@ impl Worker {
         on: LifecycleEvent,
         mode: HookMode,
         handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry.register_hook(on, mode, handler)?;
-        Ok(self)
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self.registry.register_hook(on, mode, handler)?;
+        Ok(self.hook_registration(index))
     }
 
-    /// [`Self::hook`] 的 priority 变体：宿主按降序调度，同优先级保持注册顺序。
-    pub fn hook_with_priority(
-        &mut self,
-        on: LifecycleEvent,
-        mode: HookMode,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
-            .register_hook_with_priority(on, mode, priority, handler)?;
-        Ok(self)
-    }
-
-    /// 固定模式 lifecycle hook 的 priority 变体；非固定模式事件返回错误。
-    pub fn fixed_hook_with_priority(
-        &mut self,
-        on: LifecycleEvent,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
-            .register_fixed_hook_with_priority(on, priority, handler)?;
-        Ok(self)
-    }
-
-    /// compact hook 的 priority 变体。
-    pub fn compact_hook_with_priority(
-        &mut self,
-        on: CompactEvent,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
-            .register_compact_hook_with_priority(on, priority, handler)?;
-        Ok(self)
+    fn hook_registration(&mut self, hook_index: usize) -> HookRegistration<'_> {
+        HookRegistration {
+            worker: self,
+            hook_index,
+        }
     }
 
     /// 注册 tool input transform。该 hook 固定为 blocking。
     pub fn on_tool_input_transform(
         &mut self,
         handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_fixed_hook(LifecycleEvent::ToolInputTransform, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册 PreToolUse 准入 hook。该 hook 固定为 blocking。
-    pub fn on_pre_tool_use(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    pub fn on_pre_tool_use(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_fixed_hook(LifecycleEvent::PreToolUse, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册 provider response observer。该 hook 固定为 advisory。
     pub fn on_after_provider_response(
         &mut self,
         handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_fixed_hook(LifecycleEvent::AfterProviderResponse, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// Register a stateful provider contribution prepare/acknowledge handler.
@@ -260,34 +281,47 @@ impl Worker {
     pub fn on_provider_contribution(
         &mut self,
         handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_fixed_hook(LifecycleEvent::ProviderContribution, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册同步收集 prompt contributions 的 hook。
-    pub fn on_prompt_build(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    pub fn on_prompt_build(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_fixed_hook(LifecycleEvent::PromptBuild, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册 pre-compact 决策与 contributions hook。
-    pub fn on_pre_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    pub fn on_pre_compact(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_compact_hook(CompactEvent::PreCompact, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册 durable rewrite 成功后的 post-compact 通知 hook。
     ///
     /// Handler 必须返回 [`HandlerResult::ok`](crate::s5r::HandlerResult::ok)；宿主拒绝任何
     /// contribution 或附带数据的结果。
-    pub fn on_post_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    pub fn on_post_compact(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_compact_hook(CompactEvent::PostCompact, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册仅由 [`CallContinuation::Hook`](crate::s5r::CallContinuation::Hook) 调用的 handler。
@@ -311,22 +345,11 @@ impl Worker {
         &mut self,
         options: ContinueAfterStopOptions,
         handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
+    ) -> Result<HookRegistration<'_>, ErrorPayload> {
+        let index = self
+            .registry
             .register_continue_after_stop_hook(options, handler)?;
-        Ok(self)
-    }
-
-    /// [`Self::on_continue_after_stop`] 的 priority 变体。
-    pub fn on_continue_after_stop_with_priority(
-        &mut self,
-        options: ContinueAfterStopOptions,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<&mut Self, ErrorPayload> {
-        self.registry
-            .register_continue_after_stop_hook_with_priority(options, priority, handler)?;
-        Ok(self)
+        Ok(self.hook_registration(index))
     }
 
     /// 注册 slash command。
@@ -588,5 +611,50 @@ mod tests {
         .await;
         assert_eq!(result.unwrap_err().message, "driver failed");
         assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn hook_registration_guard_modifies_and_preserves_chaining() {
+        use astrcode_extension_sdk::wire::manifest::ManifestHook;
+
+        let mut worker = Worker::new("test-extension", "0.1.0");
+        let handler =
+            || hook_handler(|_| async { Ok(HandlerResult::effect(HandlerEffect::Ok, json!({}))) });
+
+        worker
+            .on_pre_tool_use(handler())
+            .unwrap()
+            .priority(5)
+            .unwrap()
+            .tools(["shell", "write"])
+            .unwrap();
+        worker
+            .on_pre_compact(handler())
+            .unwrap()
+            .priority(3)
+            .unwrap();
+        // guard 实现 DerefMut,注册后可以继续声明其他内容。
+        worker
+            .hook(LifecycleEvent::TurnEnd, HookMode::NonBlocking, handler())
+            .unwrap()
+            .capability(ExtensionCapability::WorkspaceRead);
+
+        let manifest = worker.registry.manifest();
+        assert_eq!(manifest.hooks[0].priority(), Some(5));
+        assert!(
+            matches!(&manifest.hooks[0], ManifestHook::PreToolUse(payload) if payload.tools == Some(vec!["shell".to_owned(), "write".to_owned()]))
+        );
+        assert_eq!(manifest.hooks[1].priority(), Some(3));
+
+        let error = worker
+            .on_prompt_build(handler())
+            .unwrap()
+            .tools(["shell"])
+            .err()
+            .expect("prompt_build must reject a tool target");
+        assert_eq!(
+            error.code_enum(),
+            Some(crate::WireErrorCode::InvalidHookRegistration)
+        );
     }
 }

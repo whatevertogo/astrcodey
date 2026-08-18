@@ -7,6 +7,7 @@ use astrcode_extension_sdk::{
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRoute, HookMode, LifecycleEvent, SlashCommand,
+        ToolHookTarget,
         internal::{fixed_hook_mode, hook_mode_is_supported},
     },
     s5r::HandlerId,
@@ -15,7 +16,7 @@ use astrcode_extension_sdk::{
         FeatureName,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent,
-            ManifestHttpRoute, ManifestTool, ManifestToolMode,
+            ManifestHttpRoute, ManifestTool, ManifestToolMode, ToolHookManifest,
         },
         protocol::PeerInfo,
     },
@@ -38,30 +39,58 @@ pub(crate) struct ExtensionRegistration {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum HookSubscription {
+pub(crate) struct HookSubscription {
+    pub(crate) priority: i32,
+    pub(crate) kind: HookSubscriptionKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum HookSubscriptionKind {
+    ToolUse {
+        event: ToolHookEvent,
+        mode: HookMode,
+        target: ToolHookTarget,
+    },
+    ContinueAfterStop {
+        options: ContinueAfterStopOptions,
+    },
     Lifecycle {
         event: LifecycleEvent,
         mode: HookMode,
-        priority: i32,
-        options: ContinueAfterStopOptions,
     },
     Compact {
         event: CompactEvent,
-        priority: i32,
     },
+}
+
+/// tool hook 家族的事件子集:线缆上是 lifecycle 事件名,归一化后收窄,
+/// 因此 target 过滤对非 tool hook 在类型上不可表达。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolHookEvent {
+    ToolInputTransform,
+    PreToolUse,
+    PostToolUse,
+}
+
+impl ToolHookEvent {
+    pub(crate) fn lifecycle_event(&self) -> LifecycleEvent {
+        match self {
+            Self::ToolInputTransform => LifecycleEvent::ToolInputTransform,
+            Self::PreToolUse => LifecycleEvent::PreToolUse,
+            Self::PostToolUse => LifecycleEvent::PostToolUse,
+        }
+    }
 }
 
 impl HookSubscription {
     pub(crate) fn event_name(&self) -> &'static str {
-        match self {
-            Self::Lifecycle { event, .. } => event.as_str(),
-            Self::Compact { event, .. } => event.as_str(),
-        }
-    }
-
-    pub(crate) fn priority(&self) -> i32 {
-        match self {
-            Self::Lifecycle { priority, .. } | Self::Compact { priority, .. } => *priority,
+        match &self.kind {
+            HookSubscriptionKind::ToolUse { event, .. } => event.lifecycle_event().as_str(),
+            HookSubscriptionKind::ContinueAfterStop { .. } => {
+                LifecycleEvent::ContinueAfterStop.as_str()
+            },
+            HookSubscriptionKind::Lifecycle { event, .. } => event.as_str(),
+            HookSubscriptionKind::Compact { event, .. } => event.as_str(),
         }
     }
 }
@@ -242,41 +271,112 @@ fn normalize_command(command: ManifestCommand) -> SlashCommand {
 }
 
 fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
-    let event_name = hook.on.as_str();
-    let priority = hook.priority.unwrap_or(0);
+    let event_name = hook.event_name();
+    let mode = hook.mode();
+    let priority = hook.priority().unwrap_or(0);
     if priority < 0 {
         return Err(format!("{event_name} priority must be non-negative"));
     }
-    if let ManifestHookEvent::Compact(event) = hook.on {
-        if hook.mode != HookMode::Blocking {
-            return Err(format!("{event_name} requires blocking mode"));
-        }
-        return Ok(HookSubscription::Compact { event, priority });
-    }
-
-    let ManifestHookEvent::Lifecycle(event) = hook.on else {
-        unreachable!("compact hooks return above")
+    let kind = match hook {
+        ManifestHook::PreCompact(_) => {
+            require_blocking(event_name, mode)?;
+            HookSubscriptionKind::Compact {
+                event: CompactEvent::PreCompact,
+            }
+        },
+        ManifestHook::PostCompact(_) => {
+            require_blocking(event_name, mode)?;
+            HookSubscriptionKind::Compact {
+                event: CompactEvent::PostCompact,
+            }
+        },
+        ManifestHook::ContinueAfterStop(payload) => {
+            require_blocking(event_name, mode)?;
+            HookSubscriptionKind::ContinueAfterStop {
+                options: ContinueAfterStopOptions {
+                    max_per_turn: payload
+                        .options
+                        .max_per_turn
+                        .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
+                },
+            }
+        },
+        ManifestHook::ToolInputTransform(payload) => {
+            normalize_tool_hook(ToolHookEvent::ToolInputTransform, event_name, mode, payload)?
+        },
+        ManifestHook::PreToolUse(payload) => {
+            normalize_tool_hook(ToolHookEvent::PreToolUse, event_name, mode, payload)?
+        },
+        ManifestHook::PostToolUse(payload) => {
+            normalize_tool_hook(ToolHookEvent::PostToolUse, event_name, mode, payload)?
+        },
+        other => {
+            let ManifestHookEvent::Lifecycle(event) = other.event() else {
+                unreachable!("compact/continue_after_stop variants are matched above")
+            };
+            if s5r_unsupported_typed_hook(&event) {
+                return Err(format!("{event_name} is not supported by s5r manifest"));
+            }
+            require_supported_mode(event_name, &event, mode)?;
+            HookSubscriptionKind::Lifecycle { event, mode }
+        },
     };
-    if s5r_unsupported_typed_hook(&event) {
-        return Err(format!("{event_name} is not supported by s5r manifest"));
+    Ok(HookSubscription { priority, kind })
+}
+
+fn require_blocking(event_name: &str, mode: HookMode) -> Result<(), String> {
+    if mode != HookMode::Blocking {
+        return Err(format!("{event_name} requires blocking mode"));
     }
-    if !hook_mode_is_supported(&event, hook.mode) {
-        return Err(match fixed_hook_mode(&event) {
+    Ok(())
+}
+
+fn require_supported_mode(
+    event_name: &str,
+    event: &LifecycleEvent,
+    mode: HookMode,
+) -> Result<(), String> {
+    if !hook_mode_is_supported(event, mode) {
+        return Err(match fixed_hook_mode(event) {
             Some(required) => format!("{event_name} requires {} mode", required.as_str()),
-            None => format!("{event_name} does not support {} mode", hook.mode.as_str()),
+            None => format!("{event_name} does not support {} mode", mode.as_str()),
         });
     }
-    Ok(HookSubscription::Lifecycle {
+    Ok(())
+}
+
+fn normalize_tool_hook(
+    event: ToolHookEvent,
+    event_name: &str,
+    mode: HookMode,
+    payload: ToolHookManifest,
+) -> Result<HookSubscriptionKind, String> {
+    require_supported_mode(event_name, &event.lifecycle_event(), mode)?;
+    Ok(HookSubscriptionKind::ToolUse {
         event,
-        mode: hook.mode,
-        priority,
-        options: ContinueAfterStopOptions {
-            max_per_turn: hook
-                .options
-                .max_per_turn
-                .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
-        },
+        mode,
+        target: normalize_tool_target(event_name, payload.tools)?,
     })
+}
+
+fn normalize_tool_target(
+    event_name: &str,
+    tools: Option<Vec<String>>,
+) -> Result<ToolHookTarget, String> {
+    let Some(tools) = tools else {
+        return Ok(ToolHookTarget::All);
+    };
+    if tools.is_empty() {
+        return Err(format!(
+            "{event_name} tools target must not be empty when present"
+        ));
+    }
+    if tools.iter().any(|name| name.is_empty()) {
+        return Err(format!(
+            "{event_name} tools target entries must be non-empty tool names"
+        ));
+    }
+    Ok(ToolHookTarget::names(tools))
 }
 
 fn normalize_http_route(
@@ -404,9 +504,13 @@ mod tests {
         assert_eq!(registration.commands[0].priority, 7);
         assert!(matches!(
             &registration.subscriptions[0],
-            HookSubscription::Lifecycle { mode, options, .. }
-                if *mode == HookMode::NonBlocking
-                    && *options == ContinueAfterStopOptions::default()
+            HookSubscription {
+                priority: 0,
+                kind: HookSubscriptionKind::Lifecycle {
+                    mode: HookMode::NonBlocking,
+                    ..
+                },
+            }
         ));
         assert_eq!(registration.custom_events[0].schema_version, 1);
         assert_eq!(
@@ -466,20 +570,22 @@ mod tests {
             json!({"on": "turn_end", "mode": "non_blocking", "priority": 5}),
         )
         .unwrap();
-        assert_eq!(normalize_hook(hook).unwrap().priority(), 5);
+        assert_eq!(normalize_hook(hook).unwrap().priority, 5);
 
         let hook =
             serde_json::from_value(json!({"on": "turn_end", "mode": "non_blocking"})).unwrap();
-        assert_eq!(normalize_hook(hook).unwrap().priority(), 0);
+        assert_eq!(normalize_hook(hook).unwrap().priority, 0);
 
         let hook =
             serde_json::from_value(json!({"on": "pre_compact", "mode": "blocking", "priority": 3}))
                 .unwrap();
         assert!(matches!(
             normalize_hook(hook),
-            Ok(HookSubscription::Compact {
-                event: CompactEvent::PreCompact,
+            Ok(HookSubscription {
                 priority: 3,
+                kind: HookSubscriptionKind::Compact {
+                    event: CompactEvent::PreCompact,
+                },
             })
         ));
 
@@ -491,6 +597,70 @@ mod tests {
             normalize_hook(hook).unwrap_err(),
             "turn_end priority must be non-negative"
         );
+    }
+
+    #[test]
+    fn s5r_hook_tools_target_is_normalized_and_scoped_to_tool_hooks() {
+        let hook = serde_json::from_value(
+            json!({"on": "pre_tool_use", "mode": "blocking", "tools": ["shell", "write"]}),
+        )
+        .unwrap();
+        let subscription = normalize_hook(hook).unwrap();
+        assert!(matches!(
+            &subscription.kind,
+            HookSubscriptionKind::ToolUse {
+                event: ToolHookEvent::PreToolUse,
+                target: ToolHookTarget::Names(names),
+                ..
+            } if names.len() == 2 && names.contains("shell")
+        ));
+
+        let hook =
+            serde_json::from_value(json!({"on": "pre_tool_use", "mode": "blocking"})).unwrap();
+        assert!(matches!(
+            normalize_hook(hook).unwrap().kind,
+            HookSubscriptionKind::ToolUse {
+                target: ToolHookTarget::All,
+                ..
+            }
+        ));
+
+        let hook = serde_json::from_value(
+            json!({"on": "post_tool_use", "mode": "advisory", "tools": ["shell"]}),
+        )
+        .unwrap();
+        assert!(matches!(
+            normalize_hook(hook).unwrap().kind,
+            HookSubscriptionKind::ToolUse {
+                event: ToolHookEvent::PostToolUse,
+                mode: HookMode::Advisory,
+                ..
+            }
+        ));
+
+        let rejected = [
+            (
+                json!({"on": "pre_tool_use", "mode": "blocking", "tools": []}),
+                "pre_tool_use tools target must not be empty when present",
+            ),
+            (
+                json!({"on": "pre_tool_use", "mode": "blocking", "tools": [""]}),
+                "pre_tool_use tools target entries must be non-empty tool names",
+            ),
+        ];
+        for (value, expected_error) in rejected {
+            let hook = serde_json::from_value(value).unwrap();
+            assert_eq!(normalize_hook(hook).unwrap_err(), expected_error);
+        }
+
+        // 家族外字段在线缆类型上不可表达,反序列化期即被拒绝。
+        for invalid in [
+            json!({"on": "turn_end", "mode": "non_blocking", "tools": ["shell"]}),
+            json!({"on": "pre_compact", "mode": "blocking", "tools": ["shell"]}),
+            json!({"on": "turn_end", "mode": "non_blocking", "options": {"max_per_turn": 2}}),
+        ] {
+            assert!(serde_json::from_value::<ManifestHook>(invalid).is_err());
+        }
     }
 
     #[test]
@@ -565,15 +735,16 @@ mod tests {
         }
 
         assert!(matches!(
-            normalize_hook(ManifestHook {
-                on: CompactEvent::PreCompact.into(),
-                mode: HookMode::Blocking,
-                priority: None,
-                options: ManifestHookOptions::default(),
-            }),
-            Ok(HookSubscription::Compact {
-                event: CompactEvent::PreCompact,
+            normalize_hook(ManifestHook::new(
+                CompactEvent::PreCompact.into(),
+                HookMode::Blocking,
+                ManifestHookOptions::default(),
+            )),
+            Ok(HookSubscription {
                 priority: 0,
+                kind: HookSubscriptionKind::Compact {
+                    event: CompactEvent::PreCompact,
+                },
             })
         ));
     }

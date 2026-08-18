@@ -595,27 +595,7 @@ impl HandlerRegistry {
         on: LifecycleEvent,
         mode: HookMode,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_hook_opt(on, mode, None, handler)
-    }
-
-    pub(crate) fn register_hook_with_priority(
-        &mut self,
-        on: LifecycleEvent,
-        mode: HookMode,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_hook_opt(on, mode, Some(priority), handler)
-    }
-
-    fn register_hook_opt(
-        &mut self,
-        on: LifecycleEvent,
-        mode: HookMode,
-        priority: Option<i32>,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
+    ) -> Result<usize, ErrorPayload> {
         if on == LifecycleEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnsupportedHook,
@@ -639,50 +619,25 @@ impl HandlerRegistry {
                 format!("{} does not support {} mode", on.as_str(), mode.as_str()),
             ));
         }
-        self.register_manifest_hook(on, mode, priority, ManifestHookOptions::default(), handler)
+        self.register_manifest_hook(on, mode, ManifestHookOptions::default(), handler)
     }
 
     pub(crate) fn register_fixed_hook(
         &mut self,
         on: LifecycleEvent,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
+    ) -> Result<usize, ErrorPayload> {
         self.register_fixed_hook_with_options(on, ManifestHookOptions::default(), handler)
-    }
-
-    pub(crate) fn register_fixed_hook_with_priority(
-        &mut self,
-        on: LifecycleEvent,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_fixed_hook_opt(on, Some(priority), ManifestHookOptions::default(), handler)
     }
 
     pub(crate) fn register_compact_hook(
         &mut self,
         on: CompactEvent,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
+    ) -> Result<usize, ErrorPayload> {
         self.register_manifest_hook_event(
             on.into(),
             HookMode::Blocking,
-            None,
-            ManifestHookOptions::default(),
-            handler,
-        )
-    }
-
-    pub(crate) fn register_compact_hook_with_priority(
-        &mut self,
-        on: CompactEvent,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_manifest_hook_event(
-            on.into(),
-            HookMode::Blocking,
-            Some(priority),
             ManifestHookOptions::default(),
             handler,
         )
@@ -693,17 +648,7 @@ impl HandlerRegistry {
         on: LifecycleEvent,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_fixed_hook_opt(on, None, options, handler)
-    }
-
-    fn register_fixed_hook_opt(
-        &mut self,
-        on: LifecycleEvent,
-        priority: Option<i32>,
-        options: ManifestHookOptions,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
+    ) -> Result<usize, ErrorPayload> {
         if on == LifecycleEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnsupportedHook,
@@ -716,41 +661,74 @@ impl HandlerRegistry {
                 format!("{} is not a fixed-mode hook", on.as_str()),
             )
         })?;
-        self.register_manifest_hook(on, mode, priority, options, handler)
+        self.register_manifest_hook(on, mode, options, handler)
     }
 
     fn register_manifest_hook(
         &mut self,
         on: LifecycleEvent,
         mode: HookMode,
-        priority: Option<i32>,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_manifest_hook_event(on.into(), mode, priority, options, handler)
+    ) -> Result<usize, ErrorPayload> {
+        self.register_manifest_hook_event(on.into(), mode, options, handler)
     }
 
     fn register_manifest_hook_event(
         &mut self,
         on: ManifestHookEvent,
         mode: HookMode,
-        priority: Option<i32>,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
+    ) -> Result<usize, ErrorPayload> {
+        self.insert_hook_handler(on.as_str().to_owned(), handler)?;
+        self.manifest
+            .hooks
+            .push(ManifestHook::new(on, mode, options));
+        Ok(self.manifest.hooks.len() - 1)
+    }
+
+    /// 注册后修饰:设置调度优先级。0 归一化为缺省(线缆上省略该字段)。
+    pub(crate) fn set_hook_priority(
+        &mut self,
+        hook_index: usize,
+        priority: i32,
     ) -> Result<(), ErrorPayload> {
-        if priority.is_some_and(|value| value < 0) {
+        if priority < 0 {
             return Err(ErrorPayload::new(
                 WireErrorCode::InvalidHookRegistration,
                 "hook priority must be non-negative",
             ));
         }
-        self.insert_hook_handler(on.as_str().to_owned(), handler)?;
-        self.manifest.hooks.push(ManifestHook {
-            on,
-            mode,
-            priority,
-            options,
-        });
+        self.manifest.hooks[hook_index].set_priority((priority != 0).then_some(priority));
+        Ok(())
+    }
+
+    /// 注册后修饰:把 hook 限定到精确工具名集合,仅 tool hook 可声明。
+    pub(crate) fn set_hook_tool_target(
+        &mut self,
+        hook_index: usize,
+        names: std::collections::BTreeSet<String>,
+    ) -> Result<(), ErrorPayload> {
+        if names.is_empty() {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidHookRegistration,
+                "hook tools target must not be empty when present",
+            ));
+        }
+        if names.iter().any(|name| name.is_empty()) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidHookRegistration,
+                "hook tools target entries must be non-empty tool names",
+            ));
+        }
+        let event_name = self.manifest.hooks[hook_index].event_name();
+        if !self.manifest.hooks[hook_index].set_tool_target(names.into_iter().collect()) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidHookRegistration,
+                format!("{event_name} does not accept a tool target"),
+            ));
+        }
         Ok(())
     }
 
@@ -780,25 +758,9 @@ impl HandlerRegistry {
         &mut self,
         options: ContinueAfterStopOptions,
         handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
+    ) -> Result<usize, ErrorPayload> {
         self.register_fixed_hook_with_options(
             LifecycleEvent::ContinueAfterStop,
-            ManifestHookOptions {
-                max_per_turn: Some(options.max_per_turn),
-            },
-            handler,
-        )
-    }
-
-    pub(crate) fn register_continue_after_stop_hook_with_priority(
-        &mut self,
-        options: ContinueAfterStopOptions,
-        priority: i32,
-        handler: HookHandlerFn,
-    ) -> Result<(), ErrorPayload> {
-        self.register_fixed_hook_opt(
-            LifecycleEvent::ContinueAfterStop,
-            Some(priority),
             ManifestHookOptions {
                 max_per_turn: Some(options.max_per_turn),
             },
@@ -1027,6 +989,8 @@ fn fixed_worker_hook_hint(event: &LifecycleEvent) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::json;
 
     use super::*;
@@ -1090,7 +1054,7 @@ mod tests {
                 Arc::clone(&handler),
             )
             .unwrap();
-        assert_eq!(registry.manifest.hooks[0].mode, HookMode::NonBlocking);
+        assert_eq!(registry.manifest.hooks[0].mode(), HookMode::NonBlocking);
 
         let invalid = registry
             .register_hook(
@@ -1121,55 +1085,81 @@ mod tests {
         }
 
         let fixed_hooks = &registry.manifest.hooks[1..];
-        assert_eq!(fixed_hooks[0].on, LifecycleEvent::ToolInputTransform.into());
-        assert_eq!(fixed_hooks[0].mode, HookMode::Blocking);
-        assert_eq!(fixed_hooks[1].on, LifecycleEvent::PreToolUse.into());
-        assert_eq!(fixed_hooks[1].mode, HookMode::Blocking);
         assert_eq!(
-            fixed_hooks[2].on,
+            fixed_hooks[0].event(),
+            LifecycleEvent::ToolInputTransform.into()
+        );
+        assert_eq!(fixed_hooks[0].mode(), HookMode::Blocking);
+        assert_eq!(fixed_hooks[1].event(), LifecycleEvent::PreToolUse.into());
+        assert_eq!(fixed_hooks[1].mode(), HookMode::Blocking);
+        assert_eq!(
+            fixed_hooks[2].event(),
             LifecycleEvent::AfterProviderResponse.into()
         );
-        assert_eq!(fixed_hooks[2].mode, HookMode::Advisory);
+        assert_eq!(fixed_hooks[2].mode(), HookMode::Advisory);
     }
 
     #[test]
-    fn hook_priority_is_recorded_and_validated() {
+    fn hook_registration_modifiers_are_recorded_and_validated() {
         let mut registry = HandlerRegistry::new("test-extension");
         let handler = crate::worker::hook_handler(|_| async {
             Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
         });
 
-        registry
-            .register_hook_with_priority(
+        let turn_end = registry
+            .register_hook(
                 LifecycleEvent::TurnEnd,
                 HookMode::NonBlocking,
-                5,
                 Arc::clone(&handler),
             )
             .unwrap();
-        registry
-            .register_fixed_hook_with_priority(LifecycleEvent::PreToolUse, 9, Arc::clone(&handler))
+        let pre_tool_use = registry
+            .register_fixed_hook(LifecycleEvent::PreToolUse, Arc::clone(&handler))
             .unwrap();
-        registry
-            .register_compact_hook_with_priority(CompactEvent::PreCompact, 3, handler)
+        let pre_compact = registry
+            .register_compact_hook(CompactEvent::PreCompact, Arc::clone(&handler))
+            .unwrap();
+        let transform = registry
+            .register_fixed_hook(LifecycleEvent::ToolInputTransform, handler)
             .unwrap();
 
-        assert_eq!(registry.manifest.hooks[0].priority, Some(5));
-        assert_eq!(registry.manifest.hooks[1].priority, Some(9));
-        assert_eq!(registry.manifest.hooks[2].priority, Some(3));
+        registry.set_hook_priority(turn_end, 5).unwrap();
+        registry.set_hook_priority(pre_compact, 3).unwrap();
+        registry
+            .set_hook_tool_target(pre_tool_use, BTreeSet::from(["shell".to_owned()]))
+            .unwrap();
+        registry.set_hook_priority(pre_tool_use, 0).unwrap();
 
-        let mut registry = HandlerRegistry::new("test-extension");
-        let handler = crate::worker::hook_handler(|_| async {
-            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
-        });
+        assert_eq!(registry.manifest.hooks[turn_end].priority(), Some(5));
+        assert_eq!(registry.manifest.hooks[pre_compact].priority(), Some(3));
+        assert!(
+            matches!(&registry.manifest.hooks[pre_tool_use], ManifestHook::PreToolUse(payload) if payload.tools == Some(vec!["shell".to_owned()]))
+        );
+        assert_eq!(
+            registry.manifest.hooks[pre_tool_use].priority(),
+            None,
+            "explicit zero priority normalizes to the wire default"
+        );
+
         let error = registry
-            .register_hook_with_priority(
-                LifecycleEvent::TurnEnd,
-                HookMode::NonBlocking,
-                -1,
-                handler,
-            )
-            .expect_err("negative priority must be rejected locally");
+            .set_hook_priority(turn_end, -1)
+            .expect_err("negative priority must be rejected");
+        assert_eq!(
+            error.code_enum(),
+            Some(WireErrorCode::InvalidHookRegistration)
+        );
+
+        let error = registry
+            .set_hook_tool_target(pre_compact, BTreeSet::from(["shell".to_owned()]))
+            .expect_err("compact hooks must reject a tool target");
+        assert_eq!(
+            error.code_enum(),
+            Some(WireErrorCode::InvalidHookRegistration)
+        );
+
+        let error = registry
+            .set_hook_tool_target(transform, BTreeSet::new())
+            .expect_err("an empty tool target must be rejected");
         assert_eq!(
             error.code_enum(),
             Some(WireErrorCode::InvalidHookRegistration)

@@ -129,3 +129,10 @@ Every S5R manifest hook may declare an optional `priority` (non-negative integer
 negative values are rejected at the manifest normalization boundary). The host dispatches hooks in
 descending priority and preserves registration order on ties — the same stable priority order the
 bundled Rust registration API uses. A hook that omits `priority` behaves exactly as before.
+
+The three tool hooks (`tool_input_transform`, `pre_tool_use`, `post_tool_use`) may additionally
+declare `tools`: an exact tool-name list that scopes the hook to those tools (default: all tools,
+same as bundled `ToolHookTarget`). The wire type encodes this per hook family — `tools` does not
+exist on other events' payloads and is rejected during manifest deserialization. Workers declare
+it through the registration guard (`worker.on_pre_tool_use(handler)?.tools(["shell"])?` in Rust,
+`tools=[...]` keyword in the Python SDK).
