@@ -562,6 +562,127 @@ class DisposeRootTest(unittest.IsolatedAsyncioTestCase):
                 await host.shutdown()
 
 
+class RootCustomizeForkTest(unittest.IsolatedAsyncioTestCase):
+    async def test_create_root_sends_only_set_fields(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        @worker.tool(ToolDefinition(name="spawn", description="", parameters={}))
+        async def spawn(arguments, ctx):
+            await HostClient.session_control().create_root(
+                system_prompt="nightly reviewer",
+                tool_selection={"mode": "only", "names": ["read"]},
+            )
+            return tool_text("spawned")
+
+        host = FakeHost(worker, host_operations=[HostOperation.SESSION_ROOT_CREATE])
+        await host.handshake()
+        await host.invoke_handler("r-1", f"{EXT_ID}:tool:spawn", tool_event({}))
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_CREATE)
+        self.assertEqual(
+            nested.input,
+            {
+                "system_prompt": "nightly reviewer",
+                "tool_selection": {"mode": "only", "names": ["read"]},
+            },
+        )
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"session_id": "root-1"},
+            }
+        )
+        result = await host.recv()
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.output["data"]["content"], "spawned")
+        await host.shutdown()
+
+    async def test_fork_root_round_trip(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        observed = []
+
+        @worker.tool(ToolDefinition(name="branch", description="", parameters={}))
+        async def branch(arguments, ctx):
+            observed.append(
+                await HostClient.session_control().fork_root("root-1", at_cursor="7")
+            )
+            return tool_text("branched")
+
+        host = FakeHost(worker, host_operations=[HostOperation.SESSION_ROOT_FORK])
+        await host.handshake()
+        await host.invoke_handler("r-1", f"{EXT_ID}:tool:branch", tool_event({}))
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_FORK)
+        self.assertEqual(
+            nested.input, {"source_session_id": "root-1", "at_cursor": "7"}
+        )
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"session_id": "fork-1"},
+            }
+        )
+        result = await host.recv()
+        self.assertTrue(result.is_success)
+        self.assertEqual(observed, [{"session_id": "fork-1"}])
+        await host.shutdown()
+
+    async def test_background_host_customized_create_and_fork(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+        host = FakeHost(
+            worker,
+            host_operations=[
+                HostOperation.SESSION_ROOT_CREATE,
+                HostOperation.SESSION_ROOT_FORK,
+            ],
+        )
+        background = worker.background_host()
+        await host.handshake()
+        background_host = await asyncio.wait_for(background, timeout=5)
+        roots = background_host.root_sessions()
+
+        create = asyncio.create_task(roots.create_root("/workspace", model_preference="small"))
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_CREATE)
+        self.assertEqual(
+            nested.input,
+            {"working_dir": "/workspace", "model_preference": "small"},
+        )
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"session_id": "root-1"},
+            }
+        )
+        self.assertEqual((await create)["session_id"], "root-1")
+
+        fork = asyncio.create_task(roots.fork_root("root-1"))
+        nested = await host.recv()
+        self.assertEqual(nested.operation, HostOperation.SESSION_ROOT_FORK)
+        self.assertIsNone(nested.parent_invoke_id)
+        self.assertEqual(nested.input, {"source_session_id": "root-1"})
+        await host.send(
+            {
+                "type": "result",
+                "status": "success",
+                "id": nested.id,
+                "kind": "invoke",
+                "output": {"session_id": "fork-1"},
+            }
+        )
+        self.assertEqual((await fork)["session_id"], "fork-1")
+        await host.shutdown()
+
+
 class HttpRouteTest(unittest.IsolatedAsyncioTestCase):
     def test_route_validation(self) -> None:
         worker = Worker(EXT_ID, "0.1.0")
@@ -1173,6 +1294,38 @@ class HookPriorityTest(unittest.TestCase):
         for register in (
             lambda: worker.on_pre_tool_use(handler, priority=-1),
             lambda: worker.hook("turn_end", "non_blocking", handler, priority=-2),
+        ):
+            with self.assertRaises(S5rError) as caught:
+                register()
+            self.assertEqual(caught.exception.code, WireErrorCode.INVALID_HOOK_REGISTRATION)
+
+    def test_tools_target_reaches_the_emitted_manifest(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def handler(event, ctx):
+            return HandlerResult.ok()
+
+        worker.on_pre_tool_use(handler, tools=["write", "shell", "shell"])
+        worker.on_tool_input_transform(handler, tools=["read"])
+        worker.hook("post_tool_use", "advisory", handler, tools=["shell"])
+        worker.on_prompt_build(handler)
+
+        hooks = worker._manifest_json()["hooks"]
+        self.assertEqual(hooks[0]["tools"], ["shell", "write"])
+        self.assertEqual(hooks[1]["tools"], ["read"])
+        self.assertEqual(hooks[2]["tools"], ["shell"])
+        self.assertNotIn("tools", hooks[3])
+
+    def test_tools_target_rejected_outside_tool_hooks(self) -> None:
+        worker = Worker(EXT_ID, "0.1.0")
+
+        async def handler(event, ctx):
+            return HandlerResult.ok()
+
+        for register in (
+            lambda: worker.hook("turn_end", "non_blocking", handler, tools=["shell"]),
+            lambda: worker.on_pre_tool_use(handler, tools=[]),
+            lambda: worker.on_pre_tool_use(handler, tools=[""]),
         ):
             with self.assertRaises(S5rError) as caught:
                 register()

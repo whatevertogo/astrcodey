@@ -60,6 +60,7 @@ class HostOperation:
     SESSION_READ_EVENTS = "astrcode.session.read_events"
     SESSION_ROOT_CREATE = "astrcode.session.root.create"
     SESSION_ROOT_DISPOSE = "astrcode.session.root.dispose"
+    SESSION_ROOT_FORK = "astrcode.session.root.fork"
     SESSION_ROOT_STATE = "astrcode.session.root.state"
     SESSION_ROOT_SUBMIT_TURN = "astrcode.session.root.submit_turn"
     SESSION_STATE_READ = "astrcode.session.state.read"
@@ -190,14 +191,46 @@ class ModelClient:
         return await _collect(self.small_chat_events(request))
 
 
+def _root_create_request(
+    working_dir: str | None,
+    system_prompt: str | None,
+    model_preference: str | None,
+    tool_selection: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Build a `session.root.create` request, omitting unset optional fields."""
+    request: dict[str, Any] = {}
+    if working_dir is not None:
+        request["working_dir"] = working_dir
+    if system_prompt is not None:
+        request["system_prompt"] = system_prompt
+    if model_preference is not None:
+        request["model_preference"] = model_preference
+    if tool_selection is not None:
+        request["tool_selection"] = dict(tool_selection)
+    return request or None
+
+
 class SessionControlClient:
-    async def create_root(self, working_dir: str | None = None) -> Any:
+    async def create_root(
+        self,
+        working_dir: str | None = None,
+        *,
+        system_prompt: str | None = None,
+        model_preference: str | None = None,
+        tool_selection: Mapping[str, Any] | None = None,
+    ) -> Any:
         """Create a top-level session attributed to this extension.
 
         `working_dir` overrides the session working directory; when omitted the
-        host falls back to the calling context's working directory.
+        host falls back to the calling context's working directory. The optional
+        customization fields mirror `session.control.create`: `system_prompt` is
+        appended to the persisted stable system prompt, `model_preference` must
+        be one of the host's runtime-switchable model ids, and `tool_selection`
+        is a `{"mode": "only"|"all", ...}` mapping.
         """
-        request = {"working_dir": working_dir} if working_dir is not None else None
+        request = _root_create_request(
+            working_dir, system_prompt, model_preference, tool_selection
+        )
         return await _call(HostOperation.SESSION_ROOT_CREATE, request)
 
     async def submit_root_turn(self, request: Mapping[str, Any]) -> Any:
@@ -209,6 +242,22 @@ class SessionControlClient:
     async def dispose_root(self, target_session_id: str) -> None:
         """Dispose a root session; the host must answer `{"ok": true}`."""
         await _dispose_root(_call, target_session_id)
+
+    async def fork_root(
+        self, source_session_id: str, *, at_cursor: str | None = None
+    ) -> Any:
+        """Fork a session into a new root owned by this extension.
+
+        The source must be a top-level session owned by this extension or the
+        calling context's session; the fork inherits working dir, model, and
+        the persisted system prompt prefix. `at_cursor` is a decimal event seq
+        to fork at (defaults to the source head). The returned session id
+        works with `submit_root_turn`/`root_state`/`dispose_root`.
+        """
+        request: dict[str, Any] = {"source_session_id": source_session_id}
+        if at_cursor is not None:
+            request["at_cursor"] = at_cursor
+        return await _call(HostOperation.SESSION_ROOT_FORK, request)
 
     async def inject_or_start(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.SESSION_CONTROL_INJECT_OR_START, request)
@@ -399,9 +448,19 @@ class BackgroundRootSessionClient:
     def __init__(self, invoke: Callable[[str, Any], Awaitable[Any]]):
         self._invoke = invoke
 
-    async def create_root(self, working_dir: str | None = None) -> Any:
-        request = {"working_dir": working_dir} if working_dir is not None else {}
-        return await self._invoke(HostOperation.SESSION_ROOT_CREATE, request)
+    async def create_root(
+        self,
+        working_dir: str | None = None,
+        *,
+        system_prompt: str | None = None,
+        model_preference: str | None = None,
+        tool_selection: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Create a customized top-level session (see `SessionControlClient.create_root`)."""
+        request = _root_create_request(
+            working_dir, system_prompt, model_preference, tool_selection
+        )
+        return await self._invoke(HostOperation.SESSION_ROOT_CREATE, request or {})
 
     async def submit_root_turn(self, request: Mapping[str, Any]) -> Any:
         return await self._invoke(HostOperation.SESSION_ROOT_SUBMIT_TURN, dict(request))
@@ -411,6 +470,15 @@ class BackgroundRootSessionClient:
 
     async def dispose_root(self, target_session_id: str) -> None:
         await _dispose_root(self._invoke, target_session_id)
+
+    async def fork_root(
+        self, source_session_id: str, *, at_cursor: str | None = None
+    ) -> Any:
+        """Fork an owned top-level session (see `SessionControlClient.fork_root`)."""
+        request: dict[str, Any] = {"source_session_id": source_session_id}
+        if at_cursor is not None:
+            request["at_cursor"] = at_cursor
+        return await self._invoke(HostOperation.SESSION_ROOT_FORK, request)
 
 
 _EVENTS = EventClient()
