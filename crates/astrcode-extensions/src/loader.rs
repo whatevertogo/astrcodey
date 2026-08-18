@@ -352,7 +352,9 @@ async fn discover_all(
 
     if let Some(wd) = working_dir {
         let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
-        if project_dir.exists() {
+        // 从 $HOME 启动时项目扩展目录与全局目录是同一目录,重复扫描会触发
+        // duplicate extension source key
+        if project_dir.exists() && !is_same_dir(&project_dir, &global_dir) {
             let project = discover_from_dir(&project_dir, host_router).await;
             result.candidates.splice(0..0, project.candidates);
             result.failures.extend(project.failures);
@@ -360,6 +362,13 @@ async fn discover_all(
     }
 
     result
+}
+
+fn is_same_dir(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 async fn discover_from_dir(
@@ -592,6 +601,20 @@ mod tests {
 
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn is_same_dir_compares_canonical_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ext");
+        fs::create_dir_all(&dir).unwrap();
+        let other = root.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        let via_dotdot = root.path().join("other").join("..").join("ext");
+
+        assert!(is_same_dir(&dir, &via_dotdot));
+        assert!(!is_same_dir(&dir, &other));
+        assert!(!is_same_dir(&dir, &root.path().join("missing")));
     }
 
     #[test]
