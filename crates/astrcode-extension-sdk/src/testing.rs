@@ -1,17 +1,11 @@
 //! Minimal host-safe fixtures for extension author tests.
 
-mod harnesses;
-
 use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
     compaction::CompactTrigger, message_attachment::MessageAttachment, types::ToolCallId,
 };
 use async_trait::async_trait;
-pub use harnesses::{
-    ExtensionLifecycleHarness, LifecycleHarnessError, LifecycleHarnessEvent, MockExtensionHost,
-    MockHostInvocation, RegisteredExtension, RegistrationHarness,
-};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 

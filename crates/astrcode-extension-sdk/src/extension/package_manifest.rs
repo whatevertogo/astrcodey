@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 /// Discovery metadata from an extension package's `extension.json`.
 ///
+/// One of three manifest layers: the package file (this type) tells the host
+/// how to start a worker; [`crate::extension::ExtensionManifest`] is the
+/// bundled authoring identity; [`crate::wire::manifest::InitializeManifest`]
+/// is the S5R handshake declaration the worker sends once running. Each layer
+/// carries only what its boundary needs.
+///
 /// The host treats `extension_id` as authoritative before starting the process. The worker must
 /// report the same id during initialization; runtime capabilities, tools, and hooks are declared
 /// by that handshake rather than this file.

@@ -1,4 +1,10 @@
 //! Typed initialization declaration shared by S5R workers and the host.
+//!
+//! One of three manifest layers: this is the S5R handshake declaration the
+//! worker sends once running; [`crate::extension::ExtensionManifest`] is the
+//! bundled authoring identity, and
+//! [`crate::extension::ExtensionPackageManifest`] is the package-file
+//! discovery metadata.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

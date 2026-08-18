@@ -90,12 +90,7 @@ impl Extension for MemoryExtension {
         self.store_pool
             .set_root(data_dir.to_path_buf())
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-        let small_model_available = ctx
-            .host()
-            .models()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?
-            .small_available()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        let small_model_available = ctx.host().models()?.small_available()?;
         if !small_model_available {
             return Err(ExtensionError::Internal(
                 "memory extension requires a configured small model provider".into(),

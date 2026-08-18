@@ -4,6 +4,11 @@ use crate::{extension::ExtensionCapability, transport::TransportFeature};
 
 /// Stable authoring manifest returned by [`crate::extension::Extension::manifest`].
 ///
+/// One of three manifest layers: this is the bundled authoring identity;
+/// [`crate::extension::ExtensionPackageManifest`] is the package-file discovery
+/// metadata, and [`crate::wire::manifest::InitializeManifest`] is the S5R
+/// handshake declaration.
+///
 /// Fields stay private so adding optional display metadata does not turn downstream struct
 /// literals into a compatibility boundary. Registrations deliberately live in
 /// [`crate::extension::ExtensionRegistrations`], where declarations are bound to handlers.

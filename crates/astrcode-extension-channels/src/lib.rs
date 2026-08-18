@@ -20,7 +20,7 @@ use astrcode_extension_sdk::{
         ExtensionManifest, ExtensionStartContext, ExtensionStopContext, Registrar,
     },
     host::SessionControlClient,
-    session::{
+    wire::session::{
         HostCreateRootSessionRequest, HostRootSubmitTurnRequest, HostSessionTargetRequest,
         HostSubmitTurnOutput, SessionLifecycleStateDto,
     },
@@ -772,7 +772,7 @@ mod tests {
             HostError, HostOperation,
             internal::{HostInvoker, HostScope, extension_host},
         },
-        session::{HostSessionStateOutput, SessionPhaseDto},
+        wire::session::{HostSessionStateOutput, SessionPhaseDto},
     };
     use serde_json::Value;
 

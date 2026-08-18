@@ -1,16 +1,10 @@
-//! Session authoring API and S5R contract re-exports.
+//! Session authoring helpers.
+//!
+//! The wire DTOs themselves live in [`crate::wire::session`]; this module only
+//! carries the mapping between the bundled authoring selection and the wire
+//! contract, so wire types keep exactly one home.
 
-pub use crate::{
-    extension::SessionToolSelection,
-    wire::session::{
-        HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
-        HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
-        HostSubmitTurnOutput, HostSubmitTurnRequest, SessionLifecycleStateDto,
-        SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto,
-    },
-};
+use crate::{extension::SessionToolSelection, wire::session::SessionToolSelectionDto};
 
 /// Maps the bundled authoring selection into the stable extension boundary contract.
 pub fn tool_selection_to_dto(selection: SessionToolSelection) -> SessionToolSelectionDto {

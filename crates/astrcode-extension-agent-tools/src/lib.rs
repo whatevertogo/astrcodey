@@ -17,13 +17,13 @@ use astrcode_extension_sdk::{
         PromptContributions, Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
     llm::{LlmContent, LlmMessage, LlmRole},
-    session::{
-        HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest,
-    },
     tool::{
         HostResource, ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan,
         ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
+    },
+    wire::session::{
+        HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest,
     },
 };
 use serde::Deserialize;

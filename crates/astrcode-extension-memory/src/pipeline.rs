@@ -4,7 +4,9 @@ use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{ModelClient, SessionInspectClient},
     llm::{LlmContent, LlmMessage, LlmRole},
-    prelude::{SessionInspectContent, SessionInspectListItem, SessionInspectReadModel},
+    wire::session_inspect::{
+        SessionInspectContent, SessionInspectListItem, SessionInspectReadModel,
+    },
 };
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;

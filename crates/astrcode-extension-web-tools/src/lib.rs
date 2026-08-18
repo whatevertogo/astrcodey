@@ -131,18 +131,9 @@ impl Extension for WebToolsExtension {
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
-        let network = ctx
-            .host()
-            .network()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-        let models = ctx
-            .host()
-            .models()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-        let small_llm = models
-            .small_available()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?
-            .then_some(models);
+        let network = ctx.host().network()?;
+        let models = ctx.host().models()?;
+        let small_llm = models.small_available()?.then_some(models);
         let mut shared = self.shared.write();
         shared.update_config(load_config(ctx.config())?);
         shared.small_llm = small_llm;

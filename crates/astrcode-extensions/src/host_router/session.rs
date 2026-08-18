@@ -29,16 +29,17 @@ use astrcode_extension_sdk::{
         HostSessionTranscriptMessage,
         internal::{HostOperationGroup, llm_message_to_wire, llm_messages_to_wire},
     },
-    session::{
-        HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-        HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
-        HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
-        HostSubmitTurnOutput, HostSubmitTurnRequest, SessionLifecycleStateDto,
-        SessionMessageOriginDto, SessionToolSelectionDto, tool_selection_to_dto,
-    },
+    session::tool_selection_to_dto,
     wire::{
         ErrorPayload, WireErrorCode,
+        session::{
+            HostCreateRootSessionRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+            HostForkRootSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+            HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+            HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
+            HostSubmitTurnOutput, HostSubmitTurnRequest, SessionLifecycleStateDto,
+            SessionMessageOriginDto, SessionToolSelectionDto,
+        },
         session_inspect::{
             HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
             SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
@@ -1219,8 +1220,8 @@ fn session_state_output(state: SessionState) -> HostSessionStateOutput {
     }
 }
 
-pub(super) fn phase_output(phase: Phase) -> astrcode_extension_sdk::session::SessionPhaseDto {
-    use astrcode_extension_sdk::session::SessionPhaseDto;
+pub(super) fn phase_output(phase: Phase) -> astrcode_extension_sdk::wire::session::SessionPhaseDto {
+    use astrcode_extension_sdk::wire::session::SessionPhaseDto;
 
     match phase {
         Phase::Idle => SessionPhaseDto::Idle,

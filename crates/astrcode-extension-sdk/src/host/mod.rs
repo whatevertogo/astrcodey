@@ -20,46 +20,11 @@ pub use workspace_patch::{
     normalize_unified_diff_path,
 };
 
-pub use crate::wire::{
-    HostOperation,
-    host::{
-        Acknowledgement, EmptyRequest, HOST_NETWORK_DEFAULT_TIMEOUT_MS, HOST_NETWORK_MAX_BYTES,
-        HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
-        HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_STDIN_BYTES, HOST_PROCESS_MAX_TIMEOUT_MS,
-        HOST_PROCESS_MAX_WAIT_MS, HOST_SESSION_STATE_KEY_MAX_LENGTH,
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HOST_TOOL_RESULT_DEFAULT_MAX_BYTES,
-        HOST_TOOL_RESULT_MAX_BYTES, HOST_TOOL_RESULT_MIN_BYTES,
-        HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES,
-        HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS, HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES,
-        HOST_WORKSPACE_LIST_DEFAULT_DEPTH, HOST_WORKSPACE_LIST_DEFAULT_LIMIT,
-        HOST_WORKSPACE_LIST_MAX_DEPTH, HOST_WORKSPACE_LIST_MAX_ENTRIES,
-        HOST_WORKSPACE_MAX_DIFF_BYTES, HOST_WORKSPACE_MAX_FILE_BYTES,
-        HOST_WORKSPACE_MAX_IMAGE_BYTES, HOST_WORKSPACE_MAX_LINE_LIMIT,
-        HOST_WORKSPACE_MAX_PATCH_BYTES, HOST_WORKSPACE_MAX_TEXT_OUTPUT_BYTES,
-        HOST_WORKSPACE_SEARCH_MAX_CONTEXT_LINES, HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
-        HOST_WORKSPACE_SEARCH_MAX_MATCHES, HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
-        HostEventEmitRequest, HostLlmChatOutput, HostLlmChatRequest, HostLlmContent,
-        HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse, HostProcessHandleOutput, HostProcessInputAction,
-        HostProcessInputRequest, HostProcessLifetime, HostProcessListOutput, HostProcessOutput,
-        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest, HostProcessStartRequest,
-        HostProcessState, HostProcessStatusOutput, HostProcessTargetRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostSessionTranscriptMessage, HostToolResultReadOutput,
-        HostToolResultReadRequest, HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest,
-        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-        HostWorkspaceGlobRequest, HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry,
-        HostWorkspaceGrepMode, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspacePatchChange, HostWorkspacePatchChangeKind, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceTextEdit,
-        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
-    },
-};
+pub use crate::wire::HostOperation;
+// Author-facing re-export of the host wire contract. `wire::host` is the
+// canonical definition site; this glob keeps the authoring path (`host::X`)
+// in sync without a hand-maintained name list.
+pub use crate::wire::host::*;
 use crate::{
     extension::ExtensionCapability,
     model_stream::ModelStream,

@@ -127,10 +127,7 @@ impl Extension for ModelBindingProbeExtension {
 }
 
 async fn invoke_model_pair(call: &impl ExtensionCall) -> Result<String, ExtensionError> {
-    let models = call
-        .host()
-        .models()
-        .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+    let models = call.host().models()?;
     let main = models
         .main_chat(vec![LlmMessage::user("main probe")])
         .await?;

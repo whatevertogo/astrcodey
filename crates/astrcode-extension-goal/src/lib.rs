@@ -19,12 +19,12 @@ use astrcode_extension_sdk::{
     },
     host::ExtensionHost,
     llm::LlmMessage,
-    session::HostSessionTargetRequest,
     tool::{
         HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
         ToolResult, tool_metadata,
     },
     types::SessionId,
+    wire::session::HostSessionTargetRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
