@@ -65,6 +65,7 @@ EOF(stdin 关闭)时干净退出。
 | `on_pre_compact` / `on_post_compact` | compact hook(blocking) |
 | `on_continue_after_stop(max_per_turn, handler)` | `-1` 表示无限 |
 | 以上 hook 方法的 keyword-only `priority` | 跨扩展调度优先级(非负整数,缺省 0;宿主降序调度,同级保持注册顺序) |
+| `hook` / `on_tool_input_transform` / `on_pre_tool_use` 的 keyword-only `tools` | 精确工具名过滤(仅 tool hook 可声明,缺省匹配全部工具) |
 | `continuation_hook_handler(on, handler)` | 仅由 hook continuation 调用 |
 | `command(SlashCommand(...), handler)` | slash command(execute + completion) |
 | `custom_event(...)` / `on_custom_event(...)` | custom event 声明与订阅 |
@@ -121,7 +122,9 @@ session 为 target(对标 Rust 的 `WorkerInvocationContext::defer_context`)。
 
 后台能力:`on_shutdown` 清理 hook(driver 结束后执行,HostClient 不可用)与
 `background_host()`(activate 后交付无 turn 作用域的 `BackgroundHost`,仅 root session 域:
-`create_root` / `submit_root_turn` / `root_state` / `dispose_root`,invoke 不带
+`create_root`(可选 `system_prompt` / `model_preference` / `tool_selection` 定制)/
+`submit_root_turn` / `root_state` / `dispose_root` / `fork_root`(分叉本扩展拥有的
+顶层会话,产出可直接用同域方法驱动),invoke 不带
 `parent_invoke_id`,宿主按 detached context 处理)。
 
 ## 测试

@@ -340,7 +340,7 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `main_model` | `astrcode.llm.main_chat` | 调用当前会话主模型。 |
 | `small_model` | `astrcode.llm.small_chat` | 调用宿主小模型。 |
 | `session_history` | `astrcode.session.history.*` / `astrcode.session.read_events` | 列出当前 session lineage 的稳定摘要，读取 transcript、provider messages、token usage、snapshot 或按游标读取 durable events；仅在 session-scoped 调用上下文中可用，不能读取无关顶层 session。 |
-| `input_delivery` | `astrcode.session.root.*` | 创建 extension-owned 顶层 session、向其提交输入并读取生命周期状态；用于 channel 等进程级入口，不授予任意 session 控制。 |
+| `input_delivery` | `astrcode.session.root.*` | 创建 extension-owned 顶层 session、向其提交输入并读取生命周期状态；`root.create` 可选定制 system_prompt（进持久化稳定提示词）/model_preference（须为运行时可切换的 effective 主/小模型 id，`"inherit"` 与空串视为未指定）/tool_selection（仅收窄）；`root.fork` 把「本扩展拥有的顶层会话或当前调用上下文会话」分叉为归属本扩展的新 root（working_dir、模型与提示词前缀含指纹继承，`at_cursor` 十进制事件 seq 截断，不可覆盖继承内容）。用于 channel 等进程级入口，不授予任意 session 控制。 |
 | `session_control` | `astrcode.session.control.*` | 创建、提交、注入（`inject_or_start`）、FIFO 排队（`queue_or_start`）、仅活跃 turn 注入（`defer_context`，无活跃 turn 返回 `no_active_turn`）、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
 | `session_inspect` | `astrcode.session.inspect.*` | 宿主级全局读取权限：跨 session lineage 列出所有宿主可见会话，读取快照、完整投影或 provider 可见消息。只应授予需要全局观察或后台接续会话的扩展。 |
 | `public_http` | 公开路由注册 | 注册 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
@@ -380,10 +380,13 @@ capability 时会直接拒绝加载。生命周期事件中只有 `TurnStart` �
 fail-open 的 Advisory，或由宿主管理生命周期的 NonBlocking 通知。
 磁盘 s5r manifest 的每个 hook 可声明可选 `priority`（非负整数，缺省 0，负数在
 manifest 归一化边界拒绝）；宿主按与 bundled 注册 API 相同的降序稳定顺序调度，
-同优先级保持注册顺序。Rust worker 通过 `hook_with_priority` /
-`fixed_hook_with_priority` / `compact_hook_with_priority` /
-`on_continue_after_stop_with_priority` 声明；Python SDK 的 `Worker.hook` 与各
-`on_*` 注册方法接受 keyword-only `priority` 参数。
+同优先级保持注册顺序。tool hook（`tool_input_transform` / `pre_tool_use` /
+`post_tool_use`）还可声明可选 `tools`（精确工具名列表），把 hook 限定到指定工具；
+缺省匹配全部工具。线缆类型按 hook 家族区分 payload，其他事件在类型上没有
+`tools` 字段，家族外字段在反序列化期即被拒绝。
+Rust worker 通过注册返回的 guard 链式声明：`worker.on_pre_tool_use(handler)?.priority(5)?.tools(["shell"])?`；
+Python SDK 的 `Worker.hook` 与各 `on_*` 注册方法接受 keyword-only `priority` 与
+`tools` 参数。
 
 所有来源最终都解析成 runner 内唯一的 `ResolvedExtensionManifest`。索引、快照、
 能力检查和冲突检查只读取这份运行时清单，不再分别维护扩展实例、注册记录和任务表。
