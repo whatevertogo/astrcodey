@@ -561,7 +561,12 @@ fn build_test_ops_with_llm(
     store: Arc<dyn SessionStore>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Arc<ServerSessionOperations> {
-    assemble_test_ops(store, llm_provider.clone(), llm_provider, mock_effective_config())
+    assemble_test_ops(
+        store,
+        llm_provider.clone(),
+        llm_provider,
+        mock_effective_config(),
+    )
 }
 
 fn mock_llm_settings(model_id: &str) -> LlmSettings {
@@ -668,9 +673,7 @@ async fn create_root_session_persists_source_extension_attribution() {
 #[tokio::test]
 async fn create_root_session_applies_extension_customization() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm = Arc::new(StaticTextLlm {
-        text: "unused",
-    });
+    let llm = Arc::new(StaticTextLlm { text: "unused" });
     // 独立的小模型 id 才能证明 model_preference 走的是覆盖路径而非默认值巧合。
     let mut effective = mock_effective_config();
     effective.small_llm = mock_llm_settings("mock-small");
@@ -792,7 +795,10 @@ async fn fork_session_attributes_the_new_root_to_the_requesting_extension() {
         source_model.identity.working_dir
     );
     // fork 的意义:继承的 prompt 前缀(text + fingerprint)保证 KV cache 命中。
-    assert_eq!(fork_model.system_prompt.text, source_model.system_prompt.text);
+    assert_eq!(
+        fork_model.system_prompt.text,
+        source_model.system_prompt.text
+    );
     assert_eq!(
         fork_model.system_prompt.fingerprint,
         source_model.system_prompt.fingerprint
