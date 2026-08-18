@@ -13,7 +13,7 @@ use astrcode_storage::config_store::FileConfigStore;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use super::{ConfigManager, ConfigUpdateError, PreparedConfigError};
+use super::{ConfigManager, ConfigUpdateError, PreparedConfigError, effective::ConfigResolve};
 
 const CODING_EXTENSION_ID: &str = "astrcode-coding";
 

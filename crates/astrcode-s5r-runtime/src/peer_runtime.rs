@@ -1381,7 +1381,7 @@ mod tests {
     };
 
     use astrcode_extension_sdk::wire::{
-        HostInitialization, Peer, PeerInfo, WorkerInitialization,
+        PeerInfo,
         frame::FrameError,
         manifest::InitializeManifest,
         protocol::{FeatureName, InvokeMsg, ModelStreamEvent, WireMessage, encode_wire_message},
@@ -1390,6 +1390,7 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify};
 
     use super::*;
+    use crate::{HostInitialization, Peer, WorkerInitialization};
 
     struct WriteGate {
         armed: AtomicBool,

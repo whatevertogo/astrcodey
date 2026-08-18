@@ -120,6 +120,7 @@ fn estimate_content_tokens(content: &LlmContent) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::tool::ToolOrigin;
     use serde_json::json;
 
     use super::*;
@@ -160,7 +161,7 @@ mod tests {
             description: "Read a file".into(),
             parameters: json!({"type": "object"}),
             strict: false,
-            origin: crate::tool::ToolOrigin::Bundled,
+            origin: ToolOrigin::Bundled,
         }];
         assert!(estimate_tool_definition_tokens(&tools) > 0);
         assert!(estimate_provider_request_tokens(std::slice::from_ref(&message), &tools) > 26);

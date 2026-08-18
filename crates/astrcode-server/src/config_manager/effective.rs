@@ -571,6 +571,10 @@ fn merge_runtime_section(base: &mut RuntimeSection, overlay: RuntimeSection) {
 mod tests {
     use super::*;
 
+    fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
+        resolve_api_key_with_policy(raw, true, &process_env_lookup)
+    }
+
     #[test]
     fn test_resolve_api_key_env_prefix() {
         let env = |key: &str| (key == "TEST_API_KEY").then(|| "sk-test-123".to_string());

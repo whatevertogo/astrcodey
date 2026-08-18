@@ -9,7 +9,7 @@ use tokio::{
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRAME_HEADER_BYTES: usize = 32;
 
-pub(crate) fn frame_payload(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
+pub fn frame_payload(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     if payload.len() > MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge {
             size: payload.len(),
@@ -21,7 +21,7 @@ pub(crate) fn frame_payload(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     Ok(frame)
 }
 
-pub(crate) fn parse_frame_header(header: &[u8]) -> Result<usize, FrameError> {
+pub fn parse_frame_header(header: &[u8]) -> Result<usize, FrameError> {
     let header = header.strip_suffix(b"\n").unwrap_or(header);
     if header.is_empty() {
         return Err(FrameError::InvalidHeader("empty frame header".into()));

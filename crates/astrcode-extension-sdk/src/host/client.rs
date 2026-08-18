@@ -23,7 +23,7 @@ use crate::{
         HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
-    session::{
+    wire::session::{
         HostCreateRootSessionRequest, HostCreateSessionRequest, HostForkRootSessionRequest,
         HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionEventsPageRequest,
         HostSessionTargetRequest, HostSubmitTurnRequest,
@@ -65,8 +65,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        extension::ExtensionHttpMethod, host::internal, session::SessionToolSelectionDto,
-        wire::WireErrorCode,
+        extension::ExtensionHttpMethod,
+        host::internal,
+        wire::{WireErrorCode, session::SessionToolSelectionDto},
     };
 
     struct RecordingInvoker {

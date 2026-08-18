@@ -364,7 +364,7 @@ mod host_tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{session::SessionToolSelectionDto, wire::ErrorPayload};
+    use crate::wire::{ErrorPayload, session::SessionToolSelectionDto};
 
     struct MockHost {
         marker: &'static str,
@@ -1226,7 +1226,7 @@ mod host_tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(state.phase, crate::session::SessionPhaseDto::Idle);
+        assert_eq!(state.phase, crate::wire::session::SessionPhaseDto::Idle);
 
         assert_eq!(*handler.parents.lock().unwrap(), vec![None]);
 
