@@ -169,6 +169,9 @@ impl WritePump {
 /// Cloneable request surface for a running [`PeerDriver`].
 pub struct PeerHandle {
     state: Arc<Ready>,
+    /// Host operation catalog received during the handshake; only populated on the
+    /// worker side — the host never retains a copy.
+    host_operations: Arc<[String]>,
     command_tx: mpsc::Sender<DriverCommand>,
     control_tx: mpsc::UnboundedSender<ControlCommand>,
     next_request_id: Arc<AtomicU64>,
@@ -180,6 +183,7 @@ impl Clone for PeerHandle {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
+            host_operations: Arc::clone(&self.host_operations),
             command_tx: self.command_tx.clone(),
             control_tx: self.control_tx.clone(),
             next_request_id: Arc::clone(&self.next_request_id),
@@ -191,8 +195,7 @@ impl Clone for PeerHandle {
 
 impl PeerHandle {
     pub fn host_supports(&self, operation: &str) -> bool {
-        self.state
-            .host_operations
+        self.host_operations
             .iter()
             .any(|supported| supported == operation)
     }
@@ -484,7 +487,11 @@ pub struct PeerDriver<T> {
     inbound_permits: Arc<Semaphore>,
 }
 
-pub(crate) fn runtime_parts<T>(transport: Arc<T>, state: Ready) -> (PeerHandle, PeerDriver<T>)
+pub(crate) fn runtime_parts<T>(
+    transport: Arc<T>,
+    state: Ready,
+    host_operations: Vec<String>,
+) -> (PeerHandle, PeerDriver<T>)
 where
     T: FrameTransport + 'static,
 {
@@ -495,6 +502,7 @@ where
     let outbound_permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
     let handle = PeerHandle {
         state: Arc::clone(&state),
+        host_operations: host_operations.into(),
         command_tx,
         control_tx,
         next_request_id: Arc::new(AtomicU64::new(1)),

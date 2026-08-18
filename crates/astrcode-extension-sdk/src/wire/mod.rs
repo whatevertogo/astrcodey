@@ -37,7 +37,7 @@ pub use operation::{
 };
 pub use peer::{
     HostInitialization, HostInitialized, Peer, PeerError, Ready, Uninitialized,
-    WorkerInitialization, WorkerInitialized,
+    WorkerInitialization, WorkerInitialized, WorkerReady,
 };
 pub use peer_runtime::{
     InboundInvoke, InvocationCancellation, InvocationResponse, InvokeError, ModelEventStream,

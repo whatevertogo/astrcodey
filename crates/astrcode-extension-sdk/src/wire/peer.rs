@@ -26,7 +26,13 @@ pub struct WorkerInitialized {
 
 pub struct Ready {
     pub(crate) negotiated_features: BTreeSet<FeatureName>,
-    pub(crate) host_operations: Vec<String>,
+}
+
+/// Worker-side ready state: the sole owner of the host operation catalog
+/// received during the handshake. The host side never retains a copy.
+pub struct WorkerReady {
+    negotiated_features: BTreeSet<FeatureName>,
+    host_operations: Vec<String>,
 }
 
 pub struct HostInitialization {
@@ -239,7 +245,6 @@ where
             transport,
             state: Ready {
                 negotiated_features: state.negotiated_features,
-                host_operations: Vec::new(),
             },
         })
     }
@@ -249,7 +254,10 @@ impl<T> Peer<T, WorkerInitialized>
 where
     T: FrameTransport + 'static,
 {
-    pub async fn accept_activation<F, Fut>(self, handler: F) -> Result<Peer<T, Ready>, PeerError>
+    pub async fn accept_activation<F, Fut>(
+        self,
+        handler: F,
+    ) -> Result<Peer<T, WorkerReady>, PeerError>
     where
         F: FnOnce(serde_json::Value) -> Fut,
         Fut: std::future::Future<Output = Result<(), ErrorPayload>>,
@@ -288,7 +296,7 @@ where
         let Peer { transport, state } = self;
         Ok(Peer {
             transport,
-            state: Ready {
+            state: WorkerReady {
                 negotiated_features: state.negotiated_features,
                 host_operations: state.host_operations,
             },
@@ -302,7 +310,27 @@ where
 {
     /// Split a ready peer into a cloneable call handle and its explicitly-owned I/O driver.
     pub fn into_runtime(self) -> (crate::wire::PeerHandle, crate::wire::PeerDriver<T>) {
-        crate::wire::peer_runtime::runtime_parts(self.transport, self.state)
+        crate::wire::peer_runtime::runtime_parts(self.transport, self.state, Vec::new())
+    }
+}
+
+impl<T> Peer<T, WorkerReady>
+where
+    T: FrameTransport + 'static,
+{
+    /// Split a ready worker peer into a cloneable call handle and its explicitly-owned I/O driver.
+    pub fn into_runtime(self) -> (crate::wire::PeerHandle, crate::wire::PeerDriver<T>) {
+        let WorkerReady {
+            negotiated_features,
+            host_operations,
+        } = self.state;
+        crate::wire::peer_runtime::runtime_parts(
+            self.transport,
+            Ready {
+                negotiated_features,
+            },
+            host_operations,
+        )
     }
 }
 
