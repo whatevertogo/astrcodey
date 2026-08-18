@@ -16,10 +16,11 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::wire::ExtensionCapability;
 
-/// 扩展专有配置的包装类型。
+/// Wrapper type for extension-specific configuration.
 ///
-/// 包装用户 `config.toml` 中 `extensions.<id>` 下的扩展配置，
-/// 扩展在 `start()` 时通过 `deserialize::<T>()` 获取。配置变化会创建新的扩展实例。
+/// Wraps the extension configuration under `extensions.<id>` in the user's `config.toml`;
+/// extensions obtain it at `start()` via `deserialize::<T>()`. Configuration changes create a
+/// new extension instance.
 #[derive(Clone, Debug)]
 pub struct ExtensionConfig {
     extension_id: Arc<str>,
@@ -44,9 +45,9 @@ impl ExtensionConfig {
         }
     }
 
-    /// 将配置反序列化为具体类型。
+    /// Deserialize the configuration into a concrete type.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```ignore
     /// #[derive(Deserialize)]
@@ -74,7 +75,7 @@ impl ExtensionConfig {
         }
     }
 
-    /// 如果配置为 `null` 或空对象 `{}` 则返回 `true`。
+    /// Returns `true` if the configuration is `null` or an empty object `{}`.
     pub fn is_empty(&self) -> bool {
         self.value.is_null()
             || self
@@ -107,16 +108,16 @@ impl ExtensionConfigError {
     }
 }
 
-/// 插件退出原因。
+/// Reason an extension stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// 同一个扩展 id 被重新加载的新实例替换。
+    /// A new instance replaced the same extension id on reload.
     Reload,
-    /// 配置关闭或 source 不再提供该扩展。
+    /// Configuration disabled it, or the source no longer provides the extension.
     Disabled,
-    /// 宿主进程关闭。
+    /// The host process is shutting down.
     Shutdown,
-    /// `start` 失败或超时，回滚已经取得的资源。
+    /// `start` failed or timed out; already-acquired resources were rolled back.
     StartupFailed,
 }
 
@@ -136,10 +137,11 @@ impl ExtensionStopContext {
     }
 }
 
-/// 宿主管理的插件代际任务集合。
+/// Host-managed set of extension-generation tasks.
 ///
-/// 扩展只能在 [`super::ExtensionStartContext`] 中取得它。普通 handler 应把工作提交给
-/// 启动阶段创建的 worker，而不是让 turn/call 上下文产生代际任务。
+/// Extensions can only obtain it from [`super::ExtensionStartContext`]. Regular handlers should
+/// submit work to workers created during startup rather than letting turn/call contexts spawn
+/// generation tasks.
 #[derive(Clone)]
 pub struct ExtensionTasks {
     extension_id: Arc<str>,
@@ -174,7 +176,7 @@ struct ExtensionTask {
     abort_handle: AbortHandle,
 }
 
-/// `run_to_completion` 无法启动或取得结果时的结构化错误。
+/// Structured error when `run_to_completion` cannot start or obtain a result.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ExtensionTaskError {
     #[error("extension {extension_id} is shutting down; task `{task}` was not started")]
@@ -237,10 +239,11 @@ impl ExtensionTasks {
         });
     }
 
-    /// 登记由扩展生命周期托管的后台任务。
+    /// Register a background task managed by the extension lifecycle.
     ///
-    /// 宿主可在扩展启动阶段暂停任务，直到 registration 对其他运行时组件可见。
-    /// `Extension::start()` 不应等待这里登记的任务完成。
+    /// The host may suspend tasks during extension startup until the registration is visible to
+    /// other runtime components. `Extension::start()` should not wait for tasks registered here
+    /// to complete.
     pub fn spawn<F>(&self, name: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -308,10 +311,11 @@ impl ExtensionTasks {
         );
     }
 
-    /// 运行不可取消的持久化临界区，并等待其结果。
+    /// Run an uncancellable persistent critical section and wait for its result.
     ///
-    /// 与 [`Self::spawn`] 不同，任务即使在扩展仍处于 suspended 状态也会立即开始。调用方被取消
-    /// 只会放弃等待结果；任务仍由扩展生命周期持有，并在 retirement 时完成后才允许继续。
+    /// Unlike [`Self::spawn`], the task starts immediately even while the extension is still
+    /// suspended. Cancelling the caller only abandons waiting for the result; the task remains
+    /// held by the extension lifecycle and must finish before retirement may proceed.
     pub async fn run_to_completion<F, T>(
         &self,
         name: impl Into<String>,
@@ -403,11 +407,14 @@ impl ExtensionTasks {
         });
     }
 
-    /// 等待所有托管任务退出，超时后只中止普通后台任务，并短暂等待回收。
+    /// Wait for all managed tasks to exit; after the timeout, only ordinary background tasks
+    /// are aborted, with a brief wait for reaping.
     ///
-    /// must-finish 任务会在超过共享预算后继续等待；普通后台任务只使用同一个绝对截止时间的
-    /// 剩余预算。调用方应先调用 [`Self::cancel`]，使等待期间不能再登记新任务。
-    /// 仅在任务集合确实清空时返回 `true`；`false` 表示中止后仍有后台任务未回收。
+    /// Must-finish tasks keep waiting after the shared budget is exhausted; ordinary background
+    /// tasks only use the remaining budget of the same absolute deadline. Callers should call
+    /// [`Self::cancel`] first so no new tasks can be registered while waiting.
+    /// Returns `true` only when the task set is actually empty; `false` means background tasks
+    /// remain unreaped after aborting.
     pub(crate) async fn wait(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         if !self
@@ -674,7 +681,7 @@ mod tests {
     async fn wait_aborts_task_that_ignores_shutdown() {
         let tasks = ExtensionTasks::new("ext");
         tasks.spawn("stuck", async move {
-            // 永不观察共享 shutdown token,只有被 abort 才会停止。
+            // Never observes the shared shutdown token; only an abort stops it.
             loop {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -702,8 +709,9 @@ mod tests {
 
     #[tokio::test]
     async fn wait_absorbs_panicking_task() {
-        // 注意:被 abort 的 panic 仍会经默认 panic hook 打到 stderr,这是预期噪声,
-        // 此处只验证 wait 不会把 panic 传播给调用方。
+        // Note: the panic from the abort still reaches stderr through the default panic hook;
+        // that is expected noise. This test only verifies that `wait` does not propagate the
+        // panic to callers.
         let tasks = ExtensionTasks::new("ext");
         tasks.spawn("boom", async {
             panic!("extension task exploded");
@@ -735,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn operations_recover_from_poisoned_state() {
         let tasks = ExtensionTasks::new("ext");
-        // 手动毒化内部 mutex:一个 OS 线程持锁后 panic。
+        // Manually poison the internal mutex: an OS thread panics while holding the lock.
         let state = tasks.state.clone();
         let join = std::thread::spawn(move || {
             let _guard = state.lock().unwrap();
@@ -743,7 +751,8 @@ mod tests {
         });
         assert!(join.join().is_err(), "helper thread should have panicked");
 
-        // 尽管已毒化,所有经由 lock_state() 的操作都应恢复,而非 panic。
+        // Even though it is poisoned, all operations going through lock_state() should recover
+        // rather than panic.
         tasks.spawn("after-poison", std::future::pending());
         assert_eq!(tasks.lock_state().tasks.len(), 1);
         tasks.cancel();

@@ -93,6 +93,7 @@ impl Extension for MemoryExtension {
         let small_model_available = ctx
             .host()
             .models()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?
             .small_available()
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
         if !small_model_available {

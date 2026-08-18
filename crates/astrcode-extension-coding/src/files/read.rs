@@ -36,6 +36,7 @@ pub(super) struct ReadHandler;
 #[async_trait::async_trait]
 impl ToolHandler for ReadHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        reject_max_bytes(context.raw_arguments())?;
         let args: ReadArgs = context.arguments()?;
         validate(&args)?;
         Ok(ToolPlan::new([ResourceAccess::read_file(resolve_path(
@@ -45,11 +46,23 @@ impl ToolHandler for ReadHandler {
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        reject_max_bytes(context.raw_arguments())?;
         let args: ReadArgs = context.arguments()?;
         validate(&args)?;
         let result = read_workspace(&context, &args).await?;
         Ok(result.into())
     }
+}
+
+fn reject_max_bytes(arguments: &serde_json::Value) -> Result<(), ExtensionError> {
+    if arguments.get("maxBytes").is_some() {
+        return Err(invalid_input(
+            "maxBytes is not a read argument",
+            "use maxChars for workspace files; use read_tool_result with artifactId and maxBytes \
+             for persisted tool results",
+        ));
+    }
+    Ok(())
 }
 
 async fn read_workspace(
@@ -234,5 +247,31 @@ pub(super) fn definition() -> ToolDefinition {
             "required": ["path"],
             "additionalProperties": false
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_bytes_reports_the_correct_reader_and_unit() {
+        let error = reject_max_bytes(&serde_json::json!({
+            "path": "result-deadbeef.txt",
+            "maxBytes": 30_000
+        }))
+        .expect_err("read must not reinterpret a byte budget as characters");
+
+        let ExtensionError::InvalidInput {
+            message,
+            hint: Some(hint),
+            ..
+        } = error
+        else {
+            panic!("expected structured invalid input");
+        };
+        assert!(message.contains("maxBytes"));
+        assert!(hint.contains("maxChars"));
+        assert!(hint.contains("read_tool_result"));
     }
 }

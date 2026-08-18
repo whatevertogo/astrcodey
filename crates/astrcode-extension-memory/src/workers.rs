@@ -386,7 +386,13 @@ async fn run_pipeline_worker(
             return;
         },
     };
-    let models = host.models();
+    let models = match host.models() {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::warn!(%error, "memory pipeline: models unavailable");
+            return;
+        },
+    };
 
     loop {
         let work = tokio::select! {

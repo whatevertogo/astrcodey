@@ -151,15 +151,15 @@ capability。s5r worker 侧的对等入口是 `WorkerInvocationContext::defer_co
 | 动态发现 | `ToolDiscoveryContext` / `CommandDiscoveryContext` | workspace 与 discovery generation |
 | Hook | `PreToolUseContext`、`PostToolUseContext`、`ProviderContext`、`PromptBuildContext`、`CompactContext`、`ContinueAfterStopContext`、`UserMessageEnvelopeContext`、`LifecycleContext` | `ToolInputTransformHandler` 与 `PreToolUseHandler` 共用只读的 `PreToolUseContext`，但前者只变换输入、后者只做 Allow/Ask/Block 准入；其他 context 也只增加所属 hook 的输入 |
 
-`SlashCommand` 是 list、execute、completion 共用的完整声明：参数 schema、idle 要求、completion、priority、transport availability 和 execution owner 只定义一次。命令冲突只比较显式 priority，再用 extension ID/name 确定稳定顺序；runtime 不按某个产品 Extension ID 推断“skill”来源或隐式优先级。普通命令由 extension handler 完成；`Host(SessionCommandKind)` 命令只能由声明 `session_command` capability 的扩展注册，并且 handler 只能返回种类匹配的 `SessionCommandIntent`。server 在 handler 前执行 transport/busy admission，再在同一个 session operation guard 内解释 intent，因此扩展不能重入 operation gate 或复制 Host 状态机。非空 `/name` 始终按命令语法解析；未知或被禁用的命令返回类型化错误，不会降级写成用户消息，只有裸 `/` 仍可作为普通输入。
+`SlashCommand` 是 list、execute、completion 共用的完整声明：参数 schema、idle 要求、completion、priority、transport availability 和 execution owner 只定义一次。命令名在注册期规范化为小写 `[a-z][a-z0-9_-]*`，输入侧用同一套 trim/去斜杠/小写规则匹配。命令冲突只比较显式 priority，再用 extension ID/name 确定稳定顺序；runtime 不按某个产品 Extension ID 推断“skill”来源或隐式优先级。普通命令由 extension handler 完成；`Host(SessionCommandKind)` 命令只能由声明 `session_command` capability 的扩展经 `Registrar::host_command()` 注册，是纯声明：宿主在同一个 session operation guard 内直接解析参数并执行，不存在 extension handler 或 intent 回声。server 在 dispatch 前统一执行 transport/busy admission。非空 `/name` 始终按命令语法解析；未注册的命令按普通文本透传给模型（与 TUI/前端一致），只有显式命令端点（execute API）返回 UnknownCommand。
 
 生产代码不能用 struct literal 构造这些 context；测试在 SDK 依赖启用 `testing` feature 后，
 从 `astrcode_extension_sdk::testing` 使用 builder。
 
 ### 3.4 类型化 host 与 capability
 
-`ctx.host()` 返回当前调用已绑定的 `ExtensionHost`。领域 accessor 返回 owned client；除
-`models()` 外，accessor 本身返回 `Result<Client, HostError>`。特别是
+`ctx.host()` 返回当前调用已绑定的 `ExtensionHost`。领域 accessor 返回 owned client，且都返回
+`Result<Client, HostError>`（`models()` 在 `MainModel`/`SmallModel` 任一 capability 未授权时同样提前失败）。特别是
 `workspace()` 也是 `Result<WorkspaceClient, HostError>`，调用前会区分权限、backend 与 workspace
 上下文缺失。
 
@@ -240,7 +240,7 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 
 | 扩展 ID | Crate | 默认 | 说明 |
 |---------|-------|------|------|
-| `astrcode-coding` | `astrcode-extension-coding` | 启用 | `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` |
+| `astrcode-coding` | `astrcode-extension-coding` | 启用 | `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell`、`shell_poll` |
 | `astrcode-agent-tools` | `astrcode-extension-agent-tools` | 启用 | 子 Agent 委派与发现 |
 | `astrcode-mcp` | `astrcode-extension-mcp` | 启用 | MCP 客户端（stdio/HTTP） |
 | `astrcode-skill` | `astrcode-extension-skill` | 启用 | 斜杠命令 Skill 发现与调度 |

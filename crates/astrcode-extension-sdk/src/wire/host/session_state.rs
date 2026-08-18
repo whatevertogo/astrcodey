@@ -1,4 +1,4 @@
-//! session state 线缆契约与边界常量。
+//! Session-state wire contracts and boundary constants.
 
 
 use serde::{Deserialize, Serialize};

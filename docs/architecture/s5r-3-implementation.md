@@ -2,6 +2,14 @@
 
 Status: Phase 0 implemented
 
+**What S5R is.** S5R is the name of the subprocess extension wire protocol: a disk extension runs
+as a separate process and talks to the host over stdio using decimal-length-prefixed JSON frames.
+The name is the protocol's own (it succeeded the earlier internal s6r line) and is not an acronym
+expanded anywhere in this repository; all S5R-related modules and spans should be read as "the
+subprocess extension protocol". The host half lives in `astrcode-extensions::s5r_ext`, the shared
+wire types in `astrcode-extension-sdk::{s5r, wire}`, and the worker-side runtime in
+`astrcode-extension-worker`.
+
 S5R 3.0 was built as a sequence of mergeable changes on top of the extension authoring API. The
 production composition root now accepts only S5R 3.0. The transitional S5R 2.0 peer and adapters
 were crate-private and have been removed; old on-disk data is rejected at its boundary, not deleted.

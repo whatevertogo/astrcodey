@@ -2,7 +2,9 @@ import type {
   AgentSessionLink,
   AgentSessionUpdate,
   ConversationBlock,
+  SlashCommandInfo,
 } from '../../services/types'
+import { parseSlashCommand } from '../../lib/keybindings'
 
 export function mergeBlock(
   current: ConversationBlock,
@@ -103,8 +105,24 @@ export function commandNoteBlock(message: string): ConversationBlock {
   }
 }
 
-export function isCompactCommand(text: string): boolean {
-  return /^\/compact(?:\s|$)/.test(text.trim())
+/**
+ * 是否为宿主执行的 compact 命令。
+ *
+ * 依据 server 下发的命令元数据判断（`execution.kind === 'host'` +
+ * `command === 'compact_session'`），不再按命令名硬编码：若第三方扩展以更高
+ * priority 遮蔽 `/compact`，此处会正确地把它当普通扩展命令处理。
+ */
+export function isCompactCommand(
+  text: string,
+  commands: SlashCommandInfo[]
+): boolean {
+  const parsed = parseSlashCommand(text)
+  if (!parsed || !parsed.name) return false
+  const command = commands.find((c) => c.name.toLowerCase() === parsed.name)
+  return (
+    command?.execution.kind === 'host' &&
+    command.execution.command === 'compact_session'
+  )
 }
 
 export async function withTimeout<T>(

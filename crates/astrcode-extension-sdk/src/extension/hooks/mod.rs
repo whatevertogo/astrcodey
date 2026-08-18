@@ -8,7 +8,7 @@ mod types;
 
 pub use commands::{
     CommandAvailability, CommandCompletionItem, CommandCompletions, CommandExecution,
-    ExtensionCommandResult, SessionCommandIntent, SessionCommandKind, SlashCommand,
+    ExtensionCommandResult, SessionCommandKind, SlashCommand,
 };
 pub use contexts::{
     CommandCompletionContext, CommandContext, CommandDiscoveryContext, ContinueAfterStopContext,

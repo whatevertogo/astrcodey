@@ -43,7 +43,7 @@ pub mod types {
     pub use astrcode_core::types::{SessionId, ToolCallId, project_key_from_path};
 }
 
-/// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
+/// Tool Gate permission types (extensions only read `PreToolUseContext::approval_mode`).
 pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
@@ -92,11 +92,10 @@ pub mod prelude {
             PreparedProviderEffect, PromptBuildContext, PromptBuildHandler, PromptContributions,
             ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderEvent,
             ProviderHandler, ProviderRequestId, ProviderResult, ProviderSettlementContext,
-            Registrar, SessionCommandIntent, SessionCommandKind, SlashCommand,
-            StatusItemUpdatePayload, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-            ToolDiscoveryHandler, ToolHandler, ToolInputTransformHandler, ToolInputTransformResult,
-            ToolPlanContext, TransportFeature, UserMessageEnvelopeContext,
-            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            Registrar, SessionCommandKind, SlashCommand, StatusItemUpdatePayload, StopReason,
+            ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler,
+            ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext, TransportFeature,
+            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
         host::{
             ExtensionHost, ExtensionHttpClient, HostConfigureSessionToolsOutput,

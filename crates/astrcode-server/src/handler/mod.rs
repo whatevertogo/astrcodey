@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use astrcode_core::types::*;
 use astrcode_protocol::commands::UiResponseValue;
-use astrcode_session::compaction::ManualCompactionOutcome;
 
 use crate::{
     bootstrap::ServerRuntime, session_command_service::SessionCommandService,
@@ -19,7 +18,6 @@ use crate::{
 };
 
 mod actor;
-mod compact;
 mod model_selection;
 mod notifications;
 mod prompt;
@@ -103,28 +101,6 @@ impl CommandHandler {
             .session_manager()
             .sync_durable_events(session.id())
             .await;
-        Ok(())
-    }
-
-    /// 设置当前会话使用的主模型，格式为 `profile/model`。
-    async fn set_model(&self, model_id: String) -> Result<(), HandlerError> {
-        let notification = match self.model_selection.set_main_model(&model_id).await {
-            Ok(notification) => notification,
-            Err(HandlerError::InvalidRequest(message))
-                if message.starts_with("Invalid model selection:") =>
-            {
-                self.send_error(
-                    -32603,
-                    "Invalid format. Use `profile/model` or `/model` for interactive selection.",
-                );
-                return Ok(());
-            },
-            Err(error) => return Err(error),
-        };
-
-        self.configure_focused_session_model().await?;
-
-        self.event_bus.send_notification(notification);
         Ok(())
     }
 

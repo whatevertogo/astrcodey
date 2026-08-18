@@ -33,7 +33,7 @@ impl std::fmt::Display for ModeId {
 }
 
 /// Tools blocked in plan mode.
-const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell"];
+const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell", "shell_poll"];
 
 /// Declarative definition of an agent running mode.
 #[derive(Debug, Clone)]
@@ -128,6 +128,7 @@ mod tests {
         let plan = catalog.get(&ModeId::plan()).unwrap();
         assert!(plan.restricted_tools.contains("write"));
         assert!(plan.restricted_tools.contains("shell"));
+        assert!(plan.restricted_tools.contains("shell_poll"));
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub(super) fn handlers() -> Vec<(ToolDefinition, Arc<dyn ToolHandler>)> {
 struct GlobArgs {
     pattern: String,
     #[serde(default)]
-    root: Option<String>,
+    path: Option<String>,
     #[serde(default)]
     max_results: Option<usize>,
     #[serde(default)]
@@ -53,7 +53,7 @@ impl ToolHandler for GlobHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: GlobArgs = context.arguments()?;
         validate_glob(&args)?;
-        let root = args.root.as_deref().unwrap_or(".");
+        let root = args.path.as_deref().unwrap_or(".");
         Ok(ToolPlan::new([ResourceAccess::search_file(
             resolve_path(context.working_dir(), Path::new(root)),
             true,
@@ -70,7 +70,7 @@ impl ToolHandler for GlobHandler {
             .workspace()?
             .glob(HostWorkspaceGlobRequest {
                 pattern: args.pattern.clone(),
-                root: args.root.clone(),
+                root: args.path.clone(),
                 offset,
                 max_matches: Some(max_results),
                 respect_gitignore: args.respect_gitignore,
@@ -153,6 +153,7 @@ struct GrepHandler;
 #[async_trait::async_trait]
 impl ToolHandler for GrepHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        reject_command_flags(context.raw_arguments())?;
         let args: GrepArgs = context.arguments()?;
         validate_grep(&args)?;
         Ok(ToolPlan::new([ResourceAccess::search_file(
@@ -165,6 +166,7 @@ impl ToolHandler for GrepHandler {
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        reject_command_flags(context.raw_arguments())?;
         let args: GrepArgs = context.arguments()?;
         validate_grep(&args)?;
         let pattern = host_pattern(&args);
@@ -294,6 +296,24 @@ fn validate_grep(args: &GrepArgs) -> Result<(), ExtensionError> {
     Ok(())
 }
 
+fn reject_command_flags(arguments: &serde_json::Value) -> Result<(), ExtensionError> {
+    let Some(flag) = arguments
+        .as_object()
+        .and_then(|arguments| arguments.keys().find(|name| name.starts_with('-')))
+    else {
+        return Ok(());
+    };
+    let hint = match flag.as_str() {
+        "-n" => "omit -n; grep results always include line numbers",
+        "-C" => "replace -C with equal beforeContext and afterContext values",
+        _ => "use the structured grep fields declared in the tool schema",
+    };
+    Err(invalid_input(
+        format!("command-line flag {flag} is not a grep argument"),
+        hint,
+    ))
+}
+
 fn validate_page_size(value: Option<usize>, name: &str) -> Result<(), ExtensionError> {
     if value.is_some_and(|value| value == 0 || value > MAX_SEARCH_PAGE_SIZE) {
         return Err(invalid_input(
@@ -382,7 +402,7 @@ fn glob_definition() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Glob pattern such as '*.rs' or 'src/**/*.ts'." },
-                "root": { "type": "string", "description": "Search root, default working directory." },
+                "path": { "type": "string", "description": "Search directory, default working directory." },
                 "maxResults": { "type": "integer", "minimum": 1, "maximum": 1000 },
                 "offset": { "type": "integer", "minimum": 0 },
                 "respectGitignore": { "type": "boolean" },
@@ -398,8 +418,9 @@ fn glob_definition() -> ToolDefinition {
 fn grep_definition() -> ToolDefinition {
     ToolDefinition {
         name: "grep".into(),
-        description: "Search file contents by regex or literal text. Use `glob` to find paths. \
-                      Paginate with offset and nextOffset."
+        description: "Search file contents by regex or literal text. Use structured arguments, \
+                      not command-line flags; results always include line numbers. Use `glob` to \
+                      find paths. Paginate with offset and nextOffset."
             .into(),
         strict: true,
         origin: ToolOrigin::Bundled,
@@ -423,5 +444,49 @@ fn grep_definition() -> ToolDefinition {
             "required": ["pattern"],
             "additionalProperties": false
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_arguments_keep_one_contract_and_report_observed_mistakes() {
+        let glob: GlobArgs = serde_json::from_value(serde_json::json!({
+            "pattern": "**/*.rs",
+            "path": "/workspace"
+        }))
+        .expect("canonical path should parse");
+        assert_eq!(glob.path.as_deref(), Some("/workspace"));
+        assert!(
+            serde_json::from_value::<GlobArgs>(serde_json::json!({
+                "pattern": "**/*.rs",
+                "root": "/workspace"
+            }))
+            .is_err(),
+            "retired parameter names must not become a second contract"
+        );
+
+        for (arguments, expected_hint) in [
+            (
+                serde_json::json!({"pattern": "ToolHandler", "-n": true}),
+                "always include line numbers",
+            ),
+            (
+                serde_json::json!({"pattern": "ToolHandler", "-C": 6}),
+                "beforeContext and afterContext",
+            ),
+        ] {
+            let error = reject_command_flags(&arguments)
+                .expect_err("command-line flags must not become a second contract");
+            let ExtensionError::InvalidInput {
+                hint: Some(hint), ..
+            } = error
+            else {
+                panic!("expected structured invalid input");
+            };
+            assert!(hint.contains(expected_hint));
+        }
     }
 }

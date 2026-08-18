@@ -52,6 +52,7 @@ mod supervisor;
 mod tool_adapter;
 mod tool_catalog_cache;
 
+use commands::CommandSurfaceCache;
 pub use commands::{ResolvedCommandSurface, ResolvedSlashCommand, ShadowedSlashCommand};
 pub use custom_event_control::{
     CustomEventConsumerAction, CustomEventConsumerControlError, CustomEventConsumerStatus,
@@ -108,6 +109,7 @@ pub struct ExtensionRunner {
     custom_event_quiescing: Arc<CustomEventQuiescing>,
     custom_event_metrics: CustomEventConsumerMetricsMap,
     shutting_down: AtomicBool,
+    command_surface_cache: CommandSurfaceCache,
 }
 
 /// Immutable registration and handler view for one extension-runtime generation.
@@ -123,6 +125,7 @@ pub(crate) struct ExtensionView {
 }
 
 /// Keybinding and status declarations captured from one stable runtime generation.
+#[derive(Clone)]
 pub struct ExtensionUiContributions {
     pub keybindings: Vec<Keybinding>,
     pub status_items: Vec<StatusItem>,
@@ -498,6 +501,7 @@ impl ExtensionRunner {
             custom_event_quiescing: Arc::new(CustomEventQuiescing::default()),
             custom_event_metrics: CustomEventConsumerMetricsMap::default(),
             shutting_down: AtomicBool::new(false),
+            command_surface_cache: CommandSurfaceCache::default(),
         }
     }
 

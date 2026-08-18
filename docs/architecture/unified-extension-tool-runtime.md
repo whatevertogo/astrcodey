@@ -9,7 +9,7 @@
 
 AstrCode 的工具系统应当只有一个产品概念：**Extension 提供的工具**。
 
-第一方 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep` 和 `shell`
+第一方 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 和 `shell_poll`
 不应继续通过独立的 `astrcode-tools`、`BuiltinToolCatalog` 和 server 专用清理器进入
 session。它们应当成为一个正常的第一方 bundled Extension，与其他 Extension 一样完成：
 
@@ -794,7 +794,7 @@ descendant PID 完成验收，cross-compile 或 Unix 测试不能替代该证据
 Coding Extension 把这些原语组合成：
 
 - `shell` foreground：`start(Pipes)`，写入可选输入并关闭 stdin，随后循环 `read`；
-- `shell` background：`start(Pipes)` + 后续 `status/read`；
+- `shell` background：`start(Pipes)`，后续由 `shell_poll` 调用 `read`；
 - 自动转后台：foreground handle 转为 session-owned handle，不复制进程；
 
 PTY/terminal 没有保留降级实现。`portable-pty` 把 spawn 隐藏在 opaque API 后，Host 无法在 Windows
@@ -992,9 +992,10 @@ process request 固定当次 timeout，新代发布只影响后续 turn。
 | `write`    | 单路径读写，包含可能创建的父目录语义。                                             |
 | `edit`     | 每个目标文件读写；多编辑先收集全部路径再返回一个原子 plan。                        |
 | `patch`    | 解析 patch 后列出全部 create/update/delete/rename 路径；解析不完整即失败。         |
-| `glob`     | 指定 root subtree read。                                                           |
+| `glob`     | 指定 path subtree read。                                                           |
 | `grep`     | 指定 root subtree read。                                                           |
 | `shell`    | process + broad workspace access；除非命令语言已被可靠限制，否则不伪装成精确路径。 |
+| `shell_poll` | 已批准 process 的增量输出读取。                                                  |
 
 ### 11.5 Provider-visible 契约
 
@@ -1674,7 +1675,7 @@ transport 不是统一模型的目的。
 
 astrcode-extension-coding
   → 只依赖 SDK
-  → 注册 read/read_tool_result/write/edit/patch/glob/grep/shell
+  → 注册 read/read_tool_result/write/edit/patch/glob/grep/shell/shell_poll
   → plan 声明资源
   → execute 只调用 scoped HostClient
 

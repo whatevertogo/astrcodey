@@ -55,6 +55,24 @@ const shellDetails = renderToStaticMarkup(shellRenderer.render?.(shellContext))
 assert.match(shellDetails, /timeout.*180s/)
 assert.doesNotMatch(shellDetails, /timeout.*30s/)
 
+const shellPollContext = toolContext(
+  'shell_poll',
+  { shellId: 'process-1', blockUntilMs: 1_000 },
+  { shellId: 'process-1', executionStatus: 'running' },
+  'partial output'
+)
+assert.equal(getToolRenderer(shellPollContext)?.id, 'builtin:shell')
+assert.equal(
+  getToolRenderer(shellPollContext)?.summary?.(shellPollContext),
+  'poll process-1'
+)
+assert.match(
+  renderToStaticMarkup(
+    getToolRenderer(shellPollContext)?.render?.(shellPollContext)
+  ),
+  /poll process-1/
+)
+
 // Presentation intent: an extension tool (no name-matched renderer) declares
 // metadata.presentation and is dispatched to the mapped built-in renderer.
 const intentContext = toolContext(

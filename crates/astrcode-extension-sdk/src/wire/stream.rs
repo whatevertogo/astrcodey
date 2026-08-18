@@ -1,9 +1,10 @@
-//! 模型事件流的 terminal 语义原语。
+//! Terminal-semantics primitives for the model event stream.
 //!
-//! `TerminalStream` 是 `ModelStream`（sdk，进程内）与 `PeerStream`（wire）共享的
-//! 包装：terminal 事件恰好产出一次，之后恒为 `None`；生产端在 terminal 之前
-//! 关闭时，从 `close_error` 槽取错误合成一次 `Failed`（槽为空则合成
-//! `StreamClosed`）。两边各自叠加传输特有的取消与观测逻辑。
+//! `TerminalStream` is the wrapper shared by `ModelStream` (SDK, in-process) and `PeerStream`
+//! (wire): a terminal event is produced exactly once, after which it always yields `None`; when
+//! the producer closes before a terminal event, an error is taken from the `close_error` slot to
+//! synthesize a single `Failed` (or `StreamClosed` when the slot is empty). Each side layers its
+//! own transport-specific cancellation and observation logic on top.
 
 use std::{
     pin::Pin,

@@ -1,4 +1,5 @@
-//! Host 侧线缆 DTO：请求/响应契约按域拆分在子模块，此处统一 re-export。
+//! Host-side wire DTOs: request/response contracts are split into submodules by domain and
+//! re-exported here.
 
 use serde::{Deserialize, Serialize};
 

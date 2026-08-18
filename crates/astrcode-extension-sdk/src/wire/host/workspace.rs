@@ -1,4 +1,4 @@
-//! workspace 线缆契约与边界常量。
+//! Workspace wire contracts and boundary constants.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ use super::{
     deserialize_optional_bounded_utf8, serialize_bounded_utf8,
 };
 
-/// `astrcode.workspace.read` 的线缆请求。
+/// Wire request for `astrcode.workspace.read`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceReadRequest {
@@ -80,7 +80,7 @@ where
     }
 }
 
-/// `astrcode.workspace.read` 的线缆响应。
+/// Wire response for `astrcode.workspace.read`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostWorkspaceReadOutput {
@@ -102,7 +102,7 @@ pub enum HostWorkspaceReadOutput {
     },
 }
 
-/// `astrcode.workspace.write` 的线缆请求。
+/// Wire request for `astrcode.workspace.write`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceWriteRequest {
@@ -112,7 +112,7 @@ pub struct HostWorkspaceWriteRequest {
     pub create_dirs: bool,
 }
 
-/// `astrcode.workspace.write` 的线缆响应。
+/// Wire response for `astrcode.workspace.write`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceWriteOutput {
@@ -189,7 +189,7 @@ pub struct HostWorkspaceApplyPatchOutput {
     pub changes: Vec<HostWorkspacePatchChange>,
 }
 
-/// `astrcode.workspace.edit` 的线缆请求。
+/// Wire request for `astrcode.workspace.edit`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceEditRequest {
@@ -213,7 +213,7 @@ pub struct HostWorkspaceTextEdit {
     pub replace_all: bool,
 }
 
-/// `astrcode.workspace.edit` 的线缆响应。
+/// Wire response for `astrcode.workspace.edit`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceEditOutput {

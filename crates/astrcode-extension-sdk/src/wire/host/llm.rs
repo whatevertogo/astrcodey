@@ -1,4 +1,4 @@
-//! LLM 宿主能力线缆契约。
+//! Wire contracts for the LLM host capability.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -1,6 +1,6 @@
 //! Markdown frontmatter splitting for extension-defined documents.
 
-/// 统一换行符（CRLF/CR → LF）并移除 BOM，供 frontmatter 分割前使用。
+/// Normalize line endings (CRLF/CR → LF) and strip the BOM, for use before frontmatter splitting.
 pub fn normalize_markdown(content: &str) -> String {
     content
         .trim_start_matches('\u{feff}')

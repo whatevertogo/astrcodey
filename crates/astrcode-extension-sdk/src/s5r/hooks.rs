@@ -1,9 +1,10 @@
-//! S5R hook 调用的类型化 wire 契约。
+//! Typed wire contracts for S5R hook invocations.
 //!
-//! 输入 DTO 是 hook 事件 `input` 字段的唯一数据源:宿主在
-//! `crates/astrcode-extensions/src/s5r_ext/mod.rs` 序列化它们,worker 侧类型化 handler
-//! 反序列化同一类型;结果转换把 SDK 的 hook 结果枚举映射为宿主 `s5r_handler` 解析器
-//! 接受的 `HandlerResult` effect/data 形状。
+//! The input DTOs are the single source of truth for a hook event's `input` field: the host
+//! serializes them in `crates/astrcode-extensions/src/s5r_ext/mod.rs`, and the typed handlers on
+//! the worker side deserialize the same types; the result conversions map the SDK's hook result
+//! enums onto the `HandlerResult` effect/data shapes accepted by the host's `s5r_handler`
+//! parsers.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use crate::{
     wire::WireErrorCode,
 };
 
-/// `pre_tool_use` 与 `tool_input_transform` hook 的 wire 输入。
+/// Wire input for the `pre_tool_use` and `tool_input_transform` hooks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUseHookInput {
@@ -33,7 +34,7 @@ pub struct ToolUseHookInput {
     pub available_tools: Vec<ToolDefinition>,
 }
 
-/// `post_tool_use` hook 的 wire 输入。
+/// Wire input for the `post_tool_use` hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostToolUseHookInput {
@@ -47,7 +48,7 @@ pub struct PostToolUseHookInput {
     pub is_error: bool,
 }
 
-/// `before_provider_request` 与 `after_provider_response` hook 的 wire 输入。
+/// Wire input for the `before_provider_request` and `after_provider_response` hooks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderHookInput {
@@ -58,7 +59,8 @@ pub struct ProviderHookInput {
     pub messages: Vec<LlmMessage>,
 }
 
-/// `provider_contribution` hook 的 wire 输入;`acknowledge` 只在 durable provider 成功后投递。
+/// Wire input for the `provider_contribution` hook; `acknowledge` is only delivered after
+/// durable provider success.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderContributionHookInput {
@@ -78,7 +80,7 @@ pub enum ProviderContributionHookInput {
     },
 }
 
-/// `continue_after_stop` hook 的 wire 输入。
+/// Wire input for the `continue_after_stop` hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinueAfterStopHookInput {
@@ -90,7 +92,7 @@ pub struct ContinueAfterStopHookInput {
     pub continuations_this_turn: u32,
 }
 
-/// `prompt_build` hook 的 wire 输入。
+/// Wire input for the `prompt_build` hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptBuildHookInput {
@@ -99,7 +101,7 @@ pub struct PromptBuildHookInput {
     pub model: ModelSelection,
 }
 
-/// `pre_compact` hook 的 wire 输入。
+/// Wire input for the `pre_compact` hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreCompactHookInput {
@@ -112,7 +114,7 @@ pub struct PreCompactHookInput {
     pub retained_file_limit: usize,
 }
 
-/// `post_compact` 通知 hook 的 wire 输入。
+/// Wire input for the `post_compact` notification hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostCompactHookInput {
@@ -126,7 +128,7 @@ pub struct PostCompactHookInput {
     pub summary: String,
 }
 
-/// 通用 lifecycle hook(`session_start`、`turn_end` 等)的 wire 输入。
+/// Wire input for generic lifecycle hooks (`session_start`, `turn_end`, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleHookInput {
@@ -181,7 +183,8 @@ impl From<PostToolUseResult> for HandlerResult {
             PostToolUseResult::Block { reason } => {
                 Self::effect(HandlerEffect::Block, json!({ "reason": reason }))
             },
-            // 宿主只读取 `data.content`;`is_error` 等结构化字段由宿主保留,不能由 hook 覆盖。
+            // The host only reads `data.content`; structured fields such as `is_error` are
+            // preserved by the host and cannot be overridden by the hook.
             PostToolUseResult::ModifyResult { content } => {
                 Self::effect(HandlerEffect::ToolOutcome, json!({ "content": content }))
             },
@@ -219,8 +222,9 @@ impl From<ContinueAfterStopResult> for HandlerResult {
     }
 }
 
-/// `PreCompactResult::Block` 只存在于 in-process 契约;S5R 宿主不接受该 effect,
-/// 因此在 worker 边界提前失败而不是发出宿主必然拒绝的结果。
+/// `PreCompactResult::Block` exists only in the in-process contract; S5R hosts do not accept
+/// that effect, so it fails early at the worker boundary rather than emitting a result the host
+/// would necessarily reject.
 impl TryFrom<PreCompactResult> for HandlerResult {
     type Error = ErrorPayload;
 
@@ -244,7 +248,8 @@ impl TryFrom<PreCompactResult> for HandlerResult {
     }
 }
 
-/// `prompt_build` 结果的 wire 映射:空贡献折叠为 `ok`,避免发送无语义的 effect。
+/// Wire mapping for `prompt_build` results: empty contributions collapse to `ok`, avoiding a
+/// meaningless effect on the wire.
 pub fn prompt_contributions_to_wire(
     contributions: PromptContributions,
 ) -> Result<HandlerResult, ErrorPayload> {
@@ -273,7 +278,8 @@ pub fn prompt_contributions_to_wire(
     ))
 }
 
-/// `provider_contribution` prepare 结果的 wire 映射;`acknowledge` 阶段固定返回 `ok`。
+/// Wire mapping for `provider_contribution` prepare results; the `acknowledge` phase always
+/// returns `ok`.
 pub fn provider_contribution_to_wire(
     contribution: Option<ProviderContributionData>,
 ) -> Result<HandlerResult, ErrorPayload> {
@@ -304,8 +310,10 @@ mod tests {
         json!({ "profile_name": "default", "model": "model-x", "provider_kind": "openai" })
     }
 
-    // 输入 DTO 是宿主序列化与 worker 反序列化的共同类型;这里的字面 JSON 钉住线格式本身
-    // (字段名/枚举 tag),`deny_unknown_fields` + 回环断言使任一侧形状漂移都在测试期暴露。
+    // The input DTOs are the shared type between host serialization and worker
+    // deserialization; the literal JSON here pins the wire format itself (field names/enum
+    // tags), and `deny_unknown_fields` plus round-trip assertions surface shape drift on either
+    // side at test time.
     #[test]
     fn hook_inputs_mirror_host_payloads() {
         let mut tool_use_json = json!({
@@ -325,7 +333,8 @@ mod tests {
         let tool_use: ToolUseHookInput = serde_json::from_value(tool_use_json.clone()).unwrap();
         assert_eq!(tool_use.tool_name, "read");
         assert_eq!(tool_use.available_tools.len(), 1);
-        // 反序列化接受的缺省字段在序列化时会物化(宿主发出的形状即 DTO 序列化形状)。
+        // Fields defaulted during deserialization become materialized when serialized (the
+        // shape the host emits is the DTO's serialized shape).
         tool_use_json["available_tools"][0]["strict"] = json!(false);
         assert_eq!(serde_json::to_value(&tool_use).unwrap(), tool_use_json);
 
@@ -436,7 +445,8 @@ mod tests {
         assert_eq!(post_compact.post_tokens, 50);
     }
 
-    // 结果映射的期望值与 `astrcode-extensions/src/s5r_handler.rs` 各 parse_* 函数一一对应。
+    // The expected values of the result mappings correspond one-to-one with the parse_*
+    // functions in `astrcode-extensions/src/s5r_handler.rs`.
     #[test]
     fn hook_results_map_to_host_parseable_effects() {
         assert_eq!(

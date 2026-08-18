@@ -1,4 +1,13 @@
-//! 磁盘 S5R 3.0 子进程扩展。
+//! Host-side runtime for disk extensions.
+//!
+//! A disk extension ships as an executable that speaks the S5R 3.0 subprocess
+//! protocol (stdio, decimal-length-prefixed JSON frames). This module owns the
+//! host half of that protocol: process supervision, the peer session state
+//! machine, and the adapter that presents the remote extension as the same
+//! in-process [`Extension`] contracts bundled extensions implement.
+//!
+//! See `astrcode-extension-sdk::s5r` for the shared protocol types and
+//! `docs/architecture/s5r-3-implementation.md` for the protocol decisions.
 
 mod session_support;
 mod v3_session;

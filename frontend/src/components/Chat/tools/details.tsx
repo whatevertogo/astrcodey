@@ -146,6 +146,7 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const args = toolArgs(block)
   const meta = toolMeta(block)
   const command = stringValue(meta, 'command') || stringValue(args, 'command')
+  const shellId = stringValue(meta, 'shellId') || stringValue(args, 'shellId')
   const intent = stringValue(meta, 'intent') || stringValue(args, 'intent')
   const cwd = stringValue(meta, 'cwd') || stringValue(args, 'cwd')
   const shell = stringValue(meta, 'shell')
@@ -156,6 +157,7 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const stdoutBytes = numberValue(meta, 'stdoutBytes')
   const stderrBytes = numberValue(meta, 'stderrBytes')
   const stdin = stringValue(args, 'stdin')
+  const invocation = command || (shellId ? `poll ${shellId}` : '')
   const streaming = block.status === 'streaming'
   const elapsed = useElapsedSeconds(streaming && !block.text)
   const output =
@@ -172,12 +174,13 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
         <div className="mb-3 font-mono text-[13px] leading-relaxed text-code-text">
           <span className="select-none text-text-muted">$ </span>
           <span className="wrap-break-word">
-            {command || '(empty command)'}
+            {invocation || '(empty command)'}
           </span>
         </div>
         <MetaGrid>
           <MetaRow label="cwd" value={cwd} />
           <MetaRow label="shell" value={shell} />
+          <MetaRow label="shellId" value={shellId} />
           <MetaRow
             label="exit"
             value={

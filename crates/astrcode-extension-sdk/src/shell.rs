@@ -1,40 +1,40 @@
-//! 扩展与工具使用的跨平台 Shell 检测。
+//! Cross-platform shell detection for extensions and tools.
 //!
-//! 根据运行环境自动检测当前 Shell 类型（POSIX、PowerShell、CMD、WSL），
-//! 也支持通过 `ASTRCODE_SHELL` 环境变量手动覆盖。
+//! Automatically detects the current shell type (POSIX, PowerShell, CMD, WSL) from the running
+//! environment, and also supports manual override via the `ASTRCODE_SHELL` environment variable.
 
 use std::{env, sync::OnceLock};
 
-/// Shell 家族分类。
+/// Shell family classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellFamily {
-    /// POSIX 兼容 Shell：bash、zsh、sh 等
+    /// POSIX-compatible shells: bash, zsh, sh, etc.
     Posix,
-    /// PowerShell（Windows 或跨平台版本）
+    /// PowerShell (Windows or cross-platform version)
     PowerShell,
-    /// Windows 命令提示符（cmd.exe）
+    /// Windows command prompt (cmd.exe)
     Cmd,
     /// Windows Subsystem for Linux
     Wsl,
 }
 
-/// 解析后的 Shell 信息。
+/// Resolved shell information.
 #[derive(Debug, Clone)]
 pub struct ShellInfo {
-    /// Shell 家族分类
+    /// Shell family classification
     pub family: ShellFamily,
-    /// Shell 显示名称
+    /// Shell display name
     pub name: String,
-    /// Shell 可执行文件路径
+    /// Path to the shell executable
     pub path: String,
 }
 
-/// 解析当前使用的 Shell。
+/// Resolve the shell currently in use.
 ///
-/// 优先检查 `ASTRCODE_SHELL` 环境变量，如果未设置则根据平台自动检测。
-/// 自动检测结果会被缓存，同一进程内只检测一次。
+/// Checks the `ASTRCODE_SHELL` environment variable first; if unset, auto-detects based on the
+/// platform. The auto-detected result is cached, so detection runs only once per process.
 pub fn resolve_shell() -> ShellInfo {
-    // 允许通过环境变量覆盖
+    // Allow override via the environment variable
     if let Ok(override_shell) = env::var("ASTRCODE_SHELL") {
         return match override_shell.to_lowercase().as_str() {
             "bash" | "zsh" | "sh" => ShellInfo {
@@ -78,13 +78,14 @@ fn detect_shell() -> ShellInfo {
     }
 }
 
-/// 在 Windows 平台上检测 Shell 类型。
+/// Detect the shell type on Windows.
 ///
-/// 检测顺序：MSYS2 会话 → Git Bash → PowerShell 7 (pwsh) → Windows PowerShell 5.x。
-/// 通过 PATH 和常见安装路径查找实际可用的 shell，而非依赖 `PSModulePath`
-/// （该变量在几乎所有 Windows 系统上都存在，无法区分 shell 类型）。
+/// Detection order: MSYS2 session → Git Bash → PowerShell 7 (pwsh) → Windows PowerShell 5.x.
+/// Looks for an actually available shell via PATH and common install paths instead of relying on
+/// `PSModulePath` (which exists on almost every Windows system and cannot distinguish shell
+/// types).
 fn detect_windows_shell() -> ShellInfo {
-    // MSYS2 / MinGW / Git Bash 终端会话
+    // MSYS2 / MinGW / Git Bash terminal session
     if env::var("MSYSTEM").is_ok() {
         return ShellInfo {
             family: ShellFamily::Posix,
@@ -93,7 +94,7 @@ fn detect_windows_shell() -> ShellInfo {
         };
     }
 
-    // Git Bash — 常见开发环境，优先使用
+    // Git Bash — common in dev environments; prefer it when present
     if let Some(path) = find_git_bash() {
         return ShellInfo {
             family: ShellFamily::Posix,
@@ -102,7 +103,7 @@ fn detect_windows_shell() -> ShellInfo {
         };
     }
 
-    // PowerShell 7+ (pwsh) — 支持 &&，跨平台
+    // PowerShell 7+ (pwsh) — supports &&, cross-platform
     if let Some(path) = find_pwsh() {
         return ShellInfo {
             family: ShellFamily::PowerShell,
@@ -111,7 +112,7 @@ fn detect_windows_shell() -> ShellInfo {
         };
     }
 
-    // Windows PowerShell 5.x — 现代版本 Windows 始终可用
+    // Windows PowerShell 5.x — always available on modern Windows
     ShellInfo {
         family: ShellFamily::PowerShell,
         name: "powershell".into(),
@@ -119,7 +120,7 @@ fn detect_windows_shell() -> ShellInfo {
     }
 }
 
-/// 在 PATH 中查找可执行文件。
+/// Find an executable in PATH.
 fn find_in_path(name: &str) -> Option<String> {
     let path_var = env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path_var) {
@@ -131,7 +132,7 @@ fn find_in_path(name: &str) -> Option<String> {
     None
 }
 
-/// 查找 PowerShell 7+ (pwsh)，先搜 PATH 再查默认安装路径。
+/// Find PowerShell 7+ (pwsh), searching PATH first and then the default install path.
 fn find_pwsh() -> Option<String> {
     if let Some(p) = find_in_path("pwsh.exe") {
         return Some(p);
@@ -145,7 +146,7 @@ fn find_pwsh() -> Option<String> {
     })
 }
 
-/// 查找 Git Bash，检查 ProgramFiles 和 LOCALAPPDATA 下的安装路径。
+/// Find Git Bash, checking install paths under ProgramFiles and LOCALAPPDATA.
 fn find_git_bash() -> Option<String> {
     for var in &["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
         if let Ok(pf) = env::var(var) {
@@ -171,9 +172,9 @@ fn find_git_bash() -> Option<String> {
     None
 }
 
-/// 在 POSIX 平台上检测 Shell 类型。
+/// Detect the shell type on POSIX platforms.
 ///
-/// 通过 `SHELL` 环境变量判断具体是 zsh、bash 还是通用 sh。
+/// Uses the `SHELL` environment variable to determine whether it is zsh, bash, or generic sh.
 fn detect_posix_shell() -> ShellInfo {
     let shell_path = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let name = if shell_path.contains("zsh") {
@@ -212,7 +213,7 @@ mod tests {
     fn test_resolve_shell_default() {
         let _guard = env_lock().lock().unwrap();
         let shell = resolve_shell();
-        // 应始终返回有效的 Shell 信息
+        // Should always return valid shell information
         assert!(!shell.name.is_empty());
         assert!(!shell.path.is_empty());
     }

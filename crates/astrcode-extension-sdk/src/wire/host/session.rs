@@ -1,4 +1,4 @@
-//! Session 宿主能力线缆契约。
+//! Wire contracts for the session host capability.
 
 use serde::{Deserialize, Serialize};
 

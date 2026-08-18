@@ -24,12 +24,12 @@ use astrcode_extension_sdk::{
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletions, CommandContext,
         ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
-        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandIntent,
-        SessionCommandKind,
+        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandKind,
     },
 };
 use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_session::compaction::ManualCompactionOutcome;
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{broadcast, mpsc};
@@ -335,13 +335,7 @@ struct InteractiveCommandProbeHandler {
     completion_calls: Arc<AtomicUsize>,
 }
 
-struct BusyCompactProbeExtension {
-    execute_calls: Arc<AtomicUsize>,
-}
-
-struct BusyCompactProbeHandler {
-    execute_calls: Arc<AtomicUsize>,
-}
+struct BusyCompactProbeExtension;
 
 #[async_trait::async_trait]
 impl Extension for RecordingLifecycleExtension {
@@ -469,32 +463,14 @@ impl Extension for BusyCompactProbeExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.command(
+        reg.host_command(
             command("compact")
                 .description("Busy compact admission probe")
                 .requires_idle(true)
                 .priority(200)
                 .host_command(SessionCommandKind::CompactSession)
                 .build(),
-            Arc::new(BusyCompactProbeHandler {
-                execute_calls: Arc::clone(&self.execute_calls),
-            }),
         );
-    }
-}
-
-#[async_trait::async_trait]
-impl astrcode_extension_sdk::extension::CommandHandler for BusyCompactProbeHandler {
-    async fn execute(
-        &self,
-        _ctx: CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        self.execute_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ExtensionCommandResult::host_command(
-            SessionCommandIntent::CompactSession {
-                keep_recent_turns: None,
-            },
-        ))
     }
 }
 
@@ -2147,14 +2123,11 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
 async fn slash_compact_rejects_running_turn_without_input_or_compaction_events() {
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
-    let compact_handler_calls = Arc::new(AtomicUsize::new(0));
     let runtime = test_runtime_with_extensions(
         Arc::new(PendingLlm),
         vec![
             session_commands_extension(),
-            Arc::new(BusyCompactProbeExtension {
-                execute_calls: Arc::clone(&compact_handler_calls),
-            }),
+            Arc::new(BusyCompactProbeExtension),
         ],
     )
     .await;
@@ -2197,7 +2170,6 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
                     if input.text.eq_ignore_ascii_case("/compact")
             )
     }));
-    assert_eq!(compact_handler_calls.load(Ordering::SeqCst), 0);
 
     handler.abort_session(sid).await.unwrap();
 }
@@ -2304,27 +2276,41 @@ async fn slash_compact_uses_backend_command_without_user_message() {
 }
 
 #[tokio::test]
-async fn unknown_slash_command_is_rejected_without_writing_user_input() {
+async fn unknown_slash_command_falls_through_as_plain_prompt() {
+    let runtime = test_runtime();
+    let event_tx = event_channel(1024);
+    let mut event_rx = event_tx.subscribe();
+    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
+    let sid = handler.create_session(".".into()).await.unwrap();
+
+    let result = handler
+        .submit_input_for_session(sid.clone(), "/missing-command".into())
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PromptSubmission::Accepted { .. }),
+        "unknown slash text must be delivered as a regular prompt"
+    );
+    assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+    let events = runtime.event_store().replay_events(&sid).await.unwrap();
+    assert!(events.iter().any(|event| {
+        matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text == "/missing-command")
+    }));
+}
+
+#[tokio::test]
+async fn explicit_command_endpoint_still_rejects_unknown_commands() {
     let runtime = test_runtime();
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
 
     let error = handler
-        .submit_input_for_session(sid.clone(), "/missing-command".into())
+        .invoke_command_for_session(sid, "missing-command".into(), String::new())
         .await
         .unwrap_err();
     assert!(matches!(error, HandlerError::UnknownCommand(name) if name == "missing-command"));
-
-    let events = runtime.event_store().replay_events(&sid).await.unwrap();
-    assert!(events.iter().all(|event| {
-        !matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text == "/missing-command")
-            && !matches!(
-                &event.payload,
-                DurableEventPayload::UserInputAccepted { input }
-                    if input.text == "/missing-command"
-            )
-    }));
 }
 
 #[tokio::test]

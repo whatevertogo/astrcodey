@@ -554,7 +554,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return false
     }
 
-    const compactCommand = isCompactCommand(text)
+    const compactCommand = isCompactCommand(text, state.slashCommands)
     if (compactCommand) {
       set({ compactSubmitting: true })
     }

@@ -229,8 +229,8 @@ mod tests {
             true,
         );
         let host = internal::extension_host(invoker.clone(), scope);
-        assert!(host.models().main_available().unwrap());
-        assert!(host.models().small_available().unwrap());
+        assert!(host.models().unwrap().main_available().unwrap());
+        assert!(host.models().unwrap().small_available().unwrap());
         let target = || HostSessionTargetRequest {
             target_session_id: "child-1".into(),
         };
@@ -240,13 +240,13 @@ mod tests {
         };
 
         let messages = || vec![LlmMessage::user("hello")];
-        expect_backend_error(host.models().main_chat(messages())).await;
-        expect_backend_error(host.models().small_chat(messages())).await;
-        expect_backend_error(host.models().main_chat_collected_request(
+        expect_backend_error(host.models().unwrap().main_chat(messages())).await;
+        expect_backend_error(host.models().unwrap().small_chat(messages())).await;
+        expect_backend_error(host.models().unwrap().main_chat_collected_request(
             crate::host::llm_chat_request(messages()).with_max_output_tokens(512),
         ))
         .await;
-        expect_backend_error(host.models().small_chat_collected(messages())).await;
+        expect_backend_error(host.models().unwrap().small_chat_collected(messages())).await;
         expect_backend_error(
             host.process()
                 .unwrap()
@@ -502,11 +502,7 @@ mod tests {
             ),
         );
         expect_access_error(host.network(), WireErrorCode::PermissionDenied);
-        expect_error_code(
-            host.models().main_chat(vec![LlmMessage::user("hello")]),
-            WireErrorCode::PermissionDenied,
-        )
-        .await;
+        expect_access_error(host.models(), WireErrorCode::PermissionDenied);
 
         let host = internal::extension_host(
             invoker.clone(),
@@ -565,7 +561,8 @@ mod tests {
                 false,
             ),
         );
-        // root 域不依赖 session/workspace 上下文,start 作用域即可用。
+        // The root domain does not depend on session/workspace context, so it is available at
+        // start scope.
         let session_control = host
             .session_control()
             .unwrap_or_else(|_| panic!("root session domain should be start-scoped"));

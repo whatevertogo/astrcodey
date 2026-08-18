@@ -1,17 +1,24 @@
 use astrcode_core::types::TurnId;
-use astrcode_extension_sdk::extension::SessionCommandIntent;
+use astrcode_extension_sdk::extension::{CommandAvailability, CommandExecution};
 
 use crate::{session_manager::SessionManagerError, turn_scheduler::TurnScheduleError};
 
+/// Full-fidelity command view derived from the resolved command surface.
+///
+/// `needs_argument` is derived from `args_schema` for UI convenience; the
+/// schema itself is preserved so clients can render argument forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandInfo {
     pub name: String,
     pub extension_id: String,
     pub description: String,
+    pub args_schema: Option<serde_json::Value>,
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
+    pub availability: CommandAvailability,
+    pub execution: CommandExecution,
 }
 
 #[derive(Debug, Clone)]
@@ -38,22 +45,18 @@ pub enum CommandInvocation {
 #[derive(Debug)]
 pub(crate) enum CommandOutcome {
     Invocation(CommandInvocation),
-    SessionCommand(SessionCommandIntent),
+    /// The host executed the `select_model` session command; the interactive
+    /// transport owns the model-selection flow from here.
+    ModelSelection,
 }
 
 impl CommandOutcome {
     pub(crate) fn into_noninteractive(self) -> Result<CommandInvocation, HandlerError> {
         match self {
             Self::Invocation(invocation) => Ok(invocation),
-            Self::SessionCommand(SessionCommandIntent::SelectModel) => {
-                Err(HandlerError::InvalidRequest(
-                    "interactive model selection is only available on interactive transports"
-                        .into(),
-                ))
-            },
-            Self::SessionCommand(SessionCommandIntent::CompactSession { .. }) => Err(
-                HandlerError::InvalidRequest("compact command was not executed by the host".into()),
-            ),
+            Self::ModelSelection => Err(HandlerError::InvalidRequest(
+                "interactive model selection is only available on interactive transports".into(),
+            )),
         }
     }
 

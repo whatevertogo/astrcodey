@@ -74,7 +74,7 @@ pub fn builtin_commands() -> Vec<SlashCommandSpec> {
 /// 合并内置命令和扩展命令，去掉前导 `/` 后按前缀匹配。
 /// 空过滤字符串返回全部命令。
 pub fn filtered(filter: &str, extension_commands: &[SlashCommandSpec]) -> Vec<SlashCommandSpec> {
-    let filter = filter.trim_start_matches('/').trim();
+    let filter = filter.trim_start_matches('/').trim().to_ascii_lowercase();
     let mut all = builtin_commands();
     all.extend(extension_commands.iter().cloned());
 
@@ -84,8 +84,11 @@ pub fn filtered(filter: &str, extension_commands: &[SlashCommandSpec]) -> Vec<Sl
 
     all.into_iter()
         .filter(|command| {
-            command.name.starts_with(filter)
-                || command.usage.trim_start_matches('/').starts_with(filter)
+            command.name.starts_with(filter.as_str())
+                || command
+                    .usage
+                    .trim_start_matches('/')
+                    .starts_with(filter.as_str())
         })
         .collect()
 }
@@ -93,7 +96,7 @@ pub fn filtered(filter: &str, extension_commands: &[SlashCommandSpec]) -> Vec<Sl
 /// 尝试将输入字符串解析为斜杠命令。
 ///
 /// 输入必须以 `/` 开头。支持命令别名（如 `/q` = `/quit`，`/ls` = `/sessions`）。
-/// 未匹配内置命令时检查扩展命令名列表。
+/// 未匹配内置命令时检查扩展命令名列表（大小写不敏感，与 server 端一致）。
 /// 返回 `None` 表示输入不是斜杠命令。
 pub fn parse(input: &str, extension_command_names: &[String]) -> Option<SlashCommand> {
     let input = input.trim();
@@ -106,17 +109,18 @@ pub fn parse(input: &str, extension_command_names: &[String]) -> Option<SlashCom
         Some((c, a)) => (c, a.trim()),
         None => (&input[1..], ""),
     };
+    let cmd = astrcode_extension_sdk::wire::normalize_slash_command_name(cmd);
 
-    match cmd {
+    match cmd.as_str() {
         "new" => Some(SlashCommand::New),
         "resume" | "r" => Some(SlashCommand::Resume(arg.to_string())),
         "recap" => Some(SlashCommand::Recap),
         "quit" | "q" | "exit" => Some(SlashCommand::Quit),
         "help" | "?" => Some(SlashCommand::Help),
         _ => {
-            if extension_command_names.iter().any(|name| name == cmd) {
+            if extension_command_names.iter().any(|name| name == &cmd) {
                 Some(SlashCommand::Extension {
-                    name: cmd.to_string(),
+                    name: cmd,
                     arguments: arg.to_string(),
                 })
             } else {

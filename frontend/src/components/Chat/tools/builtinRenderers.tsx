@@ -194,10 +194,15 @@ registerToolRenderer({
 registerToolRenderer({
   id: 'builtin:shell',
   priority: 100,
-  match: ({ block }) => block.name === 'shell',
+  match: ({ block }) => block.name === 'shell' || block.name === 'shell_poll',
   summary: ({ args, meta }) => {
     const command = stringValue(meta, 'command') || stringValue(args, 'command')
-    return command ? `$ ${compactPreviewLine(command, 140)}` : ''
+    const shellId = stringValue(meta, 'shellId') || stringValue(args, 'shellId')
+    return command
+      ? `$ ${compactPreviewLine(command, 140)}`
+      : shellId
+        ? `poll ${compactPreviewLine(shellId, 140)}`
+        : ''
   },
   render: ({ block }) => <ShellToolDetails block={block} />,
 })

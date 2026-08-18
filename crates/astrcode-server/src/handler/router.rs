@@ -33,10 +33,6 @@ impl CommandHandler {
                 self.abort_active_turn().await?;
             },
 
-            ClientCommand::Compact { keep_recent_turns } => {
-                self.compact_active_session(keep_recent_turns).await?;
-            },
-
             ClientCommand::GetState => {
                 self.send_current_state().await;
             },
@@ -75,10 +71,6 @@ impl CommandHandler {
                 at_cursor,
             } => {
                 self.fork_session(session_id.into(), at_cursor).await?;
-            },
-
-            ClientCommand::SetModel { model_id } => {
-                self.set_model(model_id).await?;
             },
 
             ClientCommand::UiResponse { request_id, value } => {

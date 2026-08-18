@@ -72,6 +72,5 @@ export function isRegisteredSlashCommand(
 ): boolean {
   const parsed = parseSlashCommand(text)
   if (!parsed || !parsed.name) return false
-  if (parsed.name === 'compact' || parsed.name === 'model') return true
   return commands.some((c) => c.name.toLowerCase() === parsed.name)
 }

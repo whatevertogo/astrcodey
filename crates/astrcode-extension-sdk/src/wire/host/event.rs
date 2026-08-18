@@ -1,4 +1,4 @@
-//! `astrcode.event.emit` 线缆契约。
+//! Wire contracts for `astrcode.event.emit`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +30,8 @@ pub enum HostEventEmitOutput {
     Persisted { event_id: String, seq: u64 },
 }
 
-/// 共享的非空字符串校验核心，`deserialize_with` 需要无参函数路径，故各字段保留薄包装。
+/// Shared non-empty string validation core; `deserialize_with` needs a no-argument function
+/// path, so each field keeps a thin wrapper.
 fn deserialize_non_empty_event_type<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,

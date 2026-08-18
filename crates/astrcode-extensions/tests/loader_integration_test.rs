@@ -526,7 +526,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                 "v1",
                 Arc::new(CatalogExtension {
                     id: "catalog-a",
-                    tool_name: "oldA",
+                    tool_name: "old-a",
                     start_barrier: None,
                 }),
             ),
@@ -535,7 +535,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                 "v1",
                 Arc::new(CatalogExtension {
                     id: "catalog-b",
-                    tool_name: "oldB",
+                    tool_name: "old-b",
                     start_barrier: None,
                 }),
             ),
@@ -548,7 +548,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
             .is_empty()
     );
     let (published_initial_generation, initial_names) = published_tool_catalog(&runner).await;
-    assert_eq!(initial_names, ["oldA", "oldB"]);
+    assert_eq!(initial_names, ["old-a", "old-b"]);
     let initial_generation = match runner.runtime_snapshot_state() {
         RuntimeSnapshotState::Stable(generation) => generation,
         RuntimeSnapshotState::Updating => unreachable!("completed sync must be stable"),
@@ -579,7 +579,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                         "v2",
                         Arc::new(CatalogExtension {
                             id: "catalog-a",
-                            tool_name: "newA",
+                            tool_name: "new-a",
                             start_barrier: None,
                         }),
                     ),
@@ -588,7 +588,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                         "v2",
                         Arc::new(CatalogExtension {
                             id: "catalog-b",
-                            tool_name: "newB",
+                            tool_name: "new-b",
                             start_barrier: Some((start_entered, start_release)),
                         }),
                     ),
@@ -638,10 +638,10 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
             .expect("readers should keep using the committed generation")
             .unwrap();
     assert_eq!(concurrent_generation, initial_generation);
-    assert_eq!(concurrent_tools, ["oldA", "oldB"]);
+    assert_eq!(concurrent_tools, ["old-a", "old-b"]);
     assert_eq!(
         concurrent_http_reader.await.unwrap(),
-        "oldB",
+        "old-b",
         "candidate routes must remain unpublished"
     );
     let concurrent_registry = concurrent_registry_reader.await.unwrap();
@@ -664,7 +664,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
     start_release.notify_one();
     assert!(reload.await.unwrap().is_empty());
     let (final_generation, final_names) = published_tool_catalog(&runner).await;
-    assert_eq!(final_names, ["newA", "newB"]);
+    assert_eq!(final_names, ["new-a", "new-b"]);
     assert!(final_generation > initial_generation);
     assert_eq!(
         runner.runtime_snapshot_state(),
@@ -672,7 +672,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
     );
     assert_eq!(
         published_http_tool(&runner, "/catalog/catalog-b").await,
-        "newB"
+        "new-b"
     );
     let registry = runner.registry_snapshot().await;
     let mut registry_tools = registry
@@ -682,7 +682,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
     registry_tools.sort();
-    assert_eq!(registry_tools, ["newA", "newB"]);
+    assert_eq!(registry_tools, ["new-a", "new-b"]);
     let surface = runner.resolve_command_surface("/workspace").await;
     let mut command_names = surface
         .commands
@@ -704,7 +704,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
         .map(|item| item.text.as_str())
         .collect::<Vec<_>>();
     status_text.sort_unstable();
-    assert_eq!(command_names, ["newA", "newB"]);
+    assert_eq!(command_names, ["new-a", "new-b"]);
     assert_eq!(keybinding_commands, command_names);
     assert_eq!(status_text, command_names);
 }

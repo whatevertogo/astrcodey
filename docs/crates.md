@@ -326,9 +326,9 @@ Feature：
 
 路径：`crates/astrcode-extension-session-commands`
 
-职责：作为普通第一方扩展声明 `/compact` 与 `/model` 的名称、描述、transport availability、idle admission 和类型化 Host execution。handler 只解析参数并返回 `SessionCommandIntent`；它不依赖 session/server，也不复制 compact 或 model selector 状态机。
+职责：作为普通第一方扩展声明 `/compact` 与 `/model` 的名称、描述、transport availability、idle admission 和类型化 Host execution。命令是纯声明（`Registrar::host_command()`，无 handler）：宿主在 session operation gate 内解析参数并执行；扩展不依赖 session/server，也不复制 compact 或 model selector 状态机。
 
-关键边界：只依赖 `astrcode-extension-sdk`。扩展 manifest 必须声明 `SessionCommand` capability，命令 declaration 必须声明匹配的 `SessionCommandKind`；runner 在 handler 结果边界再次校验 capability 和 intent kind。server 在现有 session operation guard 内解释 intent，且在执行 handler 前统一应用 transport 与 busy admission。
+关键边界：只依赖 `astrcode-extension-sdk`。扩展 manifest 必须声明 `SessionCommand` capability，命令 declaration 必须声明匹配的 `SessionCommandKind`。server 在现有 session operation guard 内执行，且统一应用 transport 与 busy admission。
 
 测试线索：server 的多样命令测试覆盖 list/execute/complete 的统一 availability、interactive model selector、非交互拒绝、compact 参数错误，以及 busy compact 不调用 handler、不写用户消息。
 
@@ -336,7 +336,7 @@ Feature：
 
 路径：`crates/astrcode-extension-coding`
 
-职责：作为普通第一方扩展提供 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep` 和 `shell`。schema、展示语义和工具级编排属于本 crate；路径约束、原子文件操作、artifact ID 解析、受监管进程、增量输出与生命周期所有权属于 Host。交互式 PTY 不在产品能力中：迁移前评估的 portable-pty 无法让 Host 在 spawn 前跨平台建立可证明的进程树所有权，因此最终没有保留该依赖或降级实现。
+职责：作为普通第一方扩展提供 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 和 `shell_poll`。schema、展示语义和工具级编排属于本 crate；路径约束、原子文件操作、artifact ID 解析、受监管进程、增量输出与生命周期所有权属于 Host。交互式 PTY 不在产品能力中：迁移前评估的 portable-pty 无法让 Host 在 spawn 前跨平台建立可证明的进程树所有权，因此最终没有保留该依赖或降级实现。
 
 关键边界：只依赖 `astrcode-extension-sdk`，不直接访问 filesystem、artifact storage 或 process API。每个工具都先返回 `ToolPlan`，再由 session 完成权限与 lease，执行时 Host 对具体 operation 二次校验 lease。工具参数不包含 `maxOutputTokens` 一类平台调优字段；Host 有界增量读取与 session 统一 inline/artifact 预算对所有扩展提供相同结果控制。持久化结果通过 `ToolResultClient` 和 session-scoped opaque `artifactId` 读取，不伪装成 workspace path。
 

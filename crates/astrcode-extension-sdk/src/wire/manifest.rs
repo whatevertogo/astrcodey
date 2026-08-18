@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::wire::{
-    ExtensionCapability, HandlerId,
+    ExtensionCapability, HandlerId, SlashCommand,
     custom_event::{CustomEventDeclaration, CustomEventSubscription},
     extension_http::ExtensionHttpRoute,
     transport::TransportFeature,
@@ -21,7 +21,7 @@ pub struct InitializeManifest {
     #[serde(default)]
     pub hooks: Vec<ManifestHook>,
     #[serde(default)]
-    pub commands: Vec<ManifestCommand>,
+    pub commands: Vec<SlashCommand>,
     #[serde(default)]
     pub http_routes: Vec<ManifestHttpRoute>,
     #[serde(default)]
@@ -53,58 +53,13 @@ pub enum ManifestToolMode {
     Sequential,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManifestCommand {
-    pub name: String,
-    pub description: String,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub args_schema: Option<Value>,
-    pub requires_idle: bool,
-    pub argument_completions: bool,
-    pub priority: i32,
-    pub availability: CommandAvailability,
-    pub execution: CommandExecution,
-}
-
-/// Slash command visibility across transports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandAvailability {
-    AllTransports,
-    InteractiveOnly,
-}
-
-/// Declares whether an extension handler or the host owns execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "command", rename_all = "snake_case")]
-pub enum CommandExecution {
-    Extension,
-    Host(SessionCommandKind),
-}
-
-/// Privileged session commands implemented by the host behind its operation gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionCommandKind {
-    CompactSession,
-    SelectModel,
-}
-
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::deserialize(deserializer)
-}
-
-/// S5R manifest 的 hook 订阅声明。
+/// Hook subscription declaration in an S5R manifest.
 ///
-/// 事件名由 variant tag(`on` 字段)携带,payload 按家族区分:只有 tool hook 携带
-/// `tools`,只有 continue_after_stop 携带 `options`。非法字段组合在反序列化期即被
-/// 拒绝,类型上不可表达;合法载荷的 JSON 形状与旧 flat 格式一致,新旧 host/worker
-/// 可以交错部署。
+/// The event name is carried by the variant tag (the `on` field); payloads differ per family:
+/// only tool hooks carry `tools`, and only continue_after_stop carries `options`. Invalid field
+/// combinations are rejected at deserialization time and are unrepresentable in the type; legal
+/// payloads have the same JSON shape as the old flat format, so old and new host/worker builds
+/// can be deployed interchangeably.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "on", rename_all = "snake_case")]
 pub enum ManifestHook {
@@ -131,36 +86,40 @@ pub enum ManifestHook {
     PostRecap(CommonHookManifest),
 }
 
-/// 多数 hook 的声明载荷:仅模式与可选优先级。
+/// Declaration payload for most hooks: mode and an optional priority only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommonHookManifest {
     pub mode: HookMode,
-    /// 可选调度优先级,缺省为 0;宿主按降序调度,同优先级保持注册顺序。
-    /// 缺省时省略序列化,旧 host 的字段校验因此不受影响。
+    /// Optional scheduling priority, defaulting to 0; the host dispatches in descending order,
+    /// and equal priorities keep registration order. When absent it is omitted from
+    /// serialization, so old hosts' field validation is unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 }
 
-/// tool hook 的声明载荷:额外携带精确工具名过滤,缺省匹配全部工具。
+/// Declaration payload for tool hooks: additionally carries an exact tool-name filter; by
+/// default matches all tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolHookManifest {
     pub mode: HookMode,
-    /// 与 [`CommonHookManifest::priority`] 同语义。
+    /// Same semantics as [`CommonHookManifest::priority`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
-    /// 精确工具名过滤;缺省时省略序列化,兼容语义同 `priority`。
+    /// Exact tool-name filter; when absent it is omitted from serialization, with the same
+    /// compatibility semantics as `priority`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
 }
 
-/// continue_after_stop 的声明载荷:额外携带每 turn 续跑上限。
+/// Declaration payload for continue_after_stop: additionally carries the per-turn continuation
+/// limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinueAfterStopHookManifest {
     pub mode: HookMode,
-    /// 与 [`CommonHookManifest::priority`] 同语义。
+    /// Same semantics as [`CommonHookManifest::priority`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "ManifestHookOptions::is_empty")]
@@ -168,8 +127,9 @@ pub struct ContinueAfterStopHookManifest {
 }
 
 impl ManifestHook {
-    /// 按语义事件构造声明。`options` 仅 ContinueAfterStop 保留;registry 只在
-    /// 该事件传入非默认值,其他事件一律忽略。
+    /// Construct a declaration for a semantic event. `options` is only retained for
+    /// ContinueAfterStop; the registry passes a non-default value only for that event and
+    /// ignores it for all others.
     pub fn new(on: ManifestHookEvent, mode: HookMode, options: ManifestHookOptions) -> Self {
         fn common(mode: HookMode) -> CommonHookManifest {
             CommonHookManifest {
@@ -219,7 +179,7 @@ impl ManifestHook {
         }
     }
 
-    /// variant tag 对应的语义事件。
+    /// The semantic event corresponding to this variant tag.
     pub fn event(&self) -> ManifestHookEvent {
         let event = match self {
             Self::ToolInputTransform(_) => LifecycleEvent::ToolInputTransform,
@@ -326,7 +286,7 @@ impl ManifestHook {
         *slot = priority;
     }
 
-    /// 仅 tool hook 返回 `Some`;其他家族在类型上没有 `tools` 字段。
+    /// Only tool hooks return `Some`; other families have no `tools` field in the type.
     pub fn tool_target_mut(&mut self) -> Option<&mut Option<Vec<String>>> {
         match self {
             Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => {
@@ -336,7 +296,7 @@ impl ManifestHook {
         }
     }
 
-    /// 设置工具过滤;非 tool hook 在类型上没有该字段,返回 `false`。
+    /// Set the tool filter; non-tool hooks have no such field in the type and return `false`.
     pub fn set_tool_target(&mut self, tools: Vec<String>) -> bool {
         match self {
             Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => {
@@ -535,6 +495,7 @@ impl From<ContinueAfterStopLimit> for i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::command::{CommandAvailability, CommandExecution, SessionCommandKind};
 
     #[test]
     fn manifest_hook_priority_is_optional_and_omitted_when_default() {
@@ -603,7 +564,7 @@ mod tests {
                     max_per_turn: Some(ContinueAfterStopLimit::unlimited()),
                 },
             )],
-            commands: vec![ManifestCommand {
+            commands: vec![SlashCommand {
                 name: "inspect".into(),
                 description: "Inspect session state".into(),
                 args_schema: Some(serde_json::json!({ "type": "string" })),

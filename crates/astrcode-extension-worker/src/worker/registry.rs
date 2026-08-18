@@ -12,7 +12,7 @@ use astrcode_extension_sdk::{
     builder::ExtensionToolDefinition,
     config::ModelSelection,
     wire::manifest::{
-        InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
+        InitializeManifest, ManifestHook, ManifestHookEvent, ManifestHookOptions,
         ManifestHttpRoute, ManifestTool, ManifestToolMode,
     },
 };
@@ -30,7 +30,8 @@ use crate::{
         ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
         HookMode, LifecycleEvent, TransportFeature,
         internal::{
-            canonical_registration_name, extension_http_route_patterns_conflict, fixed_hook_mode,
+            canonical_registration_name, canonicalize_command_name,
+            extension_http_route_patterns_conflict, fixed_hook_mode,
             has_duplicate_registration_name, hook_mode_is_supported,
             normalize_custom_event_subscription, validate_custom_event_subscription,
             validate_extension_http_route,
@@ -794,7 +795,20 @@ impl HandlerRegistry {
         mut command: crate::extension::SlashCommand,
         handler: CommandHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        canonical_registration_name(&mut command.name);
+        canonicalize_command_name(&mut command.name)
+            .map_err(|reason| ErrorPayload::new(WireErrorCode::InvalidHookRegistration, reason))?;
+        if matches!(
+            command.execution,
+            crate::extension::CommandExecution::Host(_)
+        ) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidHookRegistration,
+                format!(
+                    "command `{}` is host-executed and cannot be declared by a disk extension",
+                    command.name
+                ),
+            ));
+        }
         if has_duplicate_registration_name(self.commands.keys().map(String::as_str), &command.name)
         {
             return Err(ErrorPayload::new(
@@ -803,16 +817,7 @@ impl HandlerRegistry {
             ));
         }
         let name = command.name.clone();
-        self.manifest.commands.push(ManifestCommand {
-            name: command.name,
-            description: command.description,
-            args_schema: command.args_schema,
-            requires_idle: command.requires_idle,
-            argument_completions: command.argument_completions,
-            priority: command.priority,
-            availability: command.availability,
-            execution: command.execution,
-        });
+        self.manifest.commands.push(command);
         self.commands.insert(name, handler);
         Ok(())
     }

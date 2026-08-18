@@ -44,7 +44,7 @@ pub enum ClientNotification {
 
     /// 插件注册的斜杠命令列表（响应 `ListExtensionCommands`）。
     ExtensionCommandList {
-        commands: Vec<ExtensionCommandInfoDto>,
+        commands: Vec<SlashCommandInfoDto>,
         /// 插件注册的快捷键绑定。
         keybindings: Vec<KeybindingDto>,
         /// 插件注册的状态栏项（含初始值）。
@@ -120,17 +120,10 @@ pub struct MessageDto {
 }
 
 /// 插件注册的斜杠命令信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionCommandInfoDto {
-    /// 命令名称（不含前导斜杠 `/`）。
-    pub name: String,
-    pub extension_id: String,
-    pub description: String,
-    pub needs_argument: bool,
-    pub requires_idle: bool,
-    pub argument_completions: bool,
-    pub priority: i32,
-}
+///
+/// 与 HTTP 命令列表共用同一个全保真 DTO：stdio 与 HTTP 两端字段一致，
+/// 避免同一命令列表出现多个保真度不同的副本。
+pub use crate::http::SlashCommandInfoDto;
 
 /// 插件注册的快捷键绑定。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

@@ -517,8 +517,10 @@ impl SlashCommandBuilder {
 `availability` 是 list、execute、complete 共用的 transport admission；例如
 `InteractiveOnly` 命令不会进入非交互列表，也不会在 HTTP 调用中先执行 handler 再报错。
 `host_command` 只声明一个类型化宿主 intent，Extension 不持有宿主服务或 operation gate；使用它的
-Extension 必须声明 `SessionCommand` capability，宿主会在注册、动态发现、返回结果三个边界校验
-declaration、capability 与 intent 一致。server 仍在调用 handler 前重新检查 session/turn 状态。
+Extension 必须声明 `SessionCommand` capability，并通过 `Registrar::host_command()` 注册——宿主
+命令是纯声明，没有 extension handler，宿主在 session operation gate 内直接解析参数并执行；
+`Registrar::command()` 注册 Host 命令会在 `finish()` 被拒绝。server 在 dispatch 前统一执行
+transport/busy admission。
 
 声明 `argument_completions(true)` 但 handler 未实现补全时安装失败，而不是运行时返回空列表掩盖配置错误。
 

@@ -4,8 +4,8 @@ use astrcode_core::event::{
     CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload,
 };
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfoDto, KeybindingDto, SessionListItemDto,
-    SessionSnapshot, UiRequestKind,
+    ClientNotification, KeybindingDto, SessionListItemDto, SessionSnapshot, SlashCommandInfoDto,
+    UiRequestKind,
 };
 
 use super::App;
@@ -686,7 +686,7 @@ fn tool_completion_summary(
         return truncate_first_line(result.error.as_deref().unwrap_or(content), 60);
     }
     match tool_name {
-        "shell" => {
+        "shell" | "shell_poll" => {
             let line_count = content.lines().count();
             if line_count <= 1 && !content.is_empty() {
                 format!(
@@ -828,7 +828,7 @@ fn apply_ui_request(
 
 fn apply_extension_command_list(
     app: &mut App,
-    commands: &[ExtensionCommandInfoDto],
+    commands: &[SlashCommandInfoDto],
     keybindings: &[KeybindingDto],
     status_items: &[astrcode_protocol::events::StatusItemInfoDto],
 ) {
@@ -890,10 +890,16 @@ fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> 
     let action = tool_display_name(tool_name);
     match tool_name {
         "shell" => {
-            let cmd = arguments
-                .and_then(|a| a["command"].as_str())
+            let command = arguments
+                .and_then(|arguments| arguments["command"].as_str())
                 .unwrap_or("...");
-            format!("Running  $ {}", truncate_first_line(cmd, 60))
+            format!("Running  $ {}", truncate_first_line(command, 60))
+        },
+        "shell_poll" => {
+            let shell_id = arguments
+                .and_then(|arguments| arguments["shellId"].as_str())
+                .unwrap_or("...");
+            format!("Polling {shell_id}")
         },
         "read" => {
             let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");

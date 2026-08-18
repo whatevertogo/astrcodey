@@ -14,4 +14,9 @@ pub(super) fn register(registrar: &mut Registrar, default_shell_timeout_secs: Ar
         ExtensionToolDefinition::from_definition(shell::definition()).with_prompt(system_prompt()),
         Arc::new(shell::ShellHandler::new(default_shell_timeout_secs)),
     );
+    registrar.tool(
+        ExtensionToolDefinition::from_definition(shell::poll_definition())
+            .with_prompt(system_prompt()),
+        Arc::new(shell::ShellPollHandler),
+    );
 }

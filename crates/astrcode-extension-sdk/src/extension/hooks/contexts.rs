@@ -223,7 +223,7 @@ impl<P> DerefMut for HookInput<P> {
     }
 }
 
-/// LLM 自然结束后的扩展决策钩子载荷。
+/// Payload for the extension decision hook after the LLM ends naturally.
 #[derive(Clone, Debug)]
 pub struct ContinueAfterStopPayload {
     assistant_text: Arc<str>,
@@ -257,13 +257,14 @@ impl ContinueAfterStopPayload {
     }
 }
 
-/// LLM 自然结束后的扩展决策钩子上下文。
+/// Context for the extension decision hook after the LLM ends naturally.
 pub type ContinueAfterStopContext = HookContext<ContinueAfterStopPayload>;
 
 #[doc(hidden)]
 pub type RuntimeContinueAfterStopContext = HookInput<ContinueAfterStopPayload>;
 
-/// 用户消息写入 transcript 前的扩展变换载荷。
+/// Payload for the extension transform applied before a user message is written to the
+/// transcript.
 #[derive(Clone, Debug)]
 pub struct UserMessageEnvelopePayload {
     text: Arc<str>,
@@ -303,13 +304,14 @@ impl UserMessageEnvelopePayload {
     }
 }
 
-/// 用户消息写入 transcript 前的扩展变换上下文。
+/// Context for the extension transform applied before a user message is written to the
+/// transcript.
 pub type UserMessageEnvelopeContext = HookContext<UserMessageEnvelopePayload>;
 
 #[doc(hidden)]
 pub type RuntimeUserMessageEnvelopeContext = HookInput<UserMessageEnvelopePayload>;
 
-/// PreToolUse 钩子载荷。
+/// PreToolUse hook payload.
 #[derive(Clone, Debug)]
 pub struct PreToolUsePayload {
     call_id: ToolCallId,
@@ -361,13 +363,13 @@ impl PreToolUsePayload {
     }
 }
 
-/// PreToolUse 钩子上下文。
+/// PreToolUse hook context.
 pub type PreToolUseContext = HookContext<PreToolUsePayload>;
 
 #[doc(hidden)]
 pub type RuntimePreToolUseContext = HookInput<PreToolUsePayload>;
 
-/// PostToolUse 钩子载荷。
+/// PostToolUse hook payload.
 #[derive(Clone, Debug)]
 pub struct PostToolUsePayload {
     call_id: ToolCallId,
@@ -413,13 +415,13 @@ impl PostToolUsePayload {
     }
 }
 
-/// PostToolUse 钩子上下文。
+/// PostToolUse hook context.
 pub type PostToolUseContext = HookContext<PostToolUsePayload>;
 
 #[doc(hidden)]
 pub type RuntimePostToolUseContext = HookInput<PostToolUsePayload>;
 
-/// Provider 钩子载荷。
+/// Provider hook payload.
 #[derive(Clone, Debug)]
 pub struct ProviderPayload {
     request_id: ProviderRequestId,
@@ -441,13 +443,14 @@ impl ProviderPayload {
         &self.request_id
     }
 
-    /// 共享的消息存储：零拷贝只读访问。
+    /// Shared message storage: zero-copy read-only access.
     pub fn shared_messages(&self) -> &[Arc<crate::llm::LlmMessage>] {
         &self.messages
     }
 
     #[deprecated(
-        note = "按值复制全量消息；改用 `shared_messages()` 零拷贝访问。本访问器保留一个版本后移除"
+        note = "copies all messages by value; use `shared_messages()` for zero-copy access. This \
+                accessor will be removed after one more version"
     )]
     pub fn messages(&self) -> Vec<crate::llm::LlmMessage> {
         self.shared_messages()
@@ -467,7 +470,7 @@ impl ProviderPayload {
     }
 }
 
-/// Provider 钩子上下文。
+/// Provider hook context.
 pub type ProviderContext = HookContext<ProviderPayload>;
 
 #[doc(hidden)]
@@ -526,7 +529,7 @@ impl RuntimeProviderSettlementContext {
     }
 }
 
-/// PromptBuild 钩子载荷。
+/// PromptBuild hook payload.
 #[derive(Clone, Debug)]
 pub struct PromptBuildPayload {
     tools: Arc<[ToolDefinition]>,
@@ -544,10 +547,11 @@ impl PromptBuildPayload {
     }
 }
 
-/// PromptBuild 钩子上下文。
+/// PromptBuild hook context.
 ///
-/// 首次构建发生在 `SessionStarted` 持久化之前。处理器应只依赖此上下文和扩展自身
-/// 状态，不应假定 `session_id` 已能通过 session-history host API 查询。
+/// The first build happens before `SessionStarted` is persisted. Handlers should rely only on
+/// this context and their own extension state, and must not assume `session_id` is already
+/// queryable through the session-history host API.
 pub type PromptBuildContext = HookContext<PromptBuildPayload>;
 
 #[doc(hidden)]
@@ -649,7 +653,7 @@ pub type PostCompactContext = HookContext<PostCompactPayload>;
 #[doc(hidden)]
 pub type RuntimePostCompactContext = HookInput<PostCompactPayload>;
 
-/// 通用生命周期钩子载荷。
+/// Generic lifecycle hook payload.
 #[derive(Clone, Debug)]
 pub struct LifecyclePayload {
     last_exchange: Option<ExchangeSummary>,
@@ -678,7 +682,7 @@ impl LifecyclePayload {
     }
 }
 
-/// 通用生命周期钩子上下文。
+/// Generic lifecycle hook context.
 pub type LifecycleContext = HookContext<LifecyclePayload>;
 
 #[doc(hidden)]

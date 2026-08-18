@@ -74,8 +74,7 @@ impl BoundedOutput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ShellArgs {
-    #[serde(default)]
+struct ShellStartArgs {
     command: String,
     #[serde(default)]
     intent: Option<String>,
@@ -87,8 +86,14 @@ struct ShellArgs {
     stdin: Option<String>,
     #[serde(default)]
     run_in_background: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShellPollArgs {
+    shell_id: String,
     #[serde(default)]
-    shell_id: Option<String>,
+    intent: Option<String>,
     #[serde(default)]
     block_until_ms: Option<u64>,
 }
@@ -96,6 +101,8 @@ struct ShellArgs {
 pub(super) struct ShellHandler {
     default_timeout_secs: Arc<AtomicU64>,
 }
+
+pub(super) struct ShellPollHandler;
 
 impl ShellHandler {
     pub(super) fn new(default_timeout_secs: Arc<AtomicU64>) -> Self {
@@ -108,27 +115,17 @@ impl ShellHandler {
 #[async_trait::async_trait]
 impl ToolHandler for ShellHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
-        let args: ShellArgs = context.arguments()?;
-        validate(&args)?;
+        let args: ShellStartArgs = context.arguments()?;
+        validate_start(&args)?;
         Ok(ToolPlan::host(
             astrcode_extension_sdk::tool::HostResource::Process,
         ))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let args: ShellArgs = context.arguments()?;
-        validate(&args)?;
+        let args: ShellStartArgs = context.arguments()?;
+        validate_start(&args)?;
         let process = context.host().process()?;
-
-        if let Some(id) = normalized_id(args.shell_id.as_deref()) {
-            let output = process
-                .read(HostProcessReadRequest {
-                    id: id.to_owned(),
-                    wait_ms: Some(args.block_until_ms.unwrap_or(0)),
-                })
-                .await?;
-            return Ok(render_process_result(output, args.intent).into());
-        }
 
         let shell = resolve_shell();
         let (command, pipeline_semantics) = prepare_shell_command(&shell, &args.command)?;
@@ -236,40 +233,36 @@ impl ToolHandler for ShellHandler {
     }
 }
 
-fn normalized_id(id: Option<&str>) -> Option<&str> {
-    id.map(str::trim).filter(|id| !id.is_empty())
+#[async_trait::async_trait]
+impl ToolHandler for ShellPollHandler {
+    async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let args: ShellPollArgs = context.arguments()?;
+        validate_poll(&args)?;
+        Ok(ToolPlan::host(
+            astrcode_extension_sdk::tool::HostResource::Process,
+        ))
+    }
+
+    async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        let args: ShellPollArgs = context.arguments()?;
+        validate_poll(&args)?;
+        let output = context
+            .host()
+            .process()?
+            .read(HostProcessReadRequest {
+                id: args.shell_id.trim().to_owned(),
+                wait_ms: Some(args.block_until_ms.unwrap_or(0)),
+            })
+            .await?;
+        Ok(render_process_result(output, args.intent).into())
+    }
 }
 
-fn validate(args: &ShellArgs) -> Result<(), ExtensionError> {
-    let shell_id = normalized_id(args.shell_id.as_deref());
-    if shell_id.is_some() {
-        if !args.command.trim().is_empty() {
-            return Err(invalid_input(
-                "cannot specify both shellId and command",
-                "provide either a command to start or a shellId to poll",
-            ));
-        }
-        if args.run_in_background {
-            return Err(invalid_input(
-                "cannot specify both shellId and runInBackground",
-                "provide either a command to start or a shellId to poll",
-            ));
-        }
-        if args.cwd.is_some() || args.timeout.is_some() || args.stdin.is_some() {
-            return Err(invalid_input(
-                "cwd, timeout, and stdin apply only when starting a command",
-                "provide either a command to start or a shellId to poll",
-            ));
-        }
-    } else if args.command.trim().is_empty() {
+fn validate_start(args: &ShellStartArgs) -> Result<(), ExtensionError> {
+    if args.command.trim().is_empty() {
         return Err(invalid_input(
             "command cannot be empty",
-            "provide either a command to start or a shellId to poll",
-        ));
-    } else if args.block_until_ms.is_some() {
-        return Err(invalid_input(
-            "blockUntilMs requires an existing shellId",
-            "provide either a command to start or a shellId to poll",
+            "provide a command to start; use shell_poll with shellId for an existing process",
         ));
     }
     if args
@@ -278,7 +271,17 @@ fn validate(args: &ShellArgs) -> Result<(), ExtensionError> {
     {
         return Err(invalid_input(
             "timeout must be between 1 and 600 seconds",
-            "provide either a command to start or a shellId to poll",
+            "set timeout to a valid number of seconds",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_poll(args: &ShellPollArgs) -> Result<(), ExtensionError> {
+    if args.shell_id.trim().is_empty() {
+        return Err(invalid_input(
+            "shellId cannot be empty",
+            "pass the shellId returned by a running shell command",
         ));
     }
     if args
@@ -287,7 +290,7 @@ fn validate(args: &ShellArgs) -> Result<(), ExtensionError> {
     {
         return Err(invalid_input(
             "blockUntilMs must not exceed 600000",
-            "provide either a command to start or a shellId to poll",
+            "set blockUntilMs to a value between 0 and 600000",
         ));
     }
     Ok(())
@@ -307,7 +310,7 @@ fn prepare_shell_command(
                  or select bash/zsh",
                 shell.name
             ),
-            "provide either a command to start or a shellId to poll",
+            "run without a pipeline or use bash/zsh",
         ));
     }
     let command = if pipefail {
@@ -424,7 +427,7 @@ fn shell_args(family: ShellFamily, command: &str) -> Vec<String> {
 
 fn add_invocation_metadata(
     result: &mut ToolResult,
-    args: &ShellArgs,
+    args: &ShellStartArgs,
     shell: &ShellInfo,
     cwd: &str,
     timeout_secs: u64,
@@ -592,7 +595,7 @@ pub(super) fn definition() -> ToolDefinition {
                 "Tips:\n- Set runInBackground for commands expected to exceed ~30s.\n",
                 "- Foreground commands still running after ~30s are promoted to a session-owned \
                  background process.\n",
-                "- Poll shellId for incremental output; stop polling once completed.\n",
+                "- Use `shell_poll` with the returned shellId for incremental output.\n",
                 "- Timeout is 1-600s and uses the configured default when omitted. Set cwd \
                  instead of using cd.\n",
                 "- Non-zero exit codes are errors."
@@ -609,11 +612,35 @@ pub(super) fn definition() -> ToolDefinition {
                 "cwd": { "type": "string" },
                 "timeout": { "type": "integer", "minimum": 1, "maximum": 600 },
                 "stdin": { "type": "string" },
-                "runInBackground": { "type": "boolean" },
-                "shellId": { "type": "string" },
-                "blockUntilMs": { "type": "integer", "minimum": 0, "maximum": 600000 }
+                "runInBackground": { "type": "boolean" }
             },
-            "required": [],
+            "required": ["command"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub(super) fn poll_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "shell_poll".into(),
+        description: "Read incremental output from a running shell process. Use only with a \
+                      shellId returned by `shell`; stop polling once the process is terminal."
+            .into(),
+        strict: true,
+        origin: ToolOrigin::Bundled,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "shellId": { "type": "string", "description": "Process ID returned by shell." },
+                "intent": { "type": "string" },
+                "blockUntilMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 600000,
+                    "description": "Wait this many milliseconds for output, default 0. This is not the shell command timeout."
+                }
+            },
+            "required": ["shellId"],
             "additionalProperties": false
         }),
     }
@@ -622,6 +649,50 @@ pub(super) fn definition() -> ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_start_and_poll_contracts_are_disjoint() {
+        let cases = [
+            (
+                "start accepts only command fields",
+                serde_json::json!({"command": "cargo test", "timeout": 30}),
+                true,
+                false,
+            ),
+            (
+                "poll accepts only process fields",
+                serde_json::json!({"shellId": "process-1", "blockUntilMs": 1_000}),
+                false,
+                true,
+            ),
+            (
+                "mixed calls are rejected by both contracts",
+                serde_json::json!({"command": "true", "shellId": "process-1"}),
+                false,
+                false,
+            ),
+        ];
+
+        for (name, arguments, start_ok, poll_ok) in cases {
+            assert_eq!(
+                serde_json::from_value::<ShellStartArgs>(arguments.clone()).is_ok(),
+                start_ok,
+                "{name}"
+            );
+            assert_eq!(
+                serde_json::from_value::<ShellPollArgs>(arguments).is_ok(),
+                poll_ok,
+                "{name}"
+            );
+        }
+
+        let empty_poll = ShellPollArgs {
+            shell_id: " ".into(),
+            intent: None,
+            block_until_ms: None,
+        };
+        assert!(validate_poll(&empty_poll).is_err());
+    }
 
     #[test]
     fn bounded_output_keeps_a_valid_utf8_tail_and_counts_discarded_bytes() {

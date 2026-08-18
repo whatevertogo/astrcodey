@@ -4,6 +4,7 @@
 //! they cross the S5R boundary and the transport state needed to exchange those values.
 
 pub mod capability;
+pub mod command;
 pub mod custom_event;
 pub mod effects;
 pub mod error;
@@ -21,6 +22,10 @@ pub mod stream;
 pub mod transport;
 
 pub use capability::ExtensionCapability;
+pub use command::{
+    CommandAvailability, CommandExecution, SessionCommandKind, SlashCommand,
+    normalize_slash_command_name,
+};
 pub use custom_event::{
     CustomEventDeclaration, CustomEventDelivery, CustomEventSourceFilter, CustomEventSubscription,
 };

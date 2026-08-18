@@ -172,7 +172,7 @@ Anthropic 还限制单次请求中的 strict 工具、可选参数和 union 数�
 Bundled → Extension 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
 为 nullable union；仍无法容纳的工具仅在该次 Anthropic 请求中降级为非 strict，并输出包含工具
 名的 warning。Bundled composition catalog 把 Coding Extension 放在其他第一方工具之前，因而
-`read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 优先保留 strict。
+`read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell`、`shell_poll` 优先保留 strict。
 八个 Coding Schema 按稳定顺序参与 Anthropic strict-tool 预算；若与其他 bundled Extension 的
 schema 合计超过 provider 容量，wire compiler 只对本次请求中靠后的超限项做确定性降级，注册表中的
 原始 strict 定义不会被修改。不要通过提高本地上限或把可选字段强制改成非 nullable required 来

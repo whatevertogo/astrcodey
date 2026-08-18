@@ -1,13 +1,15 @@
 use std::{
+    collections::HashMap,
     fmt,
     path::PathBuf,
     sync::{Arc, Weak},
+    time::{Duration, Instant},
 };
 
 use astrcode_extension_sdk::extension::{
     internal::{
-        RuntimeHookCallContext, command_completion_context, command_context,
-        command_discovery_context,
+        RuntimeHookCallContext, canonicalize_command_name, command_completion_context,
+        command_context, command_discovery_context,
     },
     *,
 };
@@ -23,13 +25,64 @@ pub struct ResolvedSlashCommand {
     pub extension_id: String,
     pub command: astrcode_extension_sdk::extension::SlashCommand,
     pub shadowed: Vec<ShadowedSlashCommand>,
-    handler: Arc<dyn CommandHandler>,
+    /// `None` for host-executed commands, which dispatch without an extension handler.
+    handler: Option<Arc<dyn CommandHandler>>,
     index: Weak<HandlerIndex>,
 }
 
+#[derive(Clone)]
 pub struct ResolvedCommandSurface {
     pub commands: Vec<ResolvedSlashCommand>,
     pub ui: ExtensionUiContributions,
+}
+
+/// How long a resolved command surface stays fresh. Discovery hooks may read
+/// the filesystem, so entries age out quickly; the cache only removes the
+/// repeated per-invocation recomputation of the full discovery set.
+const COMMAND_SURFACE_CACHE_TTL: Duration = Duration::from_secs(1);
+/// Upper bound on cached working directories within one generation.
+const COMMAND_SURFACE_CACHE_MAX_WORKING_DIRS: usize = 32;
+
+struct CommandSurfaceCacheEntry {
+    surface: Arc<ResolvedCommandSurface>,
+    refreshed_at: Instant,
+}
+
+#[derive(Default)]
+pub(super) struct CommandSurfaceCache {
+    entries: parking_lot::Mutex<HashMap<(u64, String), CommandSurfaceCacheEntry>>,
+}
+
+impl CommandSurfaceCache {
+    fn get(&self, generation: u64, working_dir: &str) -> Option<Arc<ResolvedCommandSurface>> {
+        let entries = self.entries.lock();
+        let entry = entries.get(&(generation, working_dir.to_owned()))?;
+        if entry.refreshed_at.elapsed() >= COMMAND_SURFACE_CACHE_TTL {
+            return None;
+        }
+        Some(Arc::clone(&entry.surface))
+    }
+
+    fn insert(&self, generation: u64, working_dir: &str, surface: Arc<ResolvedCommandSurface>) {
+        let mut entries = self.entries.lock();
+        // Entries from older generations can never be hit again; drop them wholesale.
+        entries.retain(|(entry_generation, _), _| *entry_generation == generation);
+        if entries.len() >= COMMAND_SURFACE_CACHE_MAX_WORKING_DIRS
+            && let Some(oldest_key) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.refreshed_at)
+                .map(|(key, _)| key.clone())
+        {
+            entries.remove(&oldest_key);
+        }
+        entries.insert(
+            (generation, working_dir.to_owned()),
+            CommandSurfaceCacheEntry {
+                surface,
+                refreshed_at: Instant::now(),
+            },
+        );
+    }
 }
 
 impl fmt::Debug for ResolvedSlashCommand {
@@ -78,11 +131,11 @@ impl ExtensionView {
         ))
     }
 
-    /// 从 HandlerIndex 缓存收集斜杠命令。
+    /// Collect slash commands from the HandlerIndex cache plus dynamic discovery.
     async fn collect_commands_for_typed(
         &self,
         working_dir: &str,
-    ) -> Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> {
+    ) -> Vec<(String, SlashCommand, Option<Arc<dyn CommandHandler>>)> {
         let index = &self.index;
         let mut cmds = index.static_commands.clone();
         for (extension_id, discovery) in &index.command_discoveries {
@@ -115,16 +168,25 @@ impl ExtensionView {
             match discovered {
                 Ok(discovered) => {
                     for command in discovered.into_commands() {
-                        let (cmd, handler) = command.into_parts();
-                        if !command_execution_is_authorized(index, extension_id, &cmd) {
+                        let (mut cmd, handler) = command.into_parts();
+                        if matches!(cmd.execution, CommandExecution::Host(_)) {
                             tracing::warn!(
                                 extension_id,
                                 command = %cmd.name,
-                                "slash command requested a host session command without capability"
+                                "command discovery cannot declare host-executed commands"
                             );
                             continue;
                         }
-                        cmds.push((extension_id.clone(), cmd, handler));
+                        if let Err(reason) = canonicalize_command_name(&mut cmd.name) {
+                            tracing::warn!(
+                                extension_id,
+                                command = %cmd.name,
+                                %reason,
+                                "command discovery returned an invalid command name"
+                            );
+                            continue;
+                        }
+                        cmds.push((extension_id.clone(), cmd, Some(handler)));
                     }
                 },
                 Err(error) => {
@@ -186,6 +248,10 @@ impl ExtensionView {
     }
 
     /// Execute an already-resolved slash command without re-reading the command registry.
+    ///
+    /// Host-executed commands never reach this path: the server dispatches them
+    /// behind its session operation gate. The `None` handler guard below turns a
+    /// violation of that invariant into a typed internal error instead of a panic.
     pub async fn invoke_resolved_command_typed(
         &self,
         resolved: &ResolvedSlashCommand,
@@ -195,6 +261,12 @@ impl ExtensionView {
         let active_index = resolved.index.upgrade().ok_or_else(|| {
             ExtensionError::NotFound(format!(
                 "command {} generation is no longer available",
+                resolved.command.name
+            ))
+        })?;
+        let handler = resolved.handler.as_ref().ok_or_else(|| {
+            ExtensionError::Internal(format!(
+                "host-executed command {} reached the extension invoke path",
                 resolved.command.name
             ))
         })?;
@@ -210,10 +282,10 @@ impl ExtensionView {
                 &resolved.extension_id,
                 "command",
                 cancellation,
-                resolved.handler.execute(ctx),
+                handler.execute(ctx),
             )
             .await?;
-        admit_command_result(&active_index, resolved, result)
+        Ok(result)
     }
 
     /// Complete arguments for an already-resolved slash command without re-reading the registry.
@@ -230,6 +302,12 @@ impl ExtensionView {
                 resolved.command.name
             ))
         })?;
+        let handler = resolved.handler.as_ref().ok_or_else(|| {
+            ExtensionError::Internal(format!(
+                "host-executed command {} reached the completion path",
+                resolved.command.name
+            ))
+        })?;
         let (ctx, cancellation) = self.extension_command_context(
             &active_index,
             &resolved.extension_id,
@@ -242,85 +320,40 @@ impl ExtensionView {
             &resolved.extension_id,
             "command_complete",
             cancellation,
-            resolved.handler.complete(ctx),
+            handler.complete(ctx),
         )
         .await
     }
 }
 
-fn command_execution_is_authorized(
-    index: &HandlerIndex,
-    extension_id: &str,
-    command: &SlashCommand,
-) -> bool {
-    !matches!(command.execution, CommandExecution::Host(_))
-        || index
-            .extensions
-            .get(extension_id)
-            .is_some_and(|generation| {
-                generation
-                    .capabilities
-                    .contains(&ExtensionCapability::SessionCommand)
-            })
-}
-
-fn admit_command_result(
-    index: &HandlerIndex,
-    resolved: &ResolvedSlashCommand,
-    result: ExtensionCommandResult,
-) -> Result<ExtensionCommandResult, ExtensionError> {
-    let ExtensionCommandResult::HostCommand { intent } = &result else {
-        if matches!(resolved.command.execution, CommandExecution::Host(_)) {
-            return Err(ExtensionError::InvalidRegistration {
-                extension_id: resolved.extension_id.clone(),
-                reason: format!(
-                    "host command {} did not return a host command intent",
-                    resolved.command.name
-                ),
-            });
-        }
-        return Ok(result);
-    };
-    let generation = index
-        .extensions
-        .get(&resolved.extension_id)
-        .ok_or_else(|| ExtensionError::NotFound(resolved.extension_id.clone()))?;
-    if !generation
-        .capabilities
-        .contains(&ExtensionCapability::SessionCommand)
-    {
-        return Err(ExtensionError::MissingCapability {
-            extension_id: resolved.extension_id.clone(),
-            hook: "command",
-            capability: ExtensionCapability::SessionCommand,
-        });
-    }
-    if resolved.command.execution != CommandExecution::Host(intent.kind()) {
-        return Err(ExtensionError::InvalidRegistration {
-            extension_id: resolved.extension_id.clone(),
-            reason: format!(
-                "command {} returned undeclared host intent {:?}",
-                resolved.command.name,
-                intent.kind()
-            ),
-        });
-    }
-    Ok(result)
-}
-
 impl ExtensionRunner {
     pub async fn resolve_command_surface(&self, working_dir: &str) -> ResolvedCommandSurface {
-        self.extension_view()
-            .await
-            .resolve_command_surface(working_dir)
-            .await
+        let view = self.extension_view().await;
+        let surface = self.cached_command_surface(&view, working_dir).await;
+        (*surface).clone()
     }
 
     pub async fn resolve_commands_for_typed(&self, working_dir: &str) -> Vec<ResolvedSlashCommand> {
-        self.extension_view()
+        let view = self.extension_view().await;
+        self.cached_command_surface(&view, working_dir)
             .await
-            .resolve_commands_for_typed(working_dir)
-            .await
+            .commands
+            .clone()
+    }
+
+    async fn cached_command_surface(
+        &self,
+        view: &ExtensionView,
+        working_dir: &str,
+    ) -> Arc<ResolvedCommandSurface> {
+        let generation = view.generation();
+        if let Some(surface) = self.command_surface_cache.get(generation, working_dir) {
+            return surface;
+        }
+        let surface = Arc::new(view.resolve_command_surface(working_dir).await);
+        self.command_surface_cache
+            .insert(generation, working_dir, Arc::clone(&surface));
+        surface
     }
 
     pub async fn invoke_resolved_command_typed(
@@ -350,8 +383,8 @@ impl ExtensionRunner {
 }
 
 fn compare_command_registration(
-    left: &(String, SlashCommand, Arc<dyn CommandHandler>),
-    right: &(String, SlashCommand, Arc<dyn CommandHandler>),
+    left: &(String, SlashCommand, Option<Arc<dyn CommandHandler>>),
+    right: &(String, SlashCommand, Option<Arc<dyn CommandHandler>>),
 ) -> std::cmp::Ordering {
     right
         .1

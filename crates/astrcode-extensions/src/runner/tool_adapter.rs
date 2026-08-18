@@ -378,10 +378,36 @@ impl Tool for HandlerTool {
 
 fn extension_plan_error(error: ExtensionError) -> ToolError {
     match error {
-        ExtensionError::InvalidInput { message, .. } => ToolError::InvalidArguments(message),
+        ExtensionError::InvalidInput { message, hint, .. } => {
+            let detail = match hint {
+                Some(hint) => format!("{message}\nHint: {hint}"),
+                None => message,
+            };
+            ToolError::InvalidArguments(detail)
+        },
         ExtensionError::Timeout(timeout_ms) => ToolError::Timeout(timeout_ms),
         ExtensionError::Blocked { reason } => ToolError::Blocked { reason },
         other => ToolError::Execution(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod plan_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_plan_input_preserves_extension_hint() {
+        let error = extension_plan_error(ExtensionError::invalid_input(
+            "cannot mix command and shellId",
+            Some("use shell_poll for an existing process".into()),
+        ));
+
+        assert!(matches!(
+            error,
+            ToolError::InvalidArguments(detail)
+                if detail.contains("cannot mix command and shellId")
+                    && detail.contains("use shell_poll for an existing process")
+        ));
     }
 }
 

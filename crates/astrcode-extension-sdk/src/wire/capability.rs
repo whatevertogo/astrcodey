@@ -9,14 +9,14 @@ macro_rules! extension_capabilities {
         }
 
         impl ExtensionCapability {
-            /// manifest / Initialize 请求中的稳定 snake_case 线缆名。
+            /// Stable snake_case wire name used in the manifest / Initialize request.
             pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $wire),*
                 }
             }
 
-            /// 解析线缆名；未知名返回 `None`。
+            /// Parse a wire name; unknown names return `None`.
             pub fn parse(name: &str) -> Option<Self> {
                 match name {
                     $($wire => Some(Self::$variant),)*

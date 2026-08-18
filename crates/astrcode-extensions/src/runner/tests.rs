@@ -35,11 +35,10 @@ use astrcode_extension_sdk::{
         PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreCompactContext,
         PreCompactHandler, PreCompactResult, PreToolUseAdmission, PreToolUseContext,
         PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderRequestId, ProviderResult, Registrar, SessionCommandIntent, SessionCommandKind,
-        SlashCommand, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, ToolInputTransformHandler,
-        ToolInputTransformResult, ToolPlanContext, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        ProviderRequestId, ProviderResult, Registrar, SessionCommandKind, SlashCommand, StopReason,
+        ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler,
+        ToolHookTarget, ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         internal::{
             RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimePreToolUseContext,
             RuntimeUserMessageEnvelopeContext, runtime_continue_after_stop_context,
@@ -1117,11 +1116,10 @@ impl Extension for RegistrationProbeExtension {
                 );
             },
             CapabilityRegistration::SessionCommand => {
-                reg.command(
+                reg.host_command(
                     command("compact-probe")
                         .host_command(SessionCommandKind::CompactSession)
                         .build(),
-                    Arc::new(RegistrationProbeHandler),
                 );
             },
         }
@@ -1132,20 +1130,6 @@ impl Extension for RegistrationProbeExtension {
 impl PreCompactHandler for RegistrationProbeHandler {
     async fn handle(&self, _ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
         Ok(PreCompactResult::Allow)
-    }
-}
-
-#[async_trait::async_trait]
-impl CommandHandler for RegistrationProbeHandler {
-    async fn execute(
-        &self,
-        _ctx: CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        Ok(ExtensionCommandResult::host_command(
-            SessionCommandIntent::CompactSession {
-                keep_recent_turns: None,
-            },
-        ))
     }
 }
 

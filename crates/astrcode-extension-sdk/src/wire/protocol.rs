@@ -1,3 +1,11 @@
+//! S5R message definitions, protocol constants, and codec helpers.
+//!
+//! S5R is the versioned wire protocol between the host and out-of-process
+//! (disk) extensions: stdio transport, decimal-length-prefixed JSON frames.
+//! This module owns the [`WireMessage`] enum and its encode/decode path;
+//! framing lives in [`crate::wire::frame`] and the peer state machine in
+//! [`crate::wire::peer`].
+
 use std::{
     collections::BTreeSet,
     fmt::{self, Display},

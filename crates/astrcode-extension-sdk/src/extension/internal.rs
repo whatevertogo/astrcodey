@@ -33,7 +33,7 @@ pub use super::{
         RuntimeUserMessageEnvelopeContext,
     },
     registration_validation::{
-        canonical_registration_name, custom_event_subscription_matches,
+        canonical_registration_name, canonicalize_command_name, custom_event_subscription_matches,
         extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
         hook_mode_is_supported, match_extension_http_route, normalize_custom_event_subscription,
         validate_custom_event_subscription, validate_extension_http_route,

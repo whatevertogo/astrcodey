@@ -1,4 +1,4 @@
-//! process 线缆契约与边界常量。
+//! Process wire contracts and boundary constants.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,7 @@ bounded_utf8_serde_fns!(
     "stdin"
 );
 
-/// `astrcode.process.spawn` 的线缆响应。
+/// Wire response for `astrcode.process.spawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostProcessOutput {

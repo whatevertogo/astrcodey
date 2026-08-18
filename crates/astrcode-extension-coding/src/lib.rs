@@ -160,7 +160,8 @@ mod tests {
                 "patch",
                 "glob",
                 "grep",
-                "shell"
+                "shell",
+                "shell_poll"
             ]
         );
         for tool in tools {

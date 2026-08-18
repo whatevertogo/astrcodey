@@ -1,4 +1,4 @@
-//! network 线缆契约与边界常量。
+//! Network wire contracts and boundary constants.
 
 use base64::engine::general_purpose::STANDARD;
 
@@ -23,11 +23,11 @@ pub enum HostNetworkRedirectPolicy {
     Manual,
 }
 
-/// `astrcode.network.client` 的线缆请求。
+/// Wire request for `astrcode.network.client`.
 ///
-/// `body` 最大为 [`HOST_NETWORK_MAX_REQUEST_BODY_BYTES`]，`max_bytes` 最大为
-/// [`HOST_NETWORK_MAX_BYTES`]，`timeout_ms` 必须位于 `1..=HOST_NETWORK_MAX_TIMEOUT_MS`。
-/// `Manual` 重定向仍返回受大小限制的原始响应体。
+/// `body` is at most [`HOST_NETWORK_MAX_REQUEST_BODY_BYTES`], `max_bytes` is at most
+/// [`HOST_NETWORK_MAX_BYTES`], and `timeout_ms` must lie in `1..=HOST_NETWORK_MAX_TIMEOUT_MS`.
+/// `Manual` redirects still return the size-limited raw response body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostNetworkRequest {
@@ -76,14 +76,15 @@ const fn default_network_timeout_ms() -> u64 {
     HOST_NETWORK_DEFAULT_TIMEOUT_MS
 }
 
-/// `astrcode.network.client` 的线缆响应。
+/// Wire response for `astrcode.network.client`.
 ///
-/// `body` 在线缆上使用 base64，作者 API 始终接收原始字节。`headers` 不保留同名响应头
-/// 的重复值。宿主限制全局共享并发，但线缆协议不承诺 extension 级公平配额。
+/// `body` uses base64 on the wire; the author API always receives raw bytes. `headers` does not
+/// preserve duplicate values of the same response header. The host limits global shared
+/// concurrency, but the wire protocol does not promise extension-level fair quotas.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostNetworkResponse {
-    /// 完成所有受限重定向后的最终 URL。
+    /// Final URL after all constrained redirects.
     pub final_url: String,
     pub status: u16,
     pub headers: BTreeMap<String, String>,

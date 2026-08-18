@@ -3,18 +3,16 @@
 use astrcode_context::is_compact_summary_message;
 use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_extension_sdk::extension::{
-    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription, ExtensionCapability,
-    ExtensionHttpMethod, Keybinding, SlashCommand, StatusItem, TransportFeature,
+    CommandAvailability, CommandExecution, CustomEventDeclaration, CustomEventSourceFilter,
+    CustomEventSubscription, ExtensionCapability, ExtensionHttpMethod, Keybinding,
+    SessionCommandKind, SlashCommand, StatusItem, TransportFeature,
 };
 use astrcode_protocol::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
-    events::{
-        ExtensionCommandInfoDto, KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto,
-    },
+    events::{KeybindingDto, MessageDto, SessionSnapshot, SlashCommandInfoDto, StatusItemInfoDto},
     http::{
         CustomEventDeclarationDto, CustomEventDeliveryDto, CustomEventSourceFilterDto,
-        CustomEventSubscriptionDto, ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto,
-        TransportFeatureDto,
+        CustomEventSubscriptionDto, StatusItemDto, TransportFeatureDto,
     },
     wire::{
         CommandAvailabilityDto, CommandExecutionDto, ExtensionCapabilityDto,
@@ -176,53 +174,56 @@ pub(crate) fn status_item_to_info_dto(item: StatusItem) -> StatusItemInfoDto {
     }
 }
 
-pub(crate) fn command_info_to_stdio_dto(command: CommandInfo) -> ExtensionCommandInfoDto {
-    ExtensionCommandInfoDto {
+pub(crate) fn slash_command_to_dto(
+    extension_id: &str,
+    command: SlashCommand,
+) -> SlashCommandInfoDto {
+    let needs_argument = command.args_schema.is_some();
+    SlashCommandInfoDto {
+        name: command.name,
+        extension_id: extension_id.to_owned(),
+        description: command.description,
+        args_schema: command.args_schema,
+        needs_argument,
+        requires_idle: command.requires_idle,
+        argument_completions: command.argument_completions,
+        priority: command.priority,
+        availability: command_availability_to_dto(command.availability),
+        execution: command_execution_to_dto(command.execution),
+    }
+}
+
+pub(crate) fn command_info_to_dto(command: CommandInfo) -> SlashCommandInfoDto {
+    SlashCommandInfoDto {
         name: command.name,
         extension_id: command.extension_id,
         description: command.description,
+        args_schema: command.args_schema,
         needs_argument: command.needs_argument,
         requires_idle: command.requires_idle,
         argument_completions: command.argument_completions,
         priority: command.priority,
+        availability: command_availability_to_dto(command.availability),
+        execution: command_execution_to_dto(command.execution),
     }
 }
 
-pub(crate) fn command_info_to_http_dto(command: CommandInfo) -> SlashCommandInfoDto {
-    command_info_to_stdio_dto(command).into()
+pub(crate) fn command_availability_to_dto(
+    availability: CommandAvailability,
+) -> CommandAvailabilityDto {
+    match availability {
+        CommandAvailability::AllTransports => CommandAvailabilityDto::AllTransports,
+        CommandAvailability::InteractiveOnly => CommandAvailabilityDto::InteractiveOnly,
+    }
 }
 
-pub(crate) fn extension_slash_command_to_dto(command: SlashCommand) -> ExtensionSlashCommandDto {
-    ExtensionSlashCommandDto {
-        name: command.name,
-        description: command.description,
-        args_schema: command.args_schema,
-        requires_idle: command.requires_idle,
-        argument_completions: command.argument_completions,
-        priority: command.priority,
-        availability: match command.availability {
-            astrcode_extension_sdk::extension::CommandAvailability::AllTransports => {
-                CommandAvailabilityDto::AllTransports
-            },
-            astrcode_extension_sdk::extension::CommandAvailability::InteractiveOnly => {
-                CommandAvailabilityDto::InteractiveOnly
-            },
-        },
-        execution: match command.execution {
-            astrcode_extension_sdk::extension::CommandExecution::Extension => {
-                CommandExecutionDto::Extension
-            },
-            astrcode_extension_sdk::extension::CommandExecution::Host(command) => {
-                CommandExecutionDto::Host(match command {
-                    astrcode_extension_sdk::extension::SessionCommandKind::CompactSession => {
-                        SessionCommandKindDto::CompactSession
-                    },
-                    astrcode_extension_sdk::extension::SessionCommandKind::SelectModel => {
-                        SessionCommandKindDto::SelectModel
-                    },
-                })
-            },
-        },
+pub(crate) fn command_execution_to_dto(execution: CommandExecution) -> CommandExecutionDto {
+    match execution {
+        CommandExecution::Extension => CommandExecutionDto::Extension,
+        CommandExecution::Host(command) => CommandExecutionDto::Host(match command {
+            SessionCommandKind::CompactSession => SessionCommandKindDto::CompactSession,
+            SessionCommandKind::SelectModel => SessionCommandKindDto::SelectModel,
+        }),
     }
 }
 
@@ -326,29 +327,31 @@ mod tests {
     }
 
     #[test]
-    fn command_mapping_preserves_extension_identity_at_each_transport_boundary() {
+    fn command_mapping_preserves_full_fidelity() {
         let command = CommandInfo {
             name: "review".into(),
             extension_id: "review-extension".into(),
             description: "Review the current changes".into(),
+            args_schema: Some(serde_json::json!({ "type": "string" })),
             needs_argument: true,
             requires_idle: true,
             argument_completions: true,
             priority: 7,
+            availability: CommandAvailability::AllTransports,
+            execution: CommandExecution::Extension,
         };
 
-        let stdio = command_info_to_stdio_dto(command.clone());
-        assert_eq!(stdio.name, command.name);
-        assert_eq!(stdio.extension_id, command.extension_id);
-
-        let http = command_info_to_http_dto(command);
-        assert_eq!(http.name, stdio.name);
-        assert_eq!(http.extension_id, stdio.extension_id);
-        assert_eq!(http.description, stdio.description);
-        assert_eq!(http.needs_argument, stdio.needs_argument);
-        assert_eq!(http.requires_idle, stdio.requires_idle);
-        assert_eq!(http.argument_completions, stdio.argument_completions);
-        assert_eq!(http.priority, stdio.priority);
+        let dto = command_info_to_dto(command.clone());
+        assert_eq!(dto.name, command.name);
+        assert_eq!(dto.extension_id, command.extension_id);
+        assert_eq!(dto.description, command.description);
+        assert_eq!(dto.args_schema, command.args_schema);
+        assert_eq!(dto.needs_argument, command.needs_argument);
+        assert_eq!(dto.requires_idle, command.requires_idle);
+        assert_eq!(dto.argument_completions, command.argument_completions);
+        assert_eq!(dto.priority, command.priority);
+        assert_eq!(dto.availability, CommandAvailabilityDto::AllTransports);
+        assert_eq!(dto.execution, CommandExecutionDto::Extension);
     }
 
     fn simple_text_message(text: &str) -> LlmMessage {

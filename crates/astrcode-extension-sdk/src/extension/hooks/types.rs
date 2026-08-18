@@ -12,7 +12,7 @@ pub use crate::wire::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 
 // ─── Tool hook target ──────────────────────────────────────────────────
 
-/// Tool hook 作用范围。
+/// Tool hook scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolHookTarget {
     All,
@@ -46,7 +46,7 @@ pub struct ToolHookRegistration<H: ?Sized> {
     pub handler: Arc<H>,
 }
 
-/// 一个同步工具参数变换或准入处理器的注册声明。
+/// Registration declaration for one synchronous tool input transform or admission handler.
 #[derive(Clone)]
 pub struct ToolUseRegistration<H: ?Sized> {
     pub priority: i32,
@@ -69,7 +69,7 @@ pub struct UserMessageEnvelopeRegistration<H: ?Sized> {
 
 // ─── Contribution types ────────────────────────────────────────────────
 
-/// 插件在 PromptBuild hook 中提供的 prompt 片段。
+/// Prompt contributions provided by an extension in the PromptBuild hook.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptContributions {
     #[serde(default)]
@@ -117,7 +117,7 @@ impl CompactContributions {
 
 // ─── Event discriminants ───────────────────────────────────────────────
 
-/// Provider hook 触发时机。
+/// Provider hook trigger timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderEvent {
@@ -175,7 +175,7 @@ impl std::fmt::Display for ProviderContributionId {
 
 // ─── Extension error ───────────────────────────────────────────────────
 
-/// 扩展操作产生的错误。
+/// Error produced by an extension operation.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
     #[error(transparent)]
@@ -235,7 +235,8 @@ pub enum ExtensionError {
 }
 
 impl ExtensionError {
-    /// 构造 [`InvalidInput`](Self::InvalidInput) 错误，wire code 固定为 `invalid_input`。
+    /// Construct an [`InvalidInput`](Self::InvalidInput) error; the wire code is fixed to
+    /// `invalid_input`.
     pub fn invalid_input(message: impl Into<String>, hint: impl Into<Option<String>>) -> Self {
         Self::InvalidInput {
             code: WireErrorCode::InvalidInput.as_str().into(),
@@ -278,7 +279,7 @@ impl Default for ContinueAfterStopOptions {
 
 // ─── Status item update ────────────────────────────────────────────────
 
-/// 命令结果附带的状态栏更新。
+/// Status bar update attached to a command result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusItemUpdatePayload {
     pub id: String,
@@ -287,7 +288,8 @@ pub struct StatusItemUpdatePayload {
 
 // ─── Exchange summary ──────────────────────────────────────────────────
 
-/// 当轮 user/assistant 消息摘要，仅 TurnEnd 事件填充。
+/// Summary of the current user/assistant message exchange; only populated for the TurnEnd
+/// event.
 #[derive(Debug, Clone)]
 pub struct ExchangeSummary {
     pub user_message: String,

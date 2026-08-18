@@ -72,7 +72,7 @@ pub(super) struct HandlerIndex {
     pub(super) custom_event: Vec<CustomEventExtensionHandler>,
     pub(super) static_tools: Vec<StaticToolEntry>,
     pub(super) tool_discoveries: Vec<ToolDiscoveryEntry>,
-    pub(super) static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)>,
+    pub(super) static_commands: Vec<(String, SlashCommand, Option<Arc<dyn CommandHandler>>)>,
     pub(super) command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)>,
     pub(super) keybindings: Vec<Keybinding>,
     pub(super) status_items: Vec<StatusItem>,
@@ -224,7 +224,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
             });
         }
         for (command, handler) in registrations.commands() {
-            static_commands.push((extension_id.clone(), command.clone(), Arc::clone(handler)));
+            static_commands.push((extension_id.clone(), command.clone(), handler.clone()));
         }
         for discovery in registrations.command_discoveries() {
             command_discoveries.push((extension_id.clone(), Arc::clone(discovery)));

@@ -13,7 +13,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::extension::{
     CommandAvailability, CommandCompletions, CommandExecution, ExtensionCommandResult,
-    ExtensionError, SessionCommandIntent, SessionCommandKind, internal::RuntimeHookCallContext,
+    ExtensionError, SessionCommandKind, internal::RuntimeHookCallContext,
 };
 use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
@@ -87,17 +87,24 @@ impl SessionCommandService {
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
         {
-            let dispatch = self
+            match self
                 .dispatch_command_in_operation(
                     &operation,
                     command,
                     CommandTransport::NonInteractive,
                 )
-                .await?;
-            return self
-                .finish_command_dispatch(operation, dispatch)
                 .await
-                .and_then(CommandOutcome::into_prompt_submission);
+            {
+                Ok(dispatch) => {
+                    return self
+                        .finish_command_dispatch(operation, dispatch)
+                        .await
+                        .and_then(CommandOutcome::into_prompt_submission);
+                },
+                // 未注册的斜杠命令按普通文本透传给模型；只有显式命令端点保留报错。
+                Err(HandlerError::UnknownCommand(_)) => {},
+                Err(error) => return Err(error),
+            }
         }
 
         self.scheduler
@@ -338,76 +345,107 @@ impl SessionCommandService {
             };
         }
 
-        match self
-            .runtime
-            .extension_runner()
-            .invoke_resolved_command_typed(&resolved, &command.arguments, &context)
-            .await
-        {
-            Ok(ExtensionCommandResult::Display {
-                content,
-                is_error,
-                status_update,
-            }) => {
-                if let Some(update) = status_update {
-                    self.event_bus
-                        .send_status_item_update(update.id, update.text);
+        match resolved.command.execution {
+            CommandExecution::Host(kind) => {
+                self.dispatch_session_command(operation, kind, &command.arguments)
+                    .await
+            },
+            CommandExecution::Extension => {
+                match self
+                    .runtime
+                    .extension_runner()
+                    .invoke_resolved_command_typed(&resolved, &command.arguments, &context)
+                    .await
+                {
+                    Ok(ExtensionCommandResult::Display {
+                        content,
+                        is_error,
+                        status_update,
+                    }) => {
+                        if let Some(update) = status_update {
+                            self.event_bus
+                                .send_status_item_update(update.id, update.text);
+                        }
+                        self.event_bus.send_extension_command_result(
+                            command.name,
+                            content.clone(),
+                            is_error,
+                        );
+                        Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
+                            CommandInvocation::Display { content, is_error },
+                        )))
+                    },
+                    Ok(ExtensionCommandResult::Handled { message }) => {
+                        Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
+                            CommandInvocation::Handled { message },
+                        )))
+                    },
+                    Ok(ExtensionCommandResult::StartTurn { instructions }) => {
+                        let user_text = if instructions.trim().is_empty() {
+                            visible_command_text(&command)
+                        } else {
+                            instructions
+                        };
+                        Ok(CommandDispatch::StartTurn(UserInput::text_only(user_text)))
+                    },
+                    Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
+                        name.trim_start_matches('/').to_string(),
+                    )),
+                    Err(ExtensionError::InvalidInput { message, .. }) => {
+                        Err(HandlerError::InvalidRequest(message))
+                    },
+                    Err(error) => Err(HandlerError::Extension(error)),
                 }
-                self.event_bus.send_extension_command_result(
-                    command.name,
-                    content.clone(),
-                    is_error,
-                );
-                Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
-                    CommandInvocation::Display { content, is_error },
-                )))
             },
-            Ok(ExtensionCommandResult::Handled { message }) => Ok(CommandDispatch::Completed(
-                CommandOutcome::Invocation(CommandInvocation::Handled { message }),
-            )),
-            Ok(ExtensionCommandResult::StartTurn { instructions }) => {
-                let user_text = if instructions.trim().is_empty() {
-                    visible_command_text(&command)
-                } else {
-                    instructions
-                };
-                Ok(CommandDispatch::StartTurn(UserInput::text_only(user_text)))
-            },
-            Ok(ExtensionCommandResult::HostCommand { intent }) => {
-                self.dispatch_session_command(operation, intent).await
-            },
-            Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
-                name.trim_start_matches('/').to_string(),
-            )),
-            Err(ExtensionError::InvalidInput { message, .. }) => {
-                Err(HandlerError::InvalidRequest(message))
-            },
-            Err(error) => Err(HandlerError::Extension(error)),
         }
     }
 
     async fn dispatch_session_command(
         &self,
         operation: &SessionOperationGuard,
-        intent: SessionCommandIntent,
+        kind: SessionCommandKind,
+        arguments: &str,
     ) -> Result<CommandDispatch, HandlerError> {
-        let SessionCommandIntent::CompactSession { keep_recent_turns } = intent else {
-            return Ok(CommandDispatch::Completed(CommandOutcome::SessionCommand(
-                intent,
-            )));
-        };
-        let invocation = match self
-            .compact_session_in_operation(operation, keep_recent_turns)
-            .await?
-        {
-            ManualCompactionOutcome::Compacted { messages_removed } => CommandInvocation::Handled {
-                message: format!("compact completed; {messages_removed} messages removed"),
+        match kind {
+            SessionCommandKind::CompactSession => {
+                let argument = arguments.trim();
+                let keep_recent_turns = if argument.is_empty() {
+                    None
+                } else {
+                    Some(argument.parse::<usize>().map_err(|_| {
+                        HandlerError::InvalidRequest(
+                            "compact expects an optional non-negative integer".into(),
+                        )
+                    })?)
+                };
+                let invocation = match self
+                    .compact_session_in_operation(operation, keep_recent_turns)
+                    .await?
+                {
+                    ManualCompactionOutcome::Compacted { messages_removed } => {
+                        CommandInvocation::Handled {
+                            message: format!(
+                                "compact completed; {messages_removed} messages removed"
+                            ),
+                        }
+                    },
+                    ManualCompactionOutcome::Skipped { message } => {
+                        CommandInvocation::Handled { message }
+                    },
+                };
+                Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
+                    invocation,
+                )))
             },
-            ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
-        };
-        Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
-            invocation,
-        )))
+            SessionCommandKind::SelectModel => {
+                if !arguments.trim().is_empty() {
+                    return Err(HandlerError::InvalidRequest(
+                        "model does not accept arguments".into(),
+                    ));
+                }
+                Ok(CommandDispatch::Completed(CommandOutcome::ModelSelection))
+            },
+        }
     }
 
     async fn finish_command_dispatch(
@@ -524,13 +562,16 @@ impl SessionCommandService {
             .into_iter()
             .filter(|resolved| command_is_available(resolved, transport))
             .map(|resolved| CommandInfo {
+                needs_argument: resolved.command.args_schema.is_some(),
                 name: resolved.command.name,
                 extension_id: resolved.extension_id,
                 description: resolved.command.description,
-                needs_argument: resolved.command.args_schema.is_some(),
+                args_schema: resolved.command.args_schema,
                 requires_idle: resolved.command.requires_idle,
                 argument_completions: resolved.command.argument_completions,
                 priority: resolved.command.priority,
+                availability: resolved.command.availability,
+                execution: resolved.command.execution,
             })
             .collect();
         CommandList {
@@ -596,7 +637,10 @@ fn normalize_command(mut command: ParsedSlashCommand) -> Result<ParsedSlashComma
 }
 
 fn normalize_command_name(name: &str) -> String {
-    name.trim().trim_start_matches('/').to_ascii_lowercase()
+    // Shared input-side rule with the SDK: strip `/`, trim, lowercase. The
+    // strict registration format check stays on the registration side only;
+    // unknown slash text falls through to the model as a plain prompt.
+    astrcode_extension_sdk::wire::normalize_slash_command_name(name)
 }
 
 fn visible_command_text(command: &ParsedSlashCommand) -> String {

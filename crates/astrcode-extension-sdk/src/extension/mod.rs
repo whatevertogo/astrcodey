@@ -1,10 +1,10 @@
-//! 扩展系统类型定义。
+//! Extension system type definitions.
 //!
-//! 扩展是 astrcode 的主要扩展机制。技能、Agent 配置、自定义工具和斜杠命令
-//! 都通过这里定义的稳定契约挂入宿主。
+//! Extensions are astrcode's primary extension mechanism. Skills, agent configurations, custom
+//! tools, and slash commands all hook into the host through the stable contracts defined here.
 //!
-//! 本模块只定义契约（trait、capability、hook 类型）：扩展的发现、加载、
-//! 路由与进程管理位于 `astrcode-extensions`。
+//! This module only defines contracts (traits, capabilities, hook types): extension discovery,
+//! loading, routing, and process management live in `astrcode-extensions`.
 
 mod call_context;
 mod events;
@@ -54,12 +54,11 @@ pub use hooks::{
     PromptBuildHandler, PromptBuildPayload, PromptContributions, ProviderContext,
     ProviderContributionHandler, ProviderContributionId, ProviderEvent, ProviderHandler,
     ProviderPayload, ProviderRequestId, ProviderResult, ProviderSettlementContext,
-    ProviderSettlementPayload, SessionCommandIntent, SessionCommandKind, SlashCommand,
-    StatusItemUpdatePayload, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
-    ToolHandler, ToolHookRegistration, ToolHookTarget, ToolInputTransformHandler,
-    ToolInputTransformResult, ToolUseRegistration, UserMessageEnvelopeContext,
-    UserMessageEnvelopeHandler, UserMessageEnvelopePayload, UserMessageEnvelopeRegistration,
-    UserMessageEnvelopeResult,
+    ProviderSettlementPayload, SessionCommandKind, SlashCommand, StatusItemUpdatePayload,
+    ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration,
+    ToolHookTarget, ToolInputTransformHandler, ToolInputTransformResult, ToolUseRegistration,
+    UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopePayload,
+    UserMessageEnvelopeRegistration, UserMessageEnvelopeResult,
 };
 pub use http::{
     DEFAULT_EXTENSION_HTTP_BODY_BYTES, ExtensionHttpAccess, ExtensionHttpDispatchRequest,
@@ -85,9 +84,10 @@ pub use crate::{
     transport::TransportFeature,
 };
 
-/// 反序列化工具参数，失败时生成带 JSON path 与 schema hint 的 `InvalidInput`。
+/// Deserialize tool arguments, producing an `InvalidInput` with the JSON path and a schema hint
+/// on failure.
 ///
-/// 供 [`ToolContext::arguments`] 与 [`ToolPlanContext::arguments`] 共用。
+/// Shared by [`ToolContext::arguments`] and [`ToolPlanContext::arguments`].
 pub(crate) fn parse_tool_arguments<T: serde::de::DeserializeOwned>(
     tool_name: &str,
     arguments: &serde_json::Value,

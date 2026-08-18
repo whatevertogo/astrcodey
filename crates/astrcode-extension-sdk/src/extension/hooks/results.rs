@@ -31,42 +31,42 @@ impl PreparedProviderContribution {
     }
 }
 
-/// 通用钩子结果。
+/// Generic hook result.
 #[derive(Debug, Clone)]
 pub enum HookResult {
     Allow,
     Block { reason: String },
 }
 
-/// 工具参数变换结果。
+/// Tool input transform result.
 #[derive(Debug, Clone)]
 pub enum ToolInputTransformResult {
     Unchanged,
     Replace { tool_input: serde_json::Value },
 }
 
-/// 单个 PreToolUse 准入处理器的决策。
+/// Decision of a single PreToolUse admission handler.
 #[derive(Debug, Clone)]
 pub enum PreToolUseResult {
     Allow,
     Block {
         reason: String,
     },
-    /// 请求用户审批后再执行（扩展 Gate Ask）。
+    /// Ask the user for approval before executing (extension gate Ask).
     Ask {
         prompt: String,
         rule_key: Option<String>,
     },
 }
 
-/// 一个 Extension 准入条件。
+/// One extension admission requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreToolUseRequirement {
     pub prompt: String,
     pub rule_key: Option<String>,
 }
 
-/// 所有匹配 PreToolUse 处理器的组合决策。
+/// Combined decision of all matching PreToolUse handlers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreToolUseAdmission {
     Allow,
@@ -78,10 +78,11 @@ pub enum PreToolUseAdmission {
     },
 }
 
-/// PostToolUse 钩子结果。
+/// PostToolUse hook result.
 ///
-/// `ModifyResult` 仅替换 ToolResult 的文本内容（`content` 字段）；其它结构化
-/// 字段——`is_error` / `error` / `metadata` / `duration_ms`——保持不变。
+/// `ModifyResult` only replaces the text content of the ToolResult (the `content` field); the
+/// other structured fields — `is_error` / `error` / `metadata` / `duration_ms` — are left
+/// unchanged.
 #[derive(Debug, Clone)]
 pub enum PostToolUseResult {
     Allow,
@@ -89,14 +90,14 @@ pub enum PostToolUseResult {
     ModifyResult { content: String },
 }
 
-/// LLM 自然结束（无 tool call）后，扩展是否再跑一个 agent step。
+/// Whether the extension runs another agent step after the LLM ends naturally (no tool call).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContinueAfterStopResult {
     EndTurn,
     ContinueOneStep,
 }
 
-/// Provider 钩子结果。
+/// Provider hook result.
 #[derive(Debug, Clone)]
 pub enum ProviderResult {
     Allow,
@@ -119,7 +120,7 @@ pub enum PreCompactResult {
     Contributions(CompactContributions),
 }
 
-/// 用户消息 envelope 变换结果。
+/// User message envelope transform result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserMessageEnvelopeResult {
     Allow,

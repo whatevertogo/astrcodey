@@ -1,14 +1,13 @@
 //! 交互式 handler 对 session-scoped command 服务的薄适配。
 
 use astrcode_core::types::SessionId;
-use astrcode_extension_sdk::extension::SessionCommandIntent;
 use astrcode_protocol::events::ClientNotification;
 
 use super::{
     CommandHandler, CommandInvocation, CommandOutcome, HandlerError, PromptSubmission, slash,
 };
 use crate::{
-    protocol_mapping::{command_info_to_stdio_dto, keybinding_to_dto, status_item_to_info_dto},
+    protocol_mapping::{command_info_to_dto, keybinding_to_dto, status_item_to_info_dto},
     session_command_contract::{CommandList, ParsedSlashCommand},
 };
 
@@ -25,7 +24,7 @@ impl CommandHandler {
         let commands = command_list
             .commands
             .into_iter()
-            .map(command_info_to_stdio_dto)
+            .map(command_info_to_dto)
             .collect();
         let keybindings = command_list
             .keybindings
@@ -72,15 +71,12 @@ impl CommandHandler {
             .await?
         {
             CommandOutcome::Invocation(invocation) => Ok(invocation),
-            CommandOutcome::SessionCommand(SessionCommandIntent::SelectModel) => {
+            CommandOutcome::ModelSelection => {
                 self.start_model_selection();
                 Ok(CommandInvocation::Handled {
                     message: "model selection started".into(),
                 })
             },
-            CommandOutcome::SessionCommand(SessionCommandIntent::CompactSession { .. }) => Err(
-                HandlerError::InvalidRequest("compact command was not executed by the host".into()),
-            ),
         }
     }
 

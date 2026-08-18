@@ -231,42 +231,58 @@ fn preview_summary_box(
 
 pub struct ShellRenderer;
 
+pub struct ShellPollRenderer;
+
 impl ToolRenderer for ShellRenderer {
     fn tool_name(&self) -> &str {
         "shell"
     }
 
     fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
-        let exit_code = result
-            .metadata
-            .get("exitCode")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1);
-        let duration = result.duration_ms.unwrap_or(0);
-        let timed_out = result
-            .metadata
-            .get("timedOut")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let status = if timed_out {
-            "timed out".to_string()
-        } else if exit_code == 0 {
-            format_duration(duration)
-        } else {
-            format!("exit {} · {}", exit_code, format_duration(duration))
-        };
-
-        let tone = if result.is_error {
-            RenderTone::Error
-        } else {
-            RenderTone::Success
-        };
-
-        // 对于有实质输出的命令，截取前几行展示
-        let content = result.content.trim();
-        Some(preview_summary_box(content, 8, " lines", status, tone))
+        render_shell_result(result)
     }
+}
+
+impl ToolRenderer for ShellPollRenderer {
+    fn tool_name(&self) -> &str {
+        "shell_poll"
+    }
+
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
+        render_shell_result(result)
+    }
+}
+
+fn render_shell_result(result: &ToolResult) -> Option<RenderSpec> {
+    let exit_code = result
+        .metadata
+        .get("exitCode")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    let duration = result.duration_ms.unwrap_or(0);
+    let timed_out = result
+        .metadata
+        .get("timedOut")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let status = if timed_out {
+        "timed out".to_string()
+    } else if exit_code == 0 {
+        format_duration(duration)
+    } else {
+        format!("exit {} · {}", exit_code, format_duration(duration))
+    };
+
+    let tone = if result.is_error {
+        RenderTone::Error
+    } else {
+        RenderTone::Success
+    };
+
+    // 对于有实质输出的命令，截取前几行展示
+    let content = result.content.trim();
+    Some(preview_summary_box(content, 8, " lines", status, tone))
 }
 
 // ─── Grep ─────────────────────────────────────────────────────────────────
@@ -573,6 +589,7 @@ pub fn register_builtin(tool_reg: &mut ToolRendererRegistry) {
     tool_reg.register(Arc::new(FindRenderer));
     tool_reg.register(Arc::new(GrepRenderer));
     tool_reg.register(Arc::new(ShellRenderer));
+    tool_reg.register(Arc::new(ShellPollRenderer));
     tool_reg.register(Arc::new(PatchRenderer));
     tool_reg.register(Arc::new(AgentRenderer));
     tool_reg.register(Arc::new(SwitchModeRenderer));

@@ -85,18 +85,6 @@ pub enum ClientCommand {
     /// 中止当前正在进行的 AI 处理操作。
     Abort,
 
-    // ---- 配置变更 ----
-    /// 设置当前会话使用的 AI 模型。
-    SetModel { model_id: String },
-
-    /// 压缩当前会话上下文。
-    ///
-    /// 此操作会触发会话历史压缩，以控制上下文长度和 Token 消耗。
-    Compact {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        keep_recent_turns: Option<usize>,
-    },
-
     // ---- 状态查询 ----
     /// 获取当前服务器/会话状态。
     GetState,
@@ -232,18 +220,5 @@ mod tests {
         let cmd = ClientCommand::ListSessions;
         let parsed = roundtrip(&cmd);
         assert!(matches!(parsed, ClientCommand::ListSessions));
-    }
-
-    #[test]
-    fn compact_roundtrip() {
-        let cmd = ClientCommand::Compact {
-            keep_recent_turns: Some(5),
-        };
-        let parsed = roundtrip(&cmd);
-        if let ClientCommand::Compact { keep_recent_turns } = parsed {
-            assert_eq!(keep_recent_turns, Some(5));
-        } else {
-            panic!("wrong variant");
-        }
     }
 }

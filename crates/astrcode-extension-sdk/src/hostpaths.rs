@@ -107,7 +107,8 @@ fn create_atomic_write_file(parent: &Path) -> io::Result<(File, PathBuf)> {
     ))
 }
 
-/// 读取 JSON 状态文件；文件不存在时返回 `Ok(None)`。解析失败以 io::Error 返回。
+/// Read a JSON state file; returns `Ok(None)` when the file does not exist. Parse failures are
+/// returned as `io::Error`.
 pub fn read_json_state<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>> {
     match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content)
@@ -118,7 +119,7 @@ pub fn read_json_state<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::
     }
 }
 
-/// 以 pretty JSON 原子写入状态文件（内部使用 [`write_file_atomic`]）。
+/// Atomically write a state file as pretty JSON (uses [`write_file_atomic`] internally).
 pub fn write_json_state<T: serde::Serialize>(path: &Path, state: &T) -> std::io::Result<()> {
     with_state_file_lock(path, || write_json_state_unlocked(path, state))
 }

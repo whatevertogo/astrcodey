@@ -36,7 +36,7 @@ use super::super::{
     },
 };
 use crate::{
-    protocol_mapping::{command_info_to_http_dto, keybinding_to_dto, status_item_to_dto},
+    protocol_mapping::{command_info_to_dto, keybinding_to_dto, status_item_to_dto},
     session_command_contract::{CommandInvocation, HandlerError, PromptSubmission},
 };
 
@@ -455,7 +455,7 @@ pub(in crate::http) async fn list_commands(
                 commands: command_list
                     .commands
                     .into_iter()
-                    .map(command_info_to_http_dto)
+                    .map(command_info_to_dto)
                     .collect(),
                 keybindings,
                 status_items,

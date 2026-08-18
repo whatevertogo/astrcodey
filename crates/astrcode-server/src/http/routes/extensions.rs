@@ -33,8 +33,8 @@ use super::{
 };
 use crate::protocol_mapping::{
     custom_event_declaration_to_dto, custom_event_subscription_to_dto, extension_capability_to_dto,
-    extension_http_method_to_dto, extension_slash_command_to_dto, keybinding_to_dto,
-    status_item_to_dto, transport_feature_to_dto,
+    extension_http_method_to_dto, keybinding_to_dto, slash_command_to_dto, status_item_to_dto,
+    transport_feature_to_dto,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -229,6 +229,7 @@ async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
 fn extension_declaration_dto(
     declaration: astrcode_extensions::runner::ExtensionDeclarationSnapshot,
 ) -> ExtensionDeclarationDto {
+    let id = declaration.id.clone();
     ExtensionDeclarationDto {
         id: declaration.id,
         capabilities: declaration
@@ -246,7 +247,7 @@ fn extension_declaration_dto(
         commands: declaration
             .commands
             .into_iter()
-            .map(extension_slash_command_to_dto)
+            .map(|command| slash_command_to_dto(&id, command))
             .collect(),
         dynamic_commands: declaration.dynamic_commands,
         keybindings: declaration

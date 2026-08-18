@@ -14,10 +14,10 @@ use super::{
     ToolInputTransformHandler, ToolUseRegistration, UserMessageEnvelopeHandler,
     UserMessageEnvelopeRegistration,
     registration_validation::{
-        canonical_registration_name, extension_http_route_patterns_conflict,
-        has_duplicate_registration_name, lifecycle_event_allows_blocking,
-        normalize_custom_event_subscription, validate_custom_event_subscription,
-        validate_extension_http_route,
+        canonical_registration_name, canonicalize_command_name,
+        extension_http_route_patterns_conflict, has_duplicate_registration_name,
+        lifecycle_event_allows_blocking, normalize_custom_event_subscription,
+        validate_custom_event_subscription, validate_extension_http_route,
     },
 };
 use crate::{
@@ -27,16 +27,19 @@ use crate::{
 
 // ─── Registrar ───────────────────────────────────────────────────
 
-/// 扩展能力注册器。
+/// Registrar for extension capabilities.
 ///
-/// 在 `Extension::register()` 调用期间有效，扩展通过它声明自己提供的能力。
+/// Valid during an `Extension::register()` call; extensions declare the capabilities they
+/// provide through it.
 ///
-/// 字段全部私有，外部只能通过 `tool` / `command` / `on_pre_tool_use` 等
-/// 写入方法和 `tools()` / `commands()` 等读取 accessor 访问。这样保证：
-/// 1. 扩展作者只能用受控 API 注册能力，无法旁路构造非法状态；
-/// 2. 字段重构（合并、增加索引）不会破坏外部代码；
-/// 3. `Registrar` 只在 `Extension::register()` 生命周期内有效，私有字段
-///    阻止外部把它当成长寿数据持有。
+/// All fields are private; external code can only go through write accessors such as
+/// `tool` / `command` / `on_pre_tool_use` and read accessors such as `tools()` / `commands()`.
+/// This guarantees:
+/// 1. Extension authors can only register capabilities through the controlled API and cannot bypass
+///    it to construct invalid state;
+/// 2. Field refactors (merging, adding indexes) cannot break external code;
+/// 3. `Registrar` is only valid within the `Extension::register()` lifetime; the private fields
+///    prevent external code from holding it as long-lived data.
 #[derive(Default)]
 pub struct Registrar {
     registrations: ExtensionRegistrations,
@@ -50,7 +53,7 @@ pub struct Registrar {
 pub struct ExtensionRegistrations {
     tools: Vec<ToolRegistration>,
     tool_discovery: Vec<Arc<dyn ToolDiscoveryHandler>>,
-    commands: Vec<(SlashCommand, Arc<dyn CommandHandler>)>,
+    commands: Vec<(SlashCommand, Option<Arc<dyn CommandHandler>>)>,
     command_discovery: Vec<Arc<dyn CommandDiscoveryHandler>>,
     http_routes: Vec<ExtensionHttpRouteRegistration>,
     keybindings: Vec<Keybinding>,
@@ -143,7 +146,19 @@ impl Registrar {
 
     pub fn command(&mut self, mut cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
         canonical_registration_name(&mut cmd.name);
-        self.registrations.commands.push((cmd, handler));
+        self.registrations.commands.push((cmd, Some(handler)));
+    }
+
+    /// Declare a host-executed session command.
+    ///
+    /// The command's `execution` must be [`CommandExecution::Host`]; the host
+    /// owns parsing and execution behind its session operation gate, so no
+    /// extension handler exists for it. `finish()` rejects a host command
+    /// registered through [`Registrar::command`] and a non-host command
+    /// registered here.
+    pub fn host_command(&mut self, mut cmd: SlashCommand) {
+        canonical_registration_name(&mut cmd.name);
+        self.registrations.commands.push((cmd, None));
     }
 
     pub fn command_discovery(&mut self, handler: Arc<dyn CommandDiscoveryHandler>) {
@@ -258,9 +273,9 @@ impl Registrar {
         });
     }
 
-    /// 注册 provider request hook。
+    /// Register a provider request hook.
     ///
-    /// Request 阶段允许 `Blocking` handler 阻断请求或改写 messages。
+    /// The request phase allows `Blocking` handlers to block the request or rewrite messages.
     pub fn on_before_provider_request(
         &mut self,
         mode: HookMode,
@@ -272,9 +287,10 @@ impl Registrar {
             .push((ProviderEvent::BeforeRequest, mode, priority, handler));
     }
 
-    /// 注册 provider response observer。
+    /// Register a provider response observer.
     ///
-    /// Response 阶段只观察结果，不允许阻断或改写后续流程。
+    /// The response phase only observes the result; blocking or rewriting the subsequent flow
+    /// is not allowed.
     pub fn on_after_provider_response(&mut self, priority: i32, handler: Arc<dyn ProviderHandler>) {
         self.registrations.provider.push((
             ProviderEvent::AfterResponse,
@@ -347,7 +363,7 @@ impl Registrar {
 
     #[doc(hidden)]
     pub fn finish(
-        self,
+        mut self,
         manifest: ExtensionManifest,
     ) -> Result<(ExtensionManifest, ExtensionRegistrations), RegistrationError> {
         manifest
@@ -367,7 +383,7 @@ impl ExtensionRegistrations {
         &self.tool_discovery
     }
 
-    pub fn commands(&self) -> &[(SlashCommand, Arc<dyn CommandHandler>)] {
+    pub fn commands(&self) -> &[(SlashCommand, Option<Arc<dyn CommandHandler>>)] {
         &self.commands
     }
 
@@ -443,7 +459,7 @@ impl ExtensionRegistrations {
         &self.custom_event_subscriptions
     }
 
-    fn validate(&self, manifest: &ExtensionManifest) -> Result<(), RegistrationError> {
+    fn validate(&mut self, manifest: &ExtensionManifest) -> Result<(), RegistrationError> {
         let extension_id = manifest.id();
         let capabilities = manifest.capabilities();
 
@@ -542,14 +558,56 @@ impl ExtensionRegistrations {
             tool_names.insert(name);
         }
         let mut command_names = HashSet::new();
-        for (command, handler) in &self.commands {
-            let name = command.name.as_str();
-            if name.is_empty() {
-                return Err(invalid_registration(
-                    extension_id,
-                    "command name cannot be empty",
-                ));
+        for (command, handler) in &mut self.commands {
+            canonicalize_command_name(&mut command.name).map_err(|reason| {
+                invalid_registration(extension_id, format!("command {reason}"))
+            })?;
+            match (&command.execution, handler.as_ref()) {
+                (CommandExecution::Extension, Some(handler)) => {
+                    if command.argument_completions && !handler.supports_argument_completions() {
+                        return Err(invalid_registration(
+                            extension_id,
+                            format!(
+                                "command `{}` declares argument completions, but its handler does \
+                                 not support them",
+                                command.name
+                            ),
+                        ));
+                    }
+                },
+                (CommandExecution::Host(_), None) => {
+                    if command.argument_completions {
+                        return Err(invalid_registration(
+                            extension_id,
+                            format!(
+                                "host-executed command `{}` cannot declare argument completions",
+                                command.name
+                            ),
+                        ));
+                    }
+                },
+                (CommandExecution::Host(_), Some(_)) => {
+                    return Err(invalid_registration(
+                        extension_id,
+                        format!(
+                            "command `{}` is host-executed and must be registered through \
+                             registrar::host_command()",
+                            command.name
+                        ),
+                    ));
+                },
+                (CommandExecution::Extension, None) => {
+                    return Err(invalid_registration(
+                        extension_id,
+                        format!(
+                            "command `{}` needs an extension handler; registrar::host_command() \
+                             requires CommandExecution::Host",
+                            command.name
+                        ),
+                    ));
+                },
             }
+            let name = command.name.as_str();
             if has_duplicate_registration_name(command_names.iter().copied(), name) {
                 return Err(invalid_registration(
                     extension_id,
@@ -557,15 +615,6 @@ impl ExtensionRegistrations {
                 ));
             }
             command_names.insert(name);
-            if command.argument_completions && !handler.supports_argument_completions() {
-                return Err(invalid_registration(
-                    extension_id,
-                    format!(
-                        "command `{name}` declares argument completions, but its handler does not \
-                         support them"
-                    ),
-                ));
-            }
         }
         for binding in &self.keybindings {
             if binding.key.trim().is_empty() {
@@ -754,7 +803,7 @@ mod tests {
         builder::{command, command_handler, manifest, tool, tool_handler},
         extension::{
             CommandDiscovery, CommandDiscoveryContext, CustomEventDelivery, ExtensionCommandResult,
-            ExtensionError,
+            ExtensionError, SessionCommandKind,
         },
         tool::{ToolPlan, ToolResult},
     };
@@ -874,42 +923,126 @@ mod tests {
             .finish(manifest("dynamic-keybinding-test").version("1.0.0").build())
             .expect("dynamic command target is validated at discovery time");
     }
+
+    #[test]
+    fn command_names_are_lowercased_and_format_validated() {
+        for (raw, expected) in [
+            ("Compact", Some("compact")),
+            ("/MODEL", Some("model")),
+            ("has space", None),
+            ("1lead", None),
+            ("", None),
+        ] {
+            let mut registrar = Registrar::new();
+            registrar.command(
+                command(raw).build(),
+                command_handler(|_| async { Ok(ExtensionCommandResult::handled("ok")) }),
+            );
+            let result = registrar.finish(manifest("command-name-test").version("1.0.0").build());
+            match expected {
+                Some(canonical) => {
+                    let (_, registrations) = result.expect("canonicalizable command name");
+                    assert_eq!(registrations.commands()[0].0.name, canonical);
+                },
+                None => {
+                    assert!(result.is_err(), "command name {raw:?} must be rejected");
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn host_commands_must_use_the_host_command_registration() {
+        let mut registrar = Registrar::new();
+        registrar.command(
+            command("compact")
+                .host_command(SessionCommandKind::CompactSession)
+                .build(),
+            command_handler(|_| async { Ok(ExtensionCommandResult::handled("ok")) }),
+        );
+        let error = match registrar.finish(
+            manifest("host-command-test")
+                .version("1.0.0")
+                .capability(ExtensionCapability::SessionCommand)
+                .build(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("handler-backed host command must be rejected"),
+        };
+        assert!(error.to_string().contains("host_command"), "{error}");
+    }
+
+    #[test]
+    fn host_command_registration_requires_host_execution() {
+        let mut registrar = Registrar::new();
+        registrar.host_command(command("review").build());
+        let error = match registrar.finish(manifest("host-command-test").version("1.0.0").build()) {
+            Err(error) => error,
+            Ok(_) => panic!("handlerless extension command must be rejected"),
+        };
+        assert!(
+            error.to_string().contains("CommandExecution::Host"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn host_command_registration_requires_the_session_command_capability() {
+        let mut registrar = Registrar::new();
+        registrar.host_command(
+            command("compact")
+                .host_command(SessionCommandKind::CompactSession)
+                .build(),
+        );
+        let error = match registrar.finish(manifest("host-command-test").version("1.0.0").build()) {
+            Err(error) => error,
+            Ok(_) => panic!("host command without capability must be rejected"),
+        };
+        assert!(matches!(
+            error,
+            RegistrationError::MissingCapability {
+                capability: ExtensionCapability::SessionCommand,
+                ..
+            }
+        ));
+    }
 }
 
 // ─── Keybinding ──────────────────────────────────────────────────────────
 
-/// 插件注册的快捷键绑定。
+/// Keybinding registered by an extension.
 ///
-/// 当用户按下对应组合键时，TUI 将执行关联的斜杠命令（如同用户输入该命令）。
+/// When the user presses the corresponding key combination, the TUI executes the associated
+/// slash command (as if the user had typed it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keybinding {
-    /// 快捷键描述（如 "shift+tab", "ctrl+p"）。
+    /// Key combination description (e.g. "shift+tab", "ctrl+p").
     pub key: String,
-    /// 按下时执行的斜杠命令名（不含 `/`）。
+    /// Name of the slash command executed when pressed (without `/`).
     pub command: String,
-    /// 可选的命令参数。
+    /// Optional command arguments.
     #[serde(default)]
     pub arguments: String,
-    /// 人类可读描述（用于帮助/UI 展示）。
+    /// Human-readable description (for help/UI display).
     pub description: String,
 }
 
 // ─── Status Item ─────────────────────────────────────────────────────────
 
-/// 插件注册的状态栏项。
+/// Status bar item registered by an extension.
 ///
-/// 显示在 TUI footer 和前端状态栏中。插件可以通过 `StatusItemUpdate`
-/// 通知动态更新内容。
+/// Shown in the TUI footer and frontend status bar. Extensions can dynamically update its
+/// content through `StatusItemUpdate` notifications.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusItem {
-    /// 唯一标识符（如 "mode"、"git-branch"）。
+    /// Unique identifier (e.g. "mode", "git-branch").
     pub id: String,
-    /// 初始显示文本。
+    /// Initial display text.
     pub text: String,
-    /// 排序优先级（越小越靠左）。
+    /// Sort priority (lower values are placed further left).
     #[serde(default)]
     pub priority: i32,
-    /// 可选的 tooltip 描述。
+    /// Optional tooltip description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<String>,
 }

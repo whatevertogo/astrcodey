@@ -1,4 +1,4 @@
-//! `session_inspect` 插件边界契约。
+//! `session_inspect` plugin boundary contracts.
 
 use std::collections::BTreeMap;
 
@@ -182,7 +182,7 @@ pub struct SessionInspectReadModelOutput {
     pub read_model: SessionInspectReadModel,
 }
 
-/// `astrcode.session.history.snapshot` 的作用域受限只读响应。
+/// Scope-limited read-only response for `astrcode.session.history.snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHistorySnapshotOutput {

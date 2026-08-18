@@ -18,9 +18,9 @@ pub use crate::wire::custom_event::{
 };
 use crate::wire::effects::{HandlerEffect, HandlerResult};
 // ─── Lifecycle Events ────────────────────────────────────────────────────
-/// 扩展可订阅的核心生命周期事件。
+/// Core lifecycle events an extension can subscribe to.
 ///
-/// 覆盖会话/轮次/工具/LLM 提供者/prompt 组装的完整生命周期。
+/// Covers the full lifecycle of sessions, turns, tools, LLM providers, and prompt assembly.
 pub use crate::wire::manifest::LifecycleEvent;
 
 // ─── Custom Event System ───────────────────────────────────────────────────

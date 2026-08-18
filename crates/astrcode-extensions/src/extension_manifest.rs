@@ -15,8 +15,8 @@ use astrcode_extension_sdk::{
     wire::{
         FeatureName,
         manifest::{
-            InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent,
-            ManifestHttpRoute, ManifestTool, ManifestToolMode, ToolHookManifest,
+            InitializeManifest, ManifestHook, ManifestHookEvent, ManifestHttpRoute, ManifestTool,
+            ManifestToolMode, ToolHookManifest,
         },
         protocol::PeerInfo,
     },
@@ -164,11 +164,27 @@ fn registration_from_manifest(
         .into_iter()
         .map(normalize_tool)
         .collect::<Result<_, _>>()?;
-    let commands = manifest
+    let commands: Vec<SlashCommand> = manifest
         .commands
         .into_iter()
-        .map(normalize_command)
-        .collect();
+        .map(|mut command| {
+            // The worker canonicalizes at registration, but this value crossed the
+            // wire since; re-validate before it becomes host index state.
+            astrcode_extension_sdk::extension::internal::canonicalize_command_name(
+                &mut command.name,
+            )?;
+            if matches!(
+                command.execution,
+                astrcode_extension_sdk::extension::CommandExecution::Host(_)
+            ) {
+                return Err(format!(
+                    "command `{}` is host-executed and cannot be declared by a disk extension",
+                    command.name
+                ));
+            }
+            Ok(command)
+        })
+        .collect::<Result<_, String>>()?;
     let subscriptions = manifest
         .hooks
         .into_iter()
@@ -255,19 +271,6 @@ fn normalize_tool(tool: ManifestTool) -> Result<ExtensionToolDefinition, String>
         mode: execution_mode,
         timeout,
     }))
-}
-
-fn normalize_command(command: ManifestCommand) -> SlashCommand {
-    SlashCommand {
-        name: command.name,
-        description: command.description,
-        args_schema: command.args_schema,
-        requires_idle: command.requires_idle,
-        argument_completions: command.argument_completions,
-        priority: command.priority,
-        availability: command.availability,
-        execution: command.execution,
-    }
 }
 
 fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {

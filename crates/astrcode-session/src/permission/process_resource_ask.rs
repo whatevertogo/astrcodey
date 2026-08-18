@@ -5,6 +5,11 @@ use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 pub(super) struct ProcessResourceAskPolicy;
 
 pub(super) fn rule_key(tool_name: &str) -> String {
+    let tool_name = if tool_name == "shell_poll" {
+        "shell"
+    } else {
+        tool_name
+    };
     format!("process-resource:{tool_name}")
 }
 
@@ -65,5 +70,6 @@ mod tests {
                 PolicyDecision::Ask { .. }
             ));
         }
+        assert_eq!(rule_key("shell_poll"), rule_key("shell"));
     }
 }

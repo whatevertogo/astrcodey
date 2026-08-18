@@ -1,6 +1,6 @@
 pub(crate) fn tool_display_name(tool_name: &str) -> &str {
     match tool_name {
-        "shell" => "Bash",
+        "shell" | "shell_poll" => "Bash",
         "read" => "Read",
         "write" => "Write",
         "edit" => "Edit",

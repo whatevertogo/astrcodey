@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-/// 工具参数变换处理器。
+/// Tool input transform handler.
 #[async_trait::async_trait]
 pub trait ToolInputTransformHandler: Send + Sync {
     async fn transform(
@@ -33,19 +33,19 @@ pub trait ToolInputTransformHandler: Send + Sync {
     ) -> Result<ToolInputTransformResult, ExtensionError>;
 }
 
-/// PreToolUse 准入处理器。
+/// PreToolUse admission handler.
 #[async_trait::async_trait]
 pub trait PreToolUseHandler: Send + Sync {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError>;
 }
 
-/// PostToolUse 钩子处理器。
+/// PostToolUse hook handler.
 #[async_trait::async_trait]
 pub trait PostToolUseHandler: Send + Sync {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError>;
 }
 
-/// Provider 钩子处理器。
+/// Provider hook handler.
 #[async_trait::async_trait]
 pub trait ProviderHandler: Send + Sync {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError>;
@@ -63,7 +63,7 @@ pub trait ProviderContributionHandler: Send + Sync {
     async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError>;
 }
 
-/// PromptBuild 钩子处理器。
+/// PromptBuild hook handler.
 #[async_trait::async_trait]
 pub trait PromptBuildHandler: Send + Sync {
     async fn handle(
@@ -84,13 +84,13 @@ pub trait PostCompactHandler: Send + Sync {
     async fn handle(&self, ctx: PostCompactContext) -> Result<(), ExtensionError>;
 }
 
-/// 通用生命周期钩子处理器。
+/// Generic lifecycle hook handler.
 #[async_trait::async_trait]
 pub trait LifecycleHandler: Send + Sync {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError>;
 }
 
-/// LLM 返回纯文本结束后的继续决策钩子。
+/// Continuation decision hook after the LLM returns plain text.
 #[async_trait::async_trait]
 pub trait ContinueAfterStopHandler: Send + Sync {
     async fn handle(
@@ -99,7 +99,7 @@ pub trait ContinueAfterStopHandler: Send + Sync {
     ) -> Result<ContinueAfterStopResult, ExtensionError>;
 }
 
-/// 用户消息 envelope 变换钩子。
+/// User message envelope transform hook.
 #[async_trait::async_trait]
 pub trait UserMessageEnvelopeHandler: Send + Sync {
     async fn handle(
@@ -108,7 +108,7 @@ pub trait UserMessageEnvelopeHandler: Send + Sync {
     ) -> Result<UserMessageEnvelopeResult, ExtensionError>;
 }
 
-/// 工具执行处理器。
+/// Tool execution handler.
 #[async_trait::async_trait]
 pub trait ToolHandler: Send + Sync {
     /// Interpret the final tool arguments into the resources required by execution.
@@ -117,7 +117,7 @@ pub trait ToolHandler: Send + Sync {
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError>;
 }
 
-/// 命令执行处理器。
+/// Command execution handler.
 #[async_trait::async_trait]
 pub trait CommandHandler: Send + Sync {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError>;
@@ -138,13 +138,13 @@ pub trait CommandHandler: Send + Sync {
     }
 }
 
-/// 动态工具发现处理器。
+/// Dynamic tool discovery handler.
 #[async_trait::async_trait]
 pub trait ToolDiscoveryHandler: Send + Sync {
     async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError>;
 }
 
-/// 动态命令发现处理器。
+/// Dynamic command discovery handler.
 #[async_trait::async_trait]
 pub trait CommandDiscoveryHandler: Send + Sync {
     async fn discover(

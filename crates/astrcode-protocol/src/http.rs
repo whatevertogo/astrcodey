@@ -270,7 +270,7 @@ pub struct StatusItemDto {
     pub tooltip: Option<String>,
 }
 
-/// 可执行斜杠命令信息。
+/// 可执行斜杠命令信息（命令列表与扩展声明共用的全保真视图）。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,24 +279,15 @@ pub struct SlashCommandInfoDto {
     pub name: String,
     pub extension_id: String,
     pub description: String,
+    /// 参数 JSON Schema。
+    pub args_schema: Option<serde_json::Value>,
+    /// 由 `args_schema` 派生的 UI 便利字段。
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-}
-
-impl From<crate::events::ExtensionCommandInfoDto> for SlashCommandInfoDto {
-    fn from(cmd: crate::events::ExtensionCommandInfoDto) -> Self {
-        Self {
-            name: cmd.name,
-            extension_id: cmd.extension_id,
-            description: cmd.description,
-            needs_argument: cmd.needs_argument,
-            requires_idle: cmd.requires_idle,
-            argument_completions: cmd.argument_completions,
-            priority: cmd.priority,
-        }
-    }
+    pub availability: crate::wire::CommandAvailabilityDto,
+    pub execution: crate::wire::CommandExecutionDto,
 }
 
 /// 被遮蔽的命令诊断。
@@ -684,21 +675,6 @@ pub struct ExtensionStateDto {
     pub diagnostics: Option<ExtensionDiagnosticsDto>,
 }
 
-/// 扩展注册的斜杠命令声明。
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExtensionSlashCommandDto {
-    pub name: String,
-    pub description: String,
-    pub args_schema: Option<serde_json::Value>,
-    pub requires_idle: bool,
-    pub argument_completions: bool,
-    pub priority: i32,
-    pub availability: crate::wire::CommandAvailabilityDto,
-    pub execution: crate::wire::CommandExecutionDto,
-}
-
 /// 扩展可发射事件的声明。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -799,7 +775,7 @@ pub struct ExtensionDeclarationDto {
     pub required_transport_features: Vec<TransportFeatureDto>,
     pub tools: Vec<ToolDefinitionDto>,
     pub dynamic_tools: bool,
-    pub commands: Vec<ExtensionSlashCommandDto>,
+    pub commands: Vec<SlashCommandInfoDto>,
     pub dynamic_commands: bool,
     pub keybindings: Vec<KeybindingDto>,
     pub status_items: Vec<StatusItemDto>,

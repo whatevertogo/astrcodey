@@ -123,7 +123,6 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         DeleteProjectResponseDto,
         ConfigViewResponseDto,
         ExtensionStateDto,
-        ExtensionSlashCommandDto,
         CustomEventDeclarationDto,
         CustomEventSourceFilterDto,
         CustomEventSubscriptionDto,

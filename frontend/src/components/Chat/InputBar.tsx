@@ -15,6 +15,7 @@ import {
 import { cn } from '../../lib/utils'
 import ModelSelector from './ModelSelector'
 import CommandSelector from './CommandSelector'
+import ArgumentCompletionSelector from './ArgumentCompletionSelector'
 import PendingMessagesPanel from './PendingMessagesPanel'
 import ComposerAttachments from './ComposerAttachments'
 import {
@@ -24,6 +25,7 @@ import {
   revokeAttachmentPreviews,
 } from '../../lib/composerAttachments'
 import type {
+  CommandCompletionItem,
   ConfigView,
   PromptAttachment,
   SlashCommandInfo,
@@ -99,6 +101,17 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const slashTriggerStartRef = useRef(0)
   const slashTriggerEndRef = useRef(0)
 
+  // ── argument completion state ──
+  const [argTrigger, setArgTrigger] = useState<{
+    commandName: string
+    argumentStart: number
+    cursorPos: number
+  } | null>(null)
+  const [argItems, setArgItems] = useState<CommandCompletionItem[]>([])
+  const [argTruncated, setArgTruncated] = useState(false)
+  const [argLoading, setArgLoading] = useState(false)
+  const argSeqRef = useRef(0)
+
   useEffect(() => {
     return () => revokeAttachmentPreviews(attachmentsRef.current)
   }, [])
@@ -123,6 +136,111 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     setSlashQuery('')
     setSlashLoading(false)
   }, [])
+
+  const closeArgTrigger = useCallback(() => {
+    argSeqRef.current += 1
+    setArgTrigger(null)
+    setArgItems([])
+    setArgTruncated(false)
+    setArgLoading(false)
+  }, [])
+
+  const updateArgTrigger = useCallback(
+    (currentValue: string, cursorPos: number) => {
+      // 在当前行找到光标前的 `/name args` 参数补全上下文。
+      const lineStart = Math.max(
+        0,
+        currentValue.lastIndexOf('\n', cursorPos - 1) + 1
+      )
+      const segment = currentValue.slice(lineStart, cursorPos)
+      const match = /^\/(\S+)\s+/.exec(segment)
+      const command = match
+        ? slashCommands.find(
+            (c) => c.name.toLowerCase() === match[1].toLowerCase()
+          )
+        : undefined
+      const trigger =
+        match && command?.argumentCompletions
+          ? {
+              commandName: command.name,
+              argumentStart: lineStart + match[0].length,
+              cursorPos,
+            }
+          : null
+      if (
+        trigger &&
+        argTrigger &&
+        trigger.commandName === argTrigger.commandName &&
+        trigger.argumentStart === argTrigger.argumentStart &&
+        trigger.cursorPos === argTrigger.cursorPos
+      ) {
+        return
+      }
+      if (!trigger) {
+        if (argTrigger) closeArgTrigger()
+        return
+      }
+      setArgTrigger(trigger)
+    },
+    [slashCommands, argTrigger, closeArgTrigger]
+  )
+
+  // 防抖拉取参数补全候选；序号守卫丢弃过期响应。
+  useEffect(() => {
+    if (!argTrigger || !activeSessionId) return
+    const seq = ++argSeqRef.current
+    const timer = window.setTimeout(() => {
+      setArgLoading(true)
+      const argument = value.slice(
+        argTrigger.argumentStart,
+        argTrigger.cursorPos
+      )
+      const cursorOffset = argTrigger.cursorPos - argTrigger.argumentStart
+      api
+        .completeExtensionCommand(
+          activeSessionId,
+          argTrigger.commandName,
+          argument,
+          cursorOffset
+        )
+        .then((response) => {
+          if (argSeqRef.current !== seq) return
+          setArgItems(response.items)
+          setArgTruncated(response.truncated)
+        })
+        .catch(() => {
+          if (argSeqRef.current !== seq) return
+          setArgItems([])
+        })
+        .finally(() => {
+          if (argSeqRef.current === seq) setArgLoading(false)
+        })
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [activeSessionId, argTrigger, value])
+
+  const handleArgSelect = useCallback(
+    (item: CommandCompletionItem) => {
+      const trigger = argTrigger
+      if (!trigger) return
+      const before = value.slice(0, trigger.argumentStart)
+      const after = value.slice(trigger.cursorPos)
+      const nextValue = `${before}${item.insertText}${after}`
+      const nextCursor = trigger.argumentStart + item.insertText.length
+      setValue(nextValue)
+      closeArgTrigger()
+
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current
+        if (!textarea) return
+        textarea.focus()
+        textarea.setSelectionRange(nextCursor, nextCursor)
+        textarea.style.height = 'auto'
+        textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+      })
+    },
+    [argTrigger, value, closeArgTrigger]
+  )
 
   /** 在当前行找到光标位置的 `/` 触发上下文 */
   function findSlashTrigger(
@@ -156,6 +274,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
 
       const trigger = findSlashTrigger(currentValue, cursorPos)
       if (trigger) {
+        setArgTrigger(null)
         slashTriggerStartRef.current = trigger.triggerStart
         slashTriggerEndRef.current = trigger.triggerEnd
         setSlashQuery(trigger.query)
@@ -169,8 +288,9 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       if (slashTriggerVisible) {
         closeSlashTrigger()
       }
+      updateArgTrigger(currentValue, cursorPos)
     },
-    [activeSessionId, slashTriggerVisible, closeSlashTrigger]
+    [activeSessionId, slashTriggerVisible, closeSlashTrigger, updateArgTrigger]
   )
 
   // ── fetch commands when panel opens ──
@@ -204,9 +324,11 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         textarea.setSelectionRange(nextCursor, nextCursor)
         textarea.style.height = 'auto'
         textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+        // 选中命令后立即检测参数补全上下文（如 /goal、/reviewnow）。
+        updateArgTrigger(nextValue, nextCursor)
       })
     },
-    [closeSlashTrigger, value]
+    [closeSlashTrigger, value, updateArgTrigger]
   )
 
   const handleInput = useCallback(
@@ -305,6 +427,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       return
     }
     closeSlashTrigger()
+    closeArgTrigger()
     const wireAttachments = await Promise.all(attachments.map(attachmentToWire))
     const accepted = await submitPrompt(trimmed, wireAttachments)
     if (!accepted) return
@@ -321,6 +444,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     canSubmit,
     submitPrompt,
     closeSlashTrigger,
+    closeArgTrigger,
   ])
 
   const handleKeyDown = useCallback(
@@ -339,6 +463,20 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         }
       }
 
+      // 参数补全面板可见时：Escape 关闭，导航键交给面板；Tab/Enter 由
+      // ArgumentCompletionSelector 的 capture 监听插入候选。
+      if (argTrigger) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          closeArgTrigger()
+          return
+        }
+        if (argItems.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+          event.preventDefault()
+          return
+        }
+      }
+
       if (
         event.key === 'Enter' &&
         !event.shiftKey &&
@@ -352,7 +490,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         submit().catch((err) => console.error('submit failed:', err))
       }
     },
-    [submit, isComposing, slashTriggerVisible, closeSlashTrigger]
+    [submit, isComposing, slashTriggerVisible, closeSlashTrigger, argTrigger, argItems.length, closeArgTrigger]
   )
 
   // Abort 防抖处理：500ms 内只允许一次 abort 调用
@@ -634,6 +772,16 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
               query={slashQuery}
               onSelect={handleSlashCommandSelect}
               onClose={closeSlashTrigger}
+            />
+          )}
+          {activeSessionId && argTrigger && (
+            <ArgumentCompletionSelector
+              visible={true}
+              items={argItems}
+              loading={argLoading}
+              truncated={argTruncated}
+              onSelect={handleArgSelect}
+              onClose={closeArgTrigger}
             />
           )}
         </div>

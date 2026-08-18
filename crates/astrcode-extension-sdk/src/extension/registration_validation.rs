@@ -1,9 +1,12 @@
-//! In-process `Registrar` 与 worker `HandlerRegistry` 共用的注册校验规则。
+//! Registration validation rules shared by the in-process `Registrar` and the worker
+//! `HandlerRegistry`.
 //!
-//! 两个注册表的校验时机不同（`Registrar::finish` 集中校验 vs worker 插入时
-//! 增量校验），错误类型与错误消息也各自保留；这里只沉淀规则本身，消息由
-//! 调用点参数化。hook mode 也是注册期约束，因此与名称规则一并定义在这里；
-//! HTTP 路由的匹配、冲突检测和注册期校验也属于这一策略层。
+//! The two registries validate at different times (`Registrar::finish` validates centrally vs.
+//! incremental validation at worker insert time), and each keeps its own error types and
+//! messages; only the rules themselves live here, with messages parameterized at the call site.
+//! Hook mode is also a registration-time constraint, so it is defined here together with the
+//! name rules; HTTP route matching, conflict detection, and registration-time validation also
+//! belong to this policy layer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,16 +19,39 @@ use crate::wire::{
     manifest::LifecycleEvent,
 };
 
-/// 把扩展作者提供的注册名规范化为 trim 后的形式。
+/// Normalize an extension-author-provided registration name to its trimmed form.
 ///
-/// 两条注册路径都以规范名入库与判重，因此 `"  review  "` 与 `"review"` 同名。
+/// Both registration paths store and deduplicate by the canonical name, so `"  review  "` and
+/// `"review"` are the same name.
 pub fn canonical_registration_name(name: &mut String) {
     *name = name.trim().to_owned();
 }
 
-/// 重复注册判定：候选名与任一已注册名精确相等（大小写敏感）。
+/// Canonicalize a slash command name for registration.
 ///
-/// `registered` 与 `candidate` 都须先经 [`canonical_registration_name`] 规范化。
+/// Strips a leading `/`, trims, lowercases, and enforces the `[a-z][a-z0-9_-]*`
+/// shape. Input-side matching uses the total [`normalize_slash_command_name`]
+/// instead; this stricter form rejects names that could never be matched
+/// unambiguously.
+pub fn canonicalize_command_name(name: &mut String) -> Result<(), String> {
+    *name = crate::wire::command::normalize_slash_command_name(name);
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err("command name must not be empty".into());
+    };
+    if !first.is_ascii_lowercase()
+        || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(format!("command name `{name}` must match [a-z][a-z0-9_-]*"));
+    }
+    Ok(())
+}
+
+/// Duplicate registration check: the candidate name exactly equals any registered name
+/// (case-sensitive).
+///
+/// Both `registered` and `candidate` must first be normalized via
+/// [`canonical_registration_name`].
 pub fn has_duplicate_registration_name<'a>(
     registered: impl IntoIterator<Item = &'a str>,
     candidate: &str,

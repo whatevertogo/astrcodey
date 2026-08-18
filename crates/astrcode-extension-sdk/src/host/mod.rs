@@ -78,8 +78,19 @@ struct ExtensionHostInner {
 }
 
 impl ExtensionHost {
-    pub fn models(&self) -> ModelClient {
-        ModelClient::new(self.clone())
+    /// Access the model domain. One of [`ExtensionCapability::MainModel`] or
+    /// [`ExtensionCapability::SmallModel`] must be granted; per-operation
+    /// availability is reported by [`ModelClient::main_available`] and
+    /// [`ModelClient::small_available`].
+    pub fn models(&self) -> Result<ModelClient, HostError> {
+        self.inner.scope.preflight_any_capability(
+            &[
+                ExtensionCapability::MainModel,
+                ExtensionCapability::SmallModel,
+            ],
+            "models",
+        )?;
+        Ok(ModelClient::new(self.clone()))
     }
 
     pub fn session_control(&self) -> Result<SessionControlClient, HostError> {

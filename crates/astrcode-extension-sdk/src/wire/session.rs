@@ -14,7 +14,7 @@ pub enum SessionMessageOriginDto {
     ToolCallCancelled,
 }
 
-/// 插件 session API 共用的工具选择线缆契约。
+/// Tool selection wire contract shared by the plugin session API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionToolSelectionDto {
@@ -29,12 +29,12 @@ pub enum SessionToolSelectionDto {
 }
 
 impl SessionToolSelectionDto {
-    /// 使用全部工具。
+    /// Use all tools.
     pub const fn all() -> Self {
         Self::All { except: Vec::new() }
     }
 
-    /// 使用全部工具，但排除指定名称。
+    /// Use all tools except the specified names.
     pub fn all_except<I, S>(names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -45,7 +45,7 @@ impl SessionToolSelectionDto {
         }
     }
 
-    /// 仅使用指定名称。
+    /// Use only the specified names.
     pub fn only<I, S>(names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -56,13 +56,13 @@ impl SessionToolSelectionDto {
         }
     }
 
-    /// 明确禁用全部工具。
+    /// Explicitly disable all tools.
     pub const fn no_tools() -> Self {
         Self::Only { names: Vec::new() }
     }
 }
 
-/// `astrcode.session.control.create` 的线缆请求。
+/// Wire request for `astrcode.session.control.create`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionRequest {
@@ -89,49 +89,55 @@ impl HostCreateSessionRequest {
     }
 }
 
-/// `astrcode.session.control.create` 的线缆响应。
+/// Wire response for `astrcode.session.control.create`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionOutput {
     pub session_id: String,
 }
 
-/// `astrcode.session.root.create` 的线缆请求。
+/// Wire request for `astrcode.session.root.create`.
 ///
-/// 可选定制字段与 `astrcode.session.control.create`(`HostCreateSessionRequest`)
-/// 同名同语义;`name`/`ephemeral` 不适用(root 无 durable 名称面,也无父会话
-/// 回收协调,生命周期由 `session.root.dispose` 显式管理)。
+/// Optional customization fields have the same names and semantics as
+/// `astrcode.session.control.create` (`HostCreateSessionRequest`); `name`/`ephemeral` do not
+/// apply (a root has no durable name surface and no parent-session recycle coordination; its
+/// lifecycle is managed explicitly by `session.root.dispose`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateRootSessionRequest {
-    /// 省略时回退到调用上下文的 working_dir(handler 内调用的既有行为)。
+    /// When omitted, falls back to the calling context's working_dir (existing behavior for
+    /// in-handler calls).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
-    /// 追加进持久化稳定系统提示词的额外段落(KV 稳定前缀内)。
+    /// Extra paragraphs appended to the persisted stable system prompt (within the KV stable
+    /// prefix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// 模型偏好;`None`/`"inherit"`/空串回退 effective 默认模型。
+    /// Model preference; `None`/`"inherit"`/empty string fall back to the effective default
+    /// model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_preference: Option<String>,
-    /// 初始工具集选择(root 无父选择可继承,按原样生效)。
+    /// Initial tool set selection (a root has no parent selection to inherit; it takes effect
+    /// as-is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_selection: Option<SessionToolSelectionDto>,
 }
 
-/// `astrcode.session.root.fork` 的线缆请求。
+/// Wire request for `astrcode.session.root.fork`.
 ///
-/// fork 只做「在指定位置分叉」:working_dir、模型、系统提示词(含指纹)从
-/// source 继承,不可覆盖;`at_cursor` 省略时在 source 当前头部份分叉。
+/// Forking only "branches at the given position": working_dir, model, and system prompt
+/// (including its fingerprint) are inherited from the source and cannot be overridden; when
+/// `at_cursor` is omitted, the fork happens at the source's current head.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostForkRootSessionRequest {
     pub source_session_id: String,
-    /// 十进制事件 seq;非法值由宿主以 `InvalidInput` 拒绝。
+    /// Decimal event seq; invalid values are rejected by the host with `InvalidInput`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_cursor: Option<String>,
 }
 
-/// 插件 session control 操作的目标。
+/// Target of a plugin session control operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTargetRequest {
@@ -153,7 +159,7 @@ impl HostRecycleSessionRequest {
     }
 }
 
-/// Session 生命周期的稳定线缆表示。
+/// Stable wire representation of a session's lifecycle.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleStateDto {
@@ -173,7 +179,7 @@ pub enum SessionPhaseDto {
     Error,
 }
 
-/// `astrcode.session.control.state` 的线缆响应。
+/// Wire response for `astrcode.session.control.state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateOutput {
@@ -184,7 +190,7 @@ pub struct HostSessionStateOutput {
     pub message_count: usize,
 }
 
-/// `astrcode.session.control.reactivate` 的线缆响应。
+/// Wire response for `astrcode.session.control.reactivate`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionReactivateOutput {
@@ -192,7 +198,7 @@ pub struct HostSessionReactivateOutput {
     pub reactivated: bool,
 }
 
-/// `astrcode.session.control.submit_turn` 的线缆请求。
+/// Wire request for `astrcode.session.control.submit_turn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSubmitTurnRequest {
@@ -211,7 +217,7 @@ const fn default_wait_for_result() -> bool {
 }
 
 impl HostSubmitTurnRequest {
-    /// 创建适用于外置 worker 的异步子会话 turn 请求。
+    /// Create an asynchronous child-session turn request suitable for an external worker.
     pub fn background(
         target_session_id: impl Into<String>,
         user_prompt: impl Into<String>,
@@ -293,7 +299,7 @@ pub struct HostSessionEventsPageOutput {
     pub has_more: bool,
 }
 
-/// `astrcode.session.control.submit_turn` 的线缆响应。
+/// Wire response for `astrcode.session.control.submit_turn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostSubmitTurnOutput {

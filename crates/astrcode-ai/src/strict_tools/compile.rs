@@ -502,6 +502,7 @@ mod tests {
             "glob",
             "grep",
             "shell",
+            "shell_poll",
         ] {
             assert!(
                 definitions

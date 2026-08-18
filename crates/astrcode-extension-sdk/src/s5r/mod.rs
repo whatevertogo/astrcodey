@@ -1,4 +1,15 @@
-//! 扩展线缆协议共享类型 — s5r Peer 线协议（stdio 长度前缀帧 + JSON）。
+//! S5R wire protocol types shared between the host and out-of-process extensions.
+//!
+//! S5R is the name of AstrCode's versioned subprocess extension protocol: a disk
+//! extension runs as a separate process and talks to the host over stdio using
+//! decimal-length-prefixed JSON frames (see [`crate::wire::protocol`] and
+//! [`crate::wire::frame`]). Version negotiation, feature negotiation, handler
+//! invocation, streaming, and cancellation ship together as protocol 3.0.
+//!
+//! This module is the extension-facing half of that protocol. The host-side
+//! implementation lives in `astrcode-extensions::s5r_ext`, and extension authors
+//! normally consume these types through `astrcode-extension-worker` instead of
+//! importing the protocol directly.
 
 mod tool_plan;
 

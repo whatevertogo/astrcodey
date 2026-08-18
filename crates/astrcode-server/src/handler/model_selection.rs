@@ -69,21 +69,6 @@ impl ModelSelectionController {
         }
     }
 
-    pub(super) async fn set_main_model(
-        &self,
-        model_id: &str,
-    ) -> Result<ClientNotification, HandlerError> {
-        let (profile, model) = parse_model_option(model_id)?;
-        self.flow
-            .apply_selection(ModelTarget::Main, &profile, &model)
-            .await?;
-        Ok(ModelSelectionFlow::success_notification(
-            ModelTarget::Main,
-            &profile,
-            &model,
-        ))
-    }
-
     pub(super) fn start(&mut self) -> ClientNotification {
         self.pending = Some(ModelSelectionStep::Target);
         ModelSelectionFlow::target_request()

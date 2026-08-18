@@ -135,7 +135,10 @@ impl Extension for WebToolsExtension {
             .host()
             .network()
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-        let models = ctx.host().models();
+        let models = ctx
+            .host()
+            .models()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
         let small_llm = models
             .small_available()
             .map_err(|error| ExtensionError::Internal(error.to_string()))?

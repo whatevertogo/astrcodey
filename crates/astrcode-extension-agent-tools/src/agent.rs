@@ -277,6 +277,7 @@ fn canonical_agent_tool_name(name: &str) -> String {
         "edit" => "edit".into(),
         "write" => "write".into(),
         "bash" | "shell" => "shell".into(),
+        "shellpoll" | "shell_poll" => "shell_poll".into(),
         "agent" | "task" => "agent".into(),
         "webfetch" | "fetch-url" => "fetch-url".into(),
         "websearch" | "web-search" => "web-search".into(),
@@ -324,13 +325,25 @@ mod tests {
         assert_eq!(
             selection("explore"),
             Some(SessionToolSelection::Only {
-                names: vec!["glob".into(), "grep".into(), "read".into(), "shell".into()]
+                names: vec![
+                    "glob".into(),
+                    "grep".into(),
+                    "read".into(),
+                    "shell".into(),
+                    "shell_poll".into()
+                ]
             })
         );
         assert_eq!(
             selection("reviewer"),
             Some(SessionToolSelection::Only {
-                names: vec!["glob".into(), "grep".into(), "read".into(), "shell".into()]
+                names: vec![
+                    "glob".into(),
+                    "grep".into(),
+                    "read".into(),
+                    "shell".into(),
+                    "shell_poll".into()
+                ]
             })
         );
         assert_eq!(
