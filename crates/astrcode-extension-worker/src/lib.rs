@@ -15,6 +15,7 @@ pub mod testing {
 
 pub mod worker_prelude {
     pub use astrcode_extension_sdk::{
+        WireErrorCode,
         config::ModelSelection,
         s5r::hooks::{
             ContinueAfterStopHookInput, PostCompactHookInput, PostToolUseHookInput,
