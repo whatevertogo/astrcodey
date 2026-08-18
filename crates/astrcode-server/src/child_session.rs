@@ -13,12 +13,14 @@ use std::{
 
 use astrcode_core::{
     event::DurableEventPayload,
-    session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
 use astrcode_session::{TurnError, TurnFinalization, TurnHandle};
-use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
+use astrcode_session_projection::{
+    AgentSessionLinkView, AgentSessionStatus, SessionReadModel,
+    session_lineage::{ParentChainWalkError, collect_parent_chain},
+};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

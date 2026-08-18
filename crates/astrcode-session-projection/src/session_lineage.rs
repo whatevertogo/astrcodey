@@ -6,7 +6,7 @@
 
 use std::{collections::HashSet, future::Future};
 
-use crate::types::SessionId;
+use astrcode_core::types::SessionId;
 
 /// 父链上溯时检测到环(session 元数据损坏)。`Display` 消息是线缆契约的一部分,
 /// host/server 两侧的历史实现均逐字使用该消息,不得改动。

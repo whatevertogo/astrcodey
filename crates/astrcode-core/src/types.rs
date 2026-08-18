@@ -4,7 +4,6 @@
 //!
 //! 本模块定义了：
 //! - 类型安全的 ID newtype（[`SessionId`]、[`EventId`]、[`TurnId`] 等）
-//! - ID 验证函数 [`validate_session_id`]
 //! - ID 生成函数 [`new_session_id`]、[`new_event_id`] 等
 //! - 项目标识符派生函数 [`project_key_from_path`]
 
@@ -116,41 +115,6 @@ pub type Cursor = String;
 
 /// 项目标识符，从工作目录路径派生，可安全作为单个目录名。
 pub type ProjectKey = String;
-
-/// 标识符验证错误类型。
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum IdError {
-    /// ID 中包含无效字符。
-    #[error("Invalid characters in ID: {0}")]
-    InvalidCharacters(String),
-    /// ID 中存在路径遍历尝试。
-    #[error("Path traversal attempt in ID: {0}")]
-    PathTraversal(String),
-}
-
-/// 验证会话 ID 是否可安全用于文件系统操作。
-///
-/// 仅允许 ASCII 字母数字、连字符和下划线。
-/// 拒绝 `.` 和 `:` 以防止路径遍历攻击。
-pub fn validate_session_id(id: &str) -> Result<(), IdError> {
-    if id.is_empty() {
-        return Err(IdError::InvalidCharacters("empty ID".into()));
-    }
-    // 检查路径遍历和路径分隔符
-    if id.contains("..") || id.contains('/') || id.contains('\\') {
-        return Err(IdError::PathTraversal(id.into()));
-    }
-    // 逐字符检查，仅允许安全字符
-    for ch in id.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' {
-            return Err(IdError::InvalidCharacters(format!(
-                "character '{}' not allowed in ID",
-                ch
-            )));
-        }
-    }
-    Ok(())
-}
 
 /// 生成新的唯一会话 ID（基于 UUID v4）。
 pub fn new_session_id() -> SessionId {

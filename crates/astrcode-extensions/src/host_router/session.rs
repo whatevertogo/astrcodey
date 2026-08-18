@@ -10,7 +10,6 @@ use std::{
 use astrcode_core::{
     event::{DurableEventPayload, Phase, StoredEvent},
     llm::TranscriptMessageOrigin,
-    session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
         ForkSessionRequest, SessionAccessPair, SessionApiError, SessionDeliveryOutcome,
@@ -47,6 +46,7 @@ use astrcode_extension_sdk::{
         },
     },
 };
+use astrcode_session_projection::session_lineage::{ParentChainWalkError, collect_parent_chain};
 use astrcode_storage::{EventReader, SessionReader, StorageError};
 use serde_json::Value;
 

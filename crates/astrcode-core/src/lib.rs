@@ -10,7 +10,6 @@
 //! - [`config`]：配置系统（原始类型、解析类型、解析逻辑、默认值）
 //! - [`event`]：统一的运行时事件与持久化事件类型
 //! - [`llm`]：LLM 提供者抽象与消息类型
-//! - [`session_lineage`]：session 谱系(parent chain)遍历原语
 //! - [`tool`]：工具 trait 及关联类型
 //! - [`types`]：核心共享标识符和数据类型
 //! - [`hostpaths`] / [`shell`] / [`frontmatter`] / [`discovery`]：跨扩展与宿主共用的工具原语 （原居
@@ -30,7 +29,6 @@ pub mod hostpaths;
 pub mod llm;
 pub mod message_attachment;
 pub mod permission;
-pub mod session_lineage;
 pub mod shell;
 pub mod tool;
 pub mod types;

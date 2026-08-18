@@ -19,6 +19,7 @@ mod journal;
 mod owner_lease;
 mod projection;
 mod reader;
+mod session_id;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -32,7 +33,7 @@ use std::{
 use astrcode_core::{
     config::defaults::astrcode_dir,
     event::DurableEvent,
-    types::{Cursor, SessionId, validate_session_id},
+    types::{Cursor, SessionId},
 };
 use astrcode_session_projection::{ProjectionError, SessionReadModel, replay};
 use parking_lot::Mutex;
@@ -40,6 +41,7 @@ use tokio::sync::{RwLock, Semaphore};
 
 use self::{
     durability::UncertainDurability, owner_lease::SessionOwnerLease, projection::SessionProjection,
+    session_id::validate_session_id,
 };
 use crate::{StorageError, event_log::EventLog};
 

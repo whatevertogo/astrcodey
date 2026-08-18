@@ -10,6 +10,7 @@ mod model;
 mod model_context;
 mod presentation;
 mod reducer;
+pub mod session_lineage;
 
 pub use agents::{AgentSessionLinkView, AgentSessionStatus};
 pub use error::ProjectionError;
