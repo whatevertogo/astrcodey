@@ -24,3 +24,4 @@ mod context;
 pub mod context_assembler;
 pub mod prompt_engine;
 pub mod token_budget;
+pub mod token_estimate;

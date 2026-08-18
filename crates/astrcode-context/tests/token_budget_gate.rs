@@ -1,9 +1,10 @@
 //! token_budget 与 compact 阈值集成冒烟。
 
-use astrcode_context::token_budget::{
-    build_prompt_snapshot, compact_threshold_tokens, should_compact,
+use astrcode_context::{
+    token_budget::{build_prompt_snapshot, compact_threshold_tokens, should_compact},
+    token_estimate::estimate_char_budget,
 };
-use astrcode_core::llm::{LlmMessage, ModelLimits, token_estimate::estimate_char_budget};
+use astrcode_core::llm::{LlmMessage, ModelLimits};
 
 #[test]
 fn compact_gate_triggers_at_configured_fraction() {

@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
 pub mod thinking;
-pub mod token_estimate;
 
 use thinking::{ThinkingCapability, ThinkingConfig};
 

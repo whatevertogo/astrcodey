@@ -3,8 +3,10 @@
 //! 这里刻意使用稳定的字符启发式，而不是 provider 专用 tokenizer；调用方应优先采用
 //! provider 返回的真实用量。
 
-use super::{LlmContent, LlmMessage};
-use crate::tool::ToolDefinition;
+use astrcode_core::{
+    llm::{LlmContent, LlmMessage},
+    tool::ToolDefinition,
+};
 
 const MESSAGE_BASE_TOKENS: usize = 6;
 const TOOL_CALL_BASE_TOKENS: usize = 12;

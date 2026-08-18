@@ -3,10 +3,12 @@ use std::sync::Arc;
 use astrcode_core::llm::{
     LlmError, LlmMessage, SharedTranscriptMessage, TranscriptMessage, TranscriptMessageOrigin,
     provider_transcript_messages, provider_transcript_shared_messages,
-    provider_visible_shared_messages, token_estimate::estimate_provider_message_tokens,
+    provider_visible_shared_messages,
 };
 
-use crate::prompt_engine::system_messages_from_prompt;
+use crate::{
+    prompt_engine::system_messages_from_prompt, token_estimate::estimate_provider_message_tokens,
+};
 
 /// 同一 durable revision 下的完整 provider context。
 ///
@@ -331,13 +333,13 @@ pub fn is_prompt_too_long_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{
-        llm::token_estimate::{estimate_provider_request_tokens, estimate_tool_definition_tokens},
-        tool::{ToolDefinition, ToolOrigin},
-    };
+    use astrcode_core::tool::{ToolDefinition, ToolOrigin};
     use serde_json::json;
 
     use super::*;
+    use crate::token_estimate::{
+        estimate_provider_request_tokens, estimate_tool_definition_tokens,
+    };
 
     #[test]
     fn input_estimate_reuses_only_matching_provider_usage_prefix() {

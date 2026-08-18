@@ -150,7 +150,7 @@ impl TurnState {
         let active_deferred_tools = HashSet::new();
         let visible_tools = provider_visible_tools(&all_tools, &active_deferred_tools);
         let tools_token_estimate =
-            astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+            astrcode_context::token_estimate::estimate_tool_definition_tokens(
                 &ToolSnapshot::definitions(&visible_tools),
             );
 
@@ -290,7 +290,7 @@ impl TurnState {
             self.visible_tools =
                 provider_visible_tools(&self.all_tools, &self.active_deferred_tools);
             self.tools_token_estimate =
-                astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+                astrcode_context::token_estimate::estimate_tool_definition_tokens(
                     &ToolSnapshot::definitions(&self.visible_tools),
                 );
         }
