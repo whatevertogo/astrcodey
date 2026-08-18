@@ -150,6 +150,15 @@ FIXED_HOOK_MODES: dict[str, str] = {
     LifecycleEvent.PROMPT_BUILD: HookMode.BLOCKING,
 }
 
+# Only tool hooks accept a tool target; the wire type encodes this per variant.
+TOOL_TARGET_HOOK_EVENTS = frozenset(
+    {
+        LifecycleEvent.TOOL_INPUT_TRANSFORM,
+        LifecycleEvent.PRE_TOOL_USE,
+        LifecycleEvent.POST_TOOL_USE,
+    }
+)
+
 # Non-fixed events that still permit blocking mode
 # (`hook_mode_is_supported` + `lifecycle_event_allows_blocking`).
 _BLOCKING_ALLOWED = frozenset(

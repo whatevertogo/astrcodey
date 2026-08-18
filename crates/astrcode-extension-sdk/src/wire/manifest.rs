@@ -99,17 +99,253 @@ where
     Option::deserialize(deserializer)
 }
 
+/// S5R manifest 的 hook 订阅声明。
+///
+/// 事件名由 variant tag(`on` 字段)携带,payload 按家族区分:只有 tool hook 携带
+/// `tools`,只有 continue_after_stop 携带 `options`。非法字段组合在反序列化期即被
+/// 拒绝,类型上不可表达;合法载荷的 JSON 形状与旧 flat 格式一致,新旧 host/worker
+/// 可以交错部署。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "on", rename_all = "snake_case")]
+pub enum ManifestHook {
+    ToolInputTransform(ToolHookManifest),
+    PreToolUse(ToolHookManifest),
+    PostToolUse(ToolHookManifest),
+    ContinueAfterStop(ContinueAfterStopHookManifest),
+    PreCompact(CommonHookManifest),
+    PostCompact(CommonHookManifest),
+    SessionStart(CommonHookManifest),
+    SessionResume(CommonHookManifest),
+    SessionShutdown(CommonHookManifest),
+    TurnStart(CommonHookManifest),
+    TurnEnd(CommonHookManifest),
+    TurnAborted(CommonHookManifest),
+    StepStart(CommonHookManifest),
+    StepEnd(CommonHookManifest),
+    BeforeProviderRequest(CommonHookManifest),
+    ProviderContribution(CommonHookManifest),
+    AfterProviderResponse(CommonHookManifest),
+    UserPromptSubmit(CommonHookManifest),
+    UserMessageEnvelope(CommonHookManifest),
+    PromptBuild(CommonHookManifest),
+    PostRecap(CommonHookManifest),
+}
+
+/// 多数 hook 的声明载荷:仅模式与可选优先级。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ManifestHook {
-    pub on: ManifestHookEvent,
+pub struct CommonHookManifest {
     pub mode: HookMode,
     /// 可选调度优先级,缺省为 0;宿主按降序调度,同优先级保持注册顺序。
-    /// 缺省时省略序列化,旧 host 的 `deny_unknown_fields` 校验因此不受影响。
+    /// 缺省时省略序列化,旧 host 的字段校验因此不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+/// tool hook 的声明载荷:额外携带精确工具名过滤,缺省匹配全部工具。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolHookManifest {
+    pub mode: HookMode,
+    /// 与 [`CommonHookManifest::priority`] 同语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// 精确工具名过滤;缺省时省略序列化,兼容语义同 `priority`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+/// continue_after_stop 的声明载荷:额外携带每 turn 续跑上限。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueAfterStopHookManifest {
+    pub mode: HookMode,
+    /// 与 [`CommonHookManifest::priority`] 同语义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "ManifestHookOptions::is_empty")]
     pub options: ManifestHookOptions,
+}
+
+impl ManifestHook {
+    /// 按语义事件构造声明。`options` 仅 ContinueAfterStop 保留;registry 只在
+    /// 该事件传入非默认值,其他事件一律忽略。
+    pub fn new(on: ManifestHookEvent, mode: HookMode, options: ManifestHookOptions) -> Self {
+        fn common(mode: HookMode) -> CommonHookManifest {
+            CommonHookManifest {
+                mode,
+                priority: None,
+            }
+        }
+        fn tool(mode: HookMode) -> ToolHookManifest {
+            ToolHookManifest {
+                mode,
+                priority: None,
+                tools: None,
+            }
+        }
+        match on {
+            ManifestHookEvent::Compact(CompactEvent::PreCompact) => Self::PreCompact(common(mode)),
+            ManifestHookEvent::Compact(CompactEvent::PostCompact) => {
+                Self::PostCompact(common(mode))
+            },
+            ManifestHookEvent::Lifecycle(event) => match event {
+                LifecycleEvent::ToolInputTransform => Self::ToolInputTransform(tool(mode)),
+                LifecycleEvent::PreToolUse => Self::PreToolUse(tool(mode)),
+                LifecycleEvent::PostToolUse => Self::PostToolUse(tool(mode)),
+                LifecycleEvent::ContinueAfterStop => {
+                    Self::ContinueAfterStop(ContinueAfterStopHookManifest {
+                        mode,
+                        priority: None,
+                        options,
+                    })
+                },
+                LifecycleEvent::SessionStart => Self::SessionStart(common(mode)),
+                LifecycleEvent::SessionResume => Self::SessionResume(common(mode)),
+                LifecycleEvent::SessionShutdown => Self::SessionShutdown(common(mode)),
+                LifecycleEvent::TurnStart => Self::TurnStart(common(mode)),
+                LifecycleEvent::TurnEnd => Self::TurnEnd(common(mode)),
+                LifecycleEvent::TurnAborted => Self::TurnAborted(common(mode)),
+                LifecycleEvent::StepStart => Self::StepStart(common(mode)),
+                LifecycleEvent::StepEnd => Self::StepEnd(common(mode)),
+                LifecycleEvent::BeforeProviderRequest => Self::BeforeProviderRequest(common(mode)),
+                LifecycleEvent::ProviderContribution => Self::ProviderContribution(common(mode)),
+                LifecycleEvent::AfterProviderResponse => Self::AfterProviderResponse(common(mode)),
+                LifecycleEvent::UserPromptSubmit => Self::UserPromptSubmit(common(mode)),
+                LifecycleEvent::UserMessageEnvelope => Self::UserMessageEnvelope(common(mode)),
+                LifecycleEvent::PromptBuild => Self::PromptBuild(common(mode)),
+                LifecycleEvent::PostRecap => Self::PostRecap(common(mode)),
+            },
+        }
+    }
+
+    /// variant tag 对应的语义事件。
+    pub fn event(&self) -> ManifestHookEvent {
+        let event = match self {
+            Self::ToolInputTransform(_) => LifecycleEvent::ToolInputTransform,
+            Self::PreToolUse(_) => LifecycleEvent::PreToolUse,
+            Self::PostToolUse(_) => LifecycleEvent::PostToolUse,
+            Self::ContinueAfterStop(_) => LifecycleEvent::ContinueAfterStop,
+            Self::PreCompact(_) => return CompactEvent::PreCompact.into(),
+            Self::PostCompact(_) => return CompactEvent::PostCompact.into(),
+            Self::SessionStart(_) => LifecycleEvent::SessionStart,
+            Self::SessionResume(_) => LifecycleEvent::SessionResume,
+            Self::SessionShutdown(_) => LifecycleEvent::SessionShutdown,
+            Self::TurnStart(_) => LifecycleEvent::TurnStart,
+            Self::TurnEnd(_) => LifecycleEvent::TurnEnd,
+            Self::TurnAborted(_) => LifecycleEvent::TurnAborted,
+            Self::StepStart(_) => LifecycleEvent::StepStart,
+            Self::StepEnd(_) => LifecycleEvent::StepEnd,
+            Self::BeforeProviderRequest(_) => LifecycleEvent::BeforeProviderRequest,
+            Self::ProviderContribution(_) => LifecycleEvent::ProviderContribution,
+            Self::AfterProviderResponse(_) => LifecycleEvent::AfterProviderResponse,
+            Self::UserPromptSubmit(_) => LifecycleEvent::UserPromptSubmit,
+            Self::UserMessageEnvelope(_) => LifecycleEvent::UserMessageEnvelope,
+            Self::PromptBuild(_) => LifecycleEvent::PromptBuild,
+            Self::PostRecap(_) => LifecycleEvent::PostRecap,
+        };
+        event.into()
+    }
+
+    pub fn event_name(&self) -> &'static str {
+        self.event().as_str()
+    }
+
+    pub fn mode(&self) -> HookMode {
+        match self {
+            Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => p.mode,
+            Self::ContinueAfterStop(p) => p.mode,
+            Self::PreCompact(p)
+            | Self::PostCompact(p)
+            | Self::SessionStart(p)
+            | Self::SessionResume(p)
+            | Self::SessionShutdown(p)
+            | Self::TurnStart(p)
+            | Self::TurnEnd(p)
+            | Self::TurnAborted(p)
+            | Self::StepStart(p)
+            | Self::StepEnd(p)
+            | Self::BeforeProviderRequest(p)
+            | Self::ProviderContribution(p)
+            | Self::AfterProviderResponse(p)
+            | Self::UserPromptSubmit(p)
+            | Self::UserMessageEnvelope(p)
+            | Self::PromptBuild(p)
+            | Self::PostRecap(p) => p.mode,
+        }
+    }
+
+    pub fn priority(&self) -> Option<i32> {
+        match self {
+            Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => p.priority,
+            Self::ContinueAfterStop(p) => p.priority,
+            Self::PreCompact(p)
+            | Self::PostCompact(p)
+            | Self::SessionStart(p)
+            | Self::SessionResume(p)
+            | Self::SessionShutdown(p)
+            | Self::TurnStart(p)
+            | Self::TurnEnd(p)
+            | Self::TurnAborted(p)
+            | Self::StepStart(p)
+            | Self::StepEnd(p)
+            | Self::BeforeProviderRequest(p)
+            | Self::ProviderContribution(p)
+            | Self::AfterProviderResponse(p)
+            | Self::UserPromptSubmit(p)
+            | Self::UserMessageEnvelope(p)
+            | Self::PromptBuild(p)
+            | Self::PostRecap(p) => p.priority,
+        }
+    }
+
+    pub fn set_priority(&mut self, priority: Option<i32>) {
+        let slot = match self {
+            Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => {
+                &mut p.priority
+            },
+            Self::ContinueAfterStop(p) => &mut p.priority,
+            Self::PreCompact(p)
+            | Self::PostCompact(p)
+            | Self::SessionStart(p)
+            | Self::SessionResume(p)
+            | Self::SessionShutdown(p)
+            | Self::TurnStart(p)
+            | Self::TurnEnd(p)
+            | Self::TurnAborted(p)
+            | Self::StepStart(p)
+            | Self::StepEnd(p)
+            | Self::BeforeProviderRequest(p)
+            | Self::ProviderContribution(p)
+            | Self::AfterProviderResponse(p)
+            | Self::UserPromptSubmit(p)
+            | Self::UserMessageEnvelope(p)
+            | Self::PromptBuild(p)
+            | Self::PostRecap(p) => &mut p.priority,
+        };
+        *slot = priority;
+    }
+
+    /// 仅 tool hook 返回 `Some`;其他家族在类型上没有 `tools` 字段。
+    pub fn tool_target_mut(&mut self) -> Option<&mut Option<Vec<String>>> {
+        match self {
+            Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => {
+                Some(&mut p.tools)
+            },
+            _ => None,
+        }
+    }
+
+    /// 设置工具过滤;非 tool hook 在类型上没有该字段,返回 `false`。
+    pub fn set_tool_target(&mut self, tools: Vec<String>) -> bool {
+        match self {
+            Self::ToolInputTransform(p) | Self::PreToolUse(p) | Self::PostToolUse(p) => {
+                p.tools = Some(tools);
+                true
+            },
+            _ => false,
+        }
+    }
 }
 
 /// Hook event encoded by an S5R manifest.
@@ -236,7 +472,7 @@ pub struct ManifestHookOptions {
 }
 
 impl ManifestHookOptions {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.max_per_turn.is_none()
     }
 }
@@ -305,21 +541,53 @@ mod tests {
         let without: ManifestHook =
             serde_json::from_value(serde_json::json!({"on": "turn_end", "mode": "non_blocking"}))
                 .unwrap();
-        assert_eq!(without.priority, None);
+        assert_eq!(without.priority(), None);
         assert!(
             serde_json::to_value(&without)
                 .unwrap()
                 .get("priority")
                 .is_none(),
-            "default priority must stay absent for old deny_unknown_fields hosts"
+            "default priority must stay absent for old hosts"
         );
 
         let with: ManifestHook = serde_json::from_value(
             serde_json::json!({"on": "turn_end", "mode": "non_blocking", "priority": 9}),
         )
         .unwrap();
-        assert_eq!(with.priority, Some(9));
+        assert_eq!(with.priority(), Some(9));
         assert_eq!(serde_json::to_value(&with).unwrap()["priority"], 9);
+    }
+
+    #[test]
+    fn manifest_hook_tools_lives_only_on_tool_hook_variants() {
+        let without: ManifestHook =
+            serde_json::from_value(serde_json::json!({"on": "pre_tool_use", "mode": "blocking"}))
+                .unwrap();
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("tools")
+                .is_none(),
+            "default tools must stay absent for old hosts"
+        );
+
+        let with: ManifestHook = serde_json::from_value(
+            serde_json::json!({"on": "pre_tool_use", "mode": "blocking", "tools": ["shell"]}),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(&with).unwrap()["tools"][0], "shell");
+
+        for invalid in [
+            serde_json::json!({"on": "turn_end", "mode": "non_blocking", "tools": ["shell"]}),
+            serde_json::json!({"on": "pre_compact", "mode": "blocking", "tools": ["shell"]}),
+            serde_json::json!({"on": "turn_end", "mode": "non_blocking", "options": {"max_per_turn": 2}}),
+            serde_json::json!({"on": "pre_tool_use", "mode": "blocking", "options": {"max_per_turn": 2}}),
+        ] {
+            assert!(
+                serde_json::from_value::<ManifestHook>(invalid.clone()).is_err(),
+                "family-foreign fields must fail deserialization: {invalid}"
+            );
+        }
     }
 
     #[test]
@@ -328,14 +596,13 @@ mod tests {
             required_transport_features: vec![TransportFeature::AuthenticatedHttp],
             capabilities: Vec::new(),
             tools: Vec::new(),
-            hooks: vec![ManifestHook {
-                on: LifecycleEvent::ContinueAfterStop.into(),
-                mode: HookMode::Blocking,
-                priority: None,
-                options: ManifestHookOptions {
+            hooks: vec![ManifestHook::new(
+                LifecycleEvent::ContinueAfterStop.into(),
+                HookMode::Blocking,
+                ManifestHookOptions {
                     max_per_turn: Some(ContinueAfterStopLimit::unlimited()),
                 },
-            }],
+            )],
             commands: vec![ManifestCommand {
                 name: "inspect".into(),
                 description: "Inspect session state".into(),
