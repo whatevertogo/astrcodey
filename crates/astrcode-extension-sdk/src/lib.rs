@@ -4,11 +4,11 @@
 //! host's internal crates. The runtime remains responsible for adapting these
 //! contracts to session, storage, and provider implementations.
 
-pub mod discovery;
 pub mod extension;
-pub mod frontmatter;
-pub mod hostpaths;
-pub mod shell;
+
+// Shared primitives moved to astrcode-core (both the host runtime and
+// bundled extensions consume them); re-exported here to keep the SDK path stable.
+pub use astrcode_core::{discovery, frontmatter, hostpaths, shell};
 
 pub mod config {
     pub use astrcode_core::config::ModelSelection;

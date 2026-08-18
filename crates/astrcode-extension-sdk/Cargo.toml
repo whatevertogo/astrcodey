@@ -14,7 +14,6 @@ astrcode-core = { path = "../astrcode-core" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }
-fs2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
@@ -22,9 +21,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std", "process", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

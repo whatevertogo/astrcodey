@@ -13,6 +13,10 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+fs2 = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

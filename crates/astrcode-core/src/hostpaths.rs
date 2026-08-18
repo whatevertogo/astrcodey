@@ -7,8 +7,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-pub use astrcode_core::config::defaults::{astrcode_dir, user_home_dir};
 use fs2::FileExt;
+
+pub use crate::config::defaults::{astrcode_dir, user_home_dir};
 
 /// Resolve `path` against `base_dir` unless it is already absolute.
 pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {

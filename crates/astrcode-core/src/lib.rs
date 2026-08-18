@@ -13,6 +13,8 @@
 //! - [`session_lineage`]：session 谱系(parent chain)遍历原语
 //! - [`tool`]：工具 trait 及关联类型
 //! - [`types`]：核心共享标识符和数据类型
+//! - [`hostpaths`] / [`shell`] / [`frontmatter`] / [`discovery`]：跨扩展与宿主共用的工具原语 （原居
+//!   `astrcode-extension-sdk`，SDK 保留 re-export）
 //!
 //! # 导入约定
 //!
@@ -21,11 +23,15 @@
 
 pub mod compaction;
 pub mod config;
+pub mod discovery;
 pub mod event;
+pub mod frontmatter;
+pub mod hostpaths;
 pub mod llm;
 pub mod message_attachment;
 pub mod permission;
 pub mod session_lineage;
+pub mod shell;
 pub mod tool;
 pub mod types;
 pub mod user_input;
