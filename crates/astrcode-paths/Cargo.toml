@@ -1,0 +1,9 @@
+[package]
+name = "astrcode-paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AstrCode process-level directory primitives (user home, data dir, extension data dir)"
+
+[dependencies]
+dirs = { workspace = true }
