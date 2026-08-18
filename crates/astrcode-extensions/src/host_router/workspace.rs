@@ -8,7 +8,7 @@ use std::{
 
 use astrcode_core::tool::{FileObservation, FileObservationStore};
 use astrcode_extension_sdk::{
-    extension::ExtensionTasks,
+    extension::{ExtensionCapability, ExtensionTasks},
     host::{
         HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES,
         HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS, HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES,
@@ -47,7 +47,6 @@ use super::{
 
 const MAX_WALK_ENTRIES: usize = 5_000;
 const MAX_SEARCH_SCAN_BYTES: usize = 64 * 1024 * 1024;
-const CODING_EXTENSION_ID: &str = "astrcode-coding";
 const IGNORED_DIRECTORIES: &[&str] = &[".git", "node_modules"];
 const SEARCH_VCS_DIRECTORIES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
 const SEARCH_BUILD_DIRECTORIES: &[&str] = &[
@@ -78,8 +77,12 @@ impl WorkspaceGroup {
         context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let root = self.root(context.working_dir.as_deref())?.to_owned();
-        let allow_sensitive_paths =
-            context.resource_lease.is_some() && context.extension_id == CODING_EXTENSION_ID;
+        // 敏感路径绕过只随已批准的 resource lease 生效,且必须显式声明
+        // workspace_sensitive_paths capability。
+        let allow_sensitive_paths = context.resource_lease.is_some()
+            && context
+                .declared_capabilities
+                .contains(&ExtensionCapability::WorkspaceSensitivePaths);
         match operation {
             HostOperation::WorkspaceApplyPatch => {
                 let observations = context.file_observation_store.clone();

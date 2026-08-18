@@ -97,7 +97,11 @@ _SUPPORTED_FEATURES = frozenset(
 
 _WRITE_QUEUE_CAPACITY = 256
 _STREAM_BUFFER_CAPACITY = 32
+_STREAM_FORWARD_BUFFER_CAPACITY = 256
+_STREAM_BACKPRESSURE_TIMEOUT = 30.0
+_STREAM_IDLE_TIMEOUT = 120.0
 _CANCELLED_REQUEST_CAPACITY = 256
+_MAX_IN_FLIGHT_REQUESTS = 256
 
 _HANDLER_ID_KINDS = frozenset({"tool", "hook", "command", "http", "event"})
 
@@ -237,10 +241,16 @@ class Worker:
         on: str,
         mode: str,
         handler: HookHandlerFn | None = None,
+        *,
+        priority: int | None = None,
     ) -> HookHandlerFn | Callable[[HookHandlerFn], HookHandlerFn]:
-        """Register a mode-flexible lifecycle hook; fixed-mode events reject this."""
+        """Register a mode-flexible lifecycle hook; fixed-mode events reject this.
+
+        `priority` orders hooks across extensions (descending, registration
+        order on ties); omit it to keep the default of 0.
+        """
         if handler is None:
-            return lambda fn: self.hook(on, mode, fn)  # type: ignore[return-value]
+            return lambda fn: self.hook(on, mode, fn, priority=priority)  # type: ignore[return-value]
         if on not in ALL_LIFECYCLE_EVENTS:
             raise S5rError.of(WireErrorCode.UNSUPPORTED_HOOK, f"unknown lifecycle event {on!r}")
         if on == LifecycleEvent.USER_MESSAGE_ENVELOPE:
@@ -263,33 +273,52 @@ class Worker:
             raise S5rError.of(
                 WireErrorCode.INVALID_HOOK_MODE, f"{on} does not support {mode} mode"
             )
+        declaration = _hook_declaration(on, mode, priority)
         self._insert_hook(on, handler)
-        self._hook_manifest.append({"on": on, "mode": mode})
+        self._hook_manifest.append(declaration)
         return handler
 
-    def on_tool_input_transform(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.TOOL_INPUT_TRANSFORM, handler)
+    def on_tool_input_transform(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._fixed_hook(LifecycleEvent.TOOL_INPUT_TRANSFORM, handler, priority=priority)
 
-    def on_pre_tool_use(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.PRE_TOOL_USE, handler)
+    def on_pre_tool_use(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._fixed_hook(LifecycleEvent.PRE_TOOL_USE, handler, priority=priority)
 
-    def on_after_provider_response(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.AFTER_PROVIDER_RESPONSE, handler)
+    def on_after_provider_response(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._fixed_hook(
+            LifecycleEvent.AFTER_PROVIDER_RESPONSE, handler, priority=priority
+        )
 
-    def on_provider_contribution(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.PROVIDER_CONTRIBUTION, handler)
+    def on_provider_contribution(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._fixed_hook(
+            LifecycleEvent.PROVIDER_CONTRIBUTION, handler, priority=priority
+        )
 
-    def on_prompt_build(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._fixed_hook(LifecycleEvent.PROMPT_BUILD, handler)
+    def on_prompt_build(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._fixed_hook(LifecycleEvent.PROMPT_BUILD, handler, priority=priority)
 
-    def on_pre_compact(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._compact_hook(CompactEvent.PRE_COMPACT, handler)
+    def on_pre_compact(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._compact_hook(CompactEvent.PRE_COMPACT, handler, priority=priority)
 
-    def on_post_compact(self, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._compact_hook(CompactEvent.POST_COMPACT, handler)
+    def on_post_compact(
+        self, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._compact_hook(CompactEvent.POST_COMPACT, handler, priority=priority)
 
     def on_continue_after_stop(
-        self, max_per_turn: int, handler: HookHandlerFn
+        self, max_per_turn: int, handler: HookHandlerFn, *, priority: int | None = None
     ) -> HookHandlerFn:
         """`max_per_turn = -1` means unlimited; otherwise a non-negative cap."""
         if max_per_turn < -1:
@@ -297,14 +326,12 @@ class Worker:
                 WireErrorCode.INVALID_INPUT,
                 "continue_after_stop max_per_turn must be -1 or a non-negative integer",
             )
-        self._insert_hook(LifecycleEvent.CONTINUE_AFTER_STOP, handler)
-        self._hook_manifest.append(
-            {
-                "on": LifecycleEvent.CONTINUE_AFTER_STOP,
-                "mode": HookMode.BLOCKING,
-                "options": {"max_per_turn": max_per_turn},
-            }
+        declaration = _hook_declaration(
+            LifecycleEvent.CONTINUE_AFTER_STOP, HookMode.BLOCKING, priority
         )
+        declaration["options"] = {"max_per_turn": max_per_turn}
+        self._insert_hook(LifecycleEvent.CONTINUE_AFTER_STOP, handler)
+        self._hook_manifest.append(declaration)
         return handler
 
     def continuation_hook_handler(
@@ -401,15 +428,22 @@ class Worker:
         )
         return handler
 
-    def _fixed_hook(self, event: str, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._register_hook(event, FIXED_HOOK_MODES[event], handler)
+    def _fixed_hook(
+        self, event: str, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._register_hook(event, FIXED_HOOK_MODES[event], handler, priority)
 
-    def _compact_hook(self, event: str, handler: HookHandlerFn) -> HookHandlerFn:
-        return self._register_hook(event, HookMode.BLOCKING, handler)
+    def _compact_hook(
+        self, event: str, handler: HookHandlerFn, *, priority: int | None = None
+    ) -> HookHandlerFn:
+        return self._register_hook(event, HookMode.BLOCKING, handler, priority)
 
-    def _register_hook(self, event: str, mode: str, handler: HookHandlerFn) -> HookHandlerFn:
+    def _register_hook(
+        self, event: str, mode: str, handler: HookHandlerFn, priority: int | None = None
+    ) -> HookHandlerFn:
+        declaration = _hook_declaration(event, mode, priority)
         self._insert_hook(event, handler)
-        self._hook_manifest.append({"on": event, "mode": mode})
+        self._hook_manifest.append(declaration)
         return handler
 
     def _insert_hook(self, on: str, handler: HookHandlerFn) -> None:
@@ -1024,6 +1058,58 @@ def _validate_custom_event_subscription(subscription: CustomEventSubscription) -
     return None
 
 
+def _hook_declaration(event: str, mode: str, priority: int | None) -> dict[str, Any]:
+    if priority is not None and priority < 0:
+        raise S5rError.of(
+            WireErrorCode.INVALID_HOOK_REGISTRATION,
+            "hook priority must be non-negative",
+        )
+    declaration: dict[str, Any] = {"on": event, "mode": mode}
+    if priority is not None:
+        declaration["priority"] = priority
+    return declaration
+
+
+def _failed_stream_event(code: str, message: str) -> dict[str, Any]:
+    return {"type": "failed", "error": ErrorPayload(code, message).to_json()}
+
+
+def _validate_outbound_stream_event(
+    event: dict[str, Any], started: bool
+) -> tuple[dict[str, Any], bool]:
+    # Mirrors Rust `validate_outbound_stream_event`: an ordering violation is
+    # replaced by a terminal `failed` event instead of reaching the wire.
+    event_type = event["type"]
+    if event_type == "started":
+        if not started:
+            return event, True
+        return (
+            _failed_stream_event(
+                WireErrorCode.INVALID_RESPONSE, "stream started more than once"
+            ),
+            started,
+        )
+    if event_type == "failed" or started:
+        return event, started
+    return (
+        _failed_stream_event(
+            WireErrorCode.INVALID_RESPONSE, "stream event arrived before started"
+        ),
+        started,
+    )
+
+
+async def _list_event_iterator(events: Any) -> AsyncIterator[dict[str, Any]]:
+    for event in events:
+        yield event
+
+
+def _as_event_iterator(payload: Any) -> AsyncIterator[dict[str, Any]]:
+    if hasattr(payload, "__aiter__"):
+        return aiter(payload)
+    return _list_event_iterator(payload)
+
+
 class _UnaryPending:
     def __init__(self) -> None:
         self.future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -1031,9 +1117,16 @@ class _UnaryPending:
 
 class _StreamPending:
     def __init__(self) -> None:
+        # Mirrors Rust's two-hop forwarding: routed events land in the forward
+        # buffer; a per-stream task forwards them into the consumer buffer
+        # bounded by the backpressure deadline.
+        self.forward: asyncio.Queue[Any] = asyncio.Queue(
+            maxsize=_STREAM_FORWARD_BUFFER_CAPACITY
+        )
         self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_STREAM_BUFFER_CAPACITY)
         self.started = False
         self.terminal = False
+        self.forward_task: asyncio.Task[None] | None = None
 
 
 class _Driver:
@@ -1057,6 +1150,7 @@ class _Driver:
         self._tombstones: OrderedDict[str, None] = OrderedDict()
         self._inbound: dict[str, tuple[asyncio.Task[None], CancelToken]] = {}
         self._next_request_id = 0
+        self._inbound_in_flight = 0
         self._write_error: BaseException | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._closed = False
@@ -1087,11 +1181,17 @@ class _Driver:
         request_id = self._allocate_request_id()
         pending = _UnaryPending()
         self._pending[request_id] = pending
-        await self._write(
-            invoke_message(
-                request_id, operation, input, parent_invoke_id=parent_invoke_id
+        try:
+            await self._write(
+                invoke_message(
+                    request_id, operation, input, parent_invoke_id=parent_invoke_id
+                )
             )
-        )
+        except BaseException:
+            # Mirrors Rust `start_invoke_write`: a rejected write drops the
+            # pending entry instead of leaking it.
+            self._pending.pop(request_id, None)
+            raise
         try:
             return await pending.future
         except asyncio.CancelledError:
@@ -1107,14 +1207,21 @@ class _Driver:
         request_id = self._allocate_request_id()
         pending = _StreamPending()
         self._pending[request_id] = pending
-        self._enqueue(
-            invoke_message(
-                request_id,
-                operation,
-                input,
-                stream=True,
-                parent_invoke_id=parent_invoke_id,
+        try:
+            self._enqueue(
+                invoke_message(
+                    request_id,
+                    operation,
+                    input,
+                    stream=True,
+                    parent_invoke_id=parent_invoke_id,
+                )
             )
+        except BaseException:
+            self._pending.pop(request_id, None)
+            raise
+        pending.forward_task = asyncio.create_task(
+            self._forward_stream(request_id, pending)
         )
         return self._stream_events(request_id, pending)
 
@@ -1131,6 +1238,7 @@ class _Driver:
                     return
         finally:
             if self._pending.pop(request_id, None) is not None:
+                self._stop_forward(pending)
                 self._tombstone(request_id)
                 self._enqueue_best_effort(cancel_message(request_id, "stream_dropped"))
 
@@ -1203,7 +1311,7 @@ class _Driver:
         if event_type == "started":
             pending.started = True
         try:
-            pending.queue.put_nowait(event)
+            pending.forward.put_nowait(event)
         except asyncio.QueueFull:
             self._fail_stream(
                 message.id,
@@ -1218,6 +1326,30 @@ class _Driver:
             pending.terminal = True
             self._pending.pop(message.id, None)
 
+    async def _forward_stream(
+        self, request_id: str, pending: _StreamPending
+    ) -> None:
+        while True:
+            event = await pending.forward.get()
+            try:
+                await asyncio.wait_for(
+                    pending.queue.put(event), _STREAM_BACKPRESSURE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                self._fail_stream(
+                    request_id,
+                    pending,
+                    S5rError.of(
+                        WireErrorCode.BACKPRESSURE_TIMEOUT,
+                        "stream consumer did not release capacity before the"
+                        " backpressure deadline",
+                    ),
+                    cancel_reason="backpressure_timeout",
+                )
+                return
+            if event["type"] in TERMINAL_STREAM_EVENTS:
+                return
+
     def _fail_stream(
         self,
         request_id: str,
@@ -1227,10 +1359,17 @@ class _Driver:
     ) -> None:
         pending.terminal = True
         self._pending.pop(request_id, None)
+        self._stop_forward(pending)
         self._enqueue_stream_terminal(pending, error)
         if cancel_reason is not None:
             self._tombstone(request_id)
             self._enqueue_best_effort(cancel_message(request_id, cancel_reason))
+
+    @staticmethod
+    def _stop_forward(pending: _StreamPending) -> None:
+        task = pending.forward_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
 
     @staticmethod
     def _enqueue_stream_terminal(pending: _StreamPending, terminal: S5rError) -> None:
@@ -1262,6 +1401,19 @@ class _Driver:
         if error is not None:
             self._enqueue(result_failure(message.id, "invoke", error))
             return
+        if self._inbound_in_flight >= _MAX_IN_FLIGHT_REQUESTS:
+            self._enqueue(
+                result_failure(
+                    message.id,
+                    "invoke",
+                    ErrorPayload(
+                        WireErrorCode.PEER_OVERLOADED,
+                        "peer has reached its in-flight request limit",
+                    ),
+                )
+            )
+            return
+        self._inbound_in_flight += 1
         token = CancelToken()
         task = asyncio.create_task(self._run_inbound(message, token))
         self._inbound[message.id] = (task, token)
@@ -1275,6 +1427,18 @@ class _Driver:
         )
 
     async def _run_inbound(self, message: InvokeMsg, token: CancelToken) -> None:
+        try:
+            await self._serve_inbound(message, token)
+        except ProtocolError as error:
+            # A rejected write is fatal to the driver, as in Rust's write pump.
+            if self._write_error is None:
+                self._write_error = error
+            if self._reader_task is not None:
+                self._reader_task.cancel()
+        finally:
+            self._inbound_in_flight -= 1
+
+    async def _serve_inbound(self, message: InvokeMsg, token: CancelToken) -> None:
         try:
             if token.is_cancelled():
                 return
@@ -1310,10 +1474,7 @@ class _Driver:
                     )
                 )
                 return
-            for event in payload:
-                await self._write(stream_message(message.id, event))
-                if event["type"] in TERMINAL_STREAM_EVENTS:
-                    break
+            await self._write_stream_events(message.id, token, payload)
         elif message.stream:
             await self._write(
                 result_failure(
@@ -1327,6 +1488,34 @@ class _Driver:
             )
         else:
             await self._write(result_success(message.id, "invoke", payload))
+
+    async def _write_stream_events(
+        self, request_id: str, token: CancelToken, payload: Any
+    ) -> None:
+        # Mirrors Rust `run_inbound`: an idle deadline on the producer, a
+        # synthesized terminal failure when the producer ends early, and
+        # started-first ordering validation before events reach the wire.
+        events = _as_event_iterator(payload)
+        started = False
+        while True:
+            if token.is_cancelled():
+                return
+            try:
+                event = await asyncio.wait_for(anext(events), _STREAM_IDLE_TIMEOUT)
+            except StopAsyncIteration:
+                event = _failed_stream_event(
+                    WireErrorCode.STREAM_CLOSED,
+                    "stream producer closed before a terminal event",
+                )
+            except asyncio.TimeoutError:
+                event = _failed_stream_event(
+                    WireErrorCode.STREAM_IDLE_TIMEOUT,
+                    "stream producer exceeded the idle deadline",
+                )
+            event, started = _validate_outbound_stream_event(event, started)
+            await self._write(stream_message(request_id, event))
+            if event["type"] in TERMINAL_STREAM_EVENTS:
+                return
 
     # ── plumbing ────────────────────────────────────────────────────────────
 
@@ -1381,7 +1570,9 @@ class _Driver:
             self._tombstones.popitem(last=False)
 
     async def _write(self, message: dict[str, Any]) -> None:
-        await self._write_queue.put(message)
+        # The write pump is uniformly fail-fast (Rust `WritePump::try_write`):
+        # a full queue rejects instead of parking the caller.
+        self._enqueue(message)
 
     def _enqueue(self, message: dict[str, Any]) -> None:
         try:
@@ -1419,6 +1610,7 @@ class _Driver:
                 *(task for task, _ in self._inbound.values()), return_exceptions=True
             )
         self._inbound.clear()
+        forward_tasks = []
         for pending in self._pending.values():
             if isinstance(pending, _UnaryPending):
                 if not pending.future.done():
@@ -1429,6 +1621,9 @@ class _Driver:
                         )
                     )
             else:
+                self._stop_forward(pending)
+                if pending.forward_task is not None:
+                    forward_tasks.append(pending.forward_task)
                 self._enqueue_stream_terminal(
                     pending,
                     S5rError.of(
@@ -1437,6 +1632,8 @@ class _Driver:
                     ),
                 )
         self._pending.clear()
+        if forward_tasks:
+            await asyncio.gather(*forward_tasks, return_exceptions=True)
         if not writer.done():
             if self._write_queue.full():
                 self._write_queue.get_nowait()

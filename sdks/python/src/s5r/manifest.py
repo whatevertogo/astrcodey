@@ -70,6 +70,7 @@ class ExtensionCapability:
     CONSUME_CUSTOM_EVENTS = "consume_custom_events"
     WORKSPACE_READ = "workspace_read"
     WORKSPACE_WRITE = "workspace_write"
+    WORKSPACE_SENSITIVE_PATHS = "workspace_sensitive_paths"
     TOOL_RESULT_READ = "tool_result_read"
     PROCESS_SPAWN = "process_spawn"
     NETWORK_CLIENT = "network_client"

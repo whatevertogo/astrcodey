@@ -124,3 +124,8 @@ families use typed authoring methods and emit exactly one valid wire mode:
 The manifest normalization boundary rejects every other event/mode combination, including Blocking
 on observe-only lifecycle events. `user_message_envelope` remains unavailable to S5R workers until
 the wire protocol has a typed input/output adapter for it.
+
+Every S5R manifest hook may declare an optional `priority` (non-negative integer, default `0`;
+negative values are rejected at the manifest normalization boundary). The host dispatches hooks in
+descending priority and preserves registration order on ties — the same stable priority order the
+bundled Rust registration API uses. A hook that omits `priority` behaves exactly as before.

@@ -42,16 +42,26 @@ pub(crate) enum HookSubscription {
     Lifecycle {
         event: LifecycleEvent,
         mode: HookMode,
+        priority: i32,
         options: ContinueAfterStopOptions,
     },
-    Compact(CompactEvent),
+    Compact {
+        event: CompactEvent,
+        priority: i32,
+    },
 }
 
 impl HookSubscription {
     pub(crate) fn event_name(&self) -> &'static str {
         match self {
             Self::Lifecycle { event, .. } => event.as_str(),
-            Self::Compact(event) => event.as_str(),
+            Self::Compact { event, .. } => event.as_str(),
+        }
+    }
+
+    pub(crate) fn priority(&self) -> i32 {
+        match self {
+            Self::Lifecycle { priority, .. } | Self::Compact { priority, .. } => *priority,
         }
     }
 }
@@ -111,6 +121,14 @@ fn registration_from_manifest(
         return Err("initialize manifest contains duplicate required transport features".into());
     }
     let capabilities = manifest.capabilities;
+    // workspace_sensitive_paths 是宿主信任特权:敏感路径绕过随 resource lease 生效,
+    // 只授予第一方 bundled 扩展;磁盘 s5r manifest 声明它属于权限放大,直接拒绝。
+    if capabilities.contains(&ExtensionCapability::WorkspaceSensitivePaths) {
+        return Err(format!(
+            "capability {} is reserved for bundled first-party extensions",
+            ExtensionCapability::WorkspaceSensitivePaths.as_str()
+        ));
+    }
 
     let tools = manifest
         .tools
@@ -225,11 +243,15 @@ fn normalize_command(command: ManifestCommand) -> SlashCommand {
 
 fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
     let event_name = hook.on.as_str();
+    let priority = hook.priority.unwrap_or(0);
+    if priority < 0 {
+        return Err(format!("{event_name} priority must be non-negative"));
+    }
     if let ManifestHookEvent::Compact(event) = hook.on {
         if hook.mode != HookMode::Blocking {
             return Err(format!("{event_name} requires blocking mode"));
         }
-        return Ok(HookSubscription::Compact(event));
+        return Ok(HookSubscription::Compact { event, priority });
     }
 
     let ManifestHookEvent::Lifecycle(event) = hook.on else {
@@ -247,6 +269,7 @@ fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
     Ok(HookSubscription::Lifecycle {
         event,
         mode: hook.mode,
+        priority,
         options: ContinueAfterStopOptions {
             max_per_turn: hook
                 .options
@@ -423,6 +446,54 @@ mod tests {
     }
 
     #[test]
+    fn s5r_manifest_rejects_bundled_only_sensitive_path_capability() {
+        let manifest: InitializeManifest = serde_json::from_value(json!({
+            "required_transport_features": [],
+            "capabilities": ["workspace_read", "workspace_sensitive_paths"]
+        }))
+        .unwrap();
+
+        let error = registration_from_manifest("sensitive-grab", "test", manifest).unwrap_err();
+        assert_eq!(
+            error,
+            "capability workspace_sensitive_paths is reserved for bundled first-party extensions"
+        );
+    }
+
+    #[test]
+    fn s5r_hook_priority_defaults_to_zero_and_rejects_negative() {
+        let hook = serde_json::from_value(
+            json!({"on": "turn_end", "mode": "non_blocking", "priority": 5}),
+        )
+        .unwrap();
+        assert_eq!(normalize_hook(hook).unwrap().priority(), 5);
+
+        let hook =
+            serde_json::from_value(json!({"on": "turn_end", "mode": "non_blocking"})).unwrap();
+        assert_eq!(normalize_hook(hook).unwrap().priority(), 0);
+
+        let hook =
+            serde_json::from_value(json!({"on": "pre_compact", "mode": "blocking", "priority": 3}))
+                .unwrap();
+        assert!(matches!(
+            normalize_hook(hook),
+            Ok(HookSubscription::Compact {
+                event: CompactEvent::PreCompact,
+                priority: 3,
+            })
+        ));
+
+        let hook = serde_json::from_value(
+            json!({"on": "turn_end", "mode": "non_blocking", "priority": -1}),
+        )
+        .unwrap();
+        assert_eq!(
+            normalize_hook(hook).unwrap_err(),
+            "turn_end priority must be non-negative"
+        );
+    }
+
+    #[test]
     fn s5r_hook_modes_match_dispatch_contract() {
         let cases = [
             ("tool_input_transform", "blocking", None),
@@ -497,9 +568,13 @@ mod tests {
             normalize_hook(ManifestHook {
                 on: CompactEvent::PreCompact.into(),
                 mode: HookMode::Blocking,
+                priority: None,
                 options: ManifestHookOptions::default(),
             }),
-            Ok(HookSubscription::Compact(CompactEvent::PreCompact))
+            Ok(HookSubscription::Compact {
+                event: CompactEvent::PreCompact,
+                priority: 0,
+            })
         ));
     }
 }

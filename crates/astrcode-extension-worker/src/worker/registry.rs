@@ -596,6 +596,26 @@ impl HandlerRegistry {
         mode: HookMode,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
+        self.register_hook_opt(on, mode, None, handler)
+    }
+
+    pub(crate) fn register_hook_with_priority(
+        &mut self,
+        on: LifecycleEvent,
+        mode: HookMode,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_hook_opt(on, mode, Some(priority), handler)
+    }
+
+    fn register_hook_opt(
+        &mut self,
+        on: LifecycleEvent,
+        mode: HookMode,
+        priority: Option<i32>,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
         if on == LifecycleEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnsupportedHook,
@@ -619,7 +639,7 @@ impl HandlerRegistry {
                 format!("{} does not support {} mode", on.as_str(), mode.as_str()),
             ));
         }
-        self.register_manifest_hook(on, mode, ManifestHookOptions::default(), handler)
+        self.register_manifest_hook(on, mode, priority, ManifestHookOptions::default(), handler)
     }
 
     pub(crate) fn register_fixed_hook(
@@ -630,6 +650,15 @@ impl HandlerRegistry {
         self.register_fixed_hook_with_options(on, ManifestHookOptions::default(), handler)
     }
 
+    pub(crate) fn register_fixed_hook_with_priority(
+        &mut self,
+        on: LifecycleEvent,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_fixed_hook_opt(on, Some(priority), ManifestHookOptions::default(), handler)
+    }
+
     pub(crate) fn register_compact_hook(
         &mut self,
         on: CompactEvent,
@@ -638,6 +667,22 @@ impl HandlerRegistry {
         self.register_manifest_hook_event(
             on.into(),
             HookMode::Blocking,
+            None,
+            ManifestHookOptions::default(),
+            handler,
+        )
+    }
+
+    pub(crate) fn register_compact_hook_with_priority(
+        &mut self,
+        on: CompactEvent,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_manifest_hook_event(
+            on.into(),
+            HookMode::Blocking,
+            Some(priority),
             ManifestHookOptions::default(),
             handler,
         )
@@ -646,6 +691,16 @@ impl HandlerRegistry {
     fn register_fixed_hook_with_options(
         &mut self,
         on: LifecycleEvent,
+        options: ManifestHookOptions,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_fixed_hook_opt(on, None, options, handler)
+    }
+
+    fn register_fixed_hook_opt(
+        &mut self,
+        on: LifecycleEvent,
+        priority: Option<i32>,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
@@ -661,28 +716,41 @@ impl HandlerRegistry {
                 format!("{} is not a fixed-mode hook", on.as_str()),
             )
         })?;
-        self.register_manifest_hook(on, mode, options, handler)
+        self.register_manifest_hook(on, mode, priority, options, handler)
     }
 
     fn register_manifest_hook(
         &mut self,
         on: LifecycleEvent,
         mode: HookMode,
+        priority: Option<i32>,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        self.register_manifest_hook_event(on.into(), mode, options, handler)
+        self.register_manifest_hook_event(on.into(), mode, priority, options, handler)
     }
 
     fn register_manifest_hook_event(
         &mut self,
         on: ManifestHookEvent,
         mode: HookMode,
+        priority: Option<i32>,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
+        if priority.is_some_and(|value| value < 0) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidHookRegistration,
+                "hook priority must be non-negative",
+            ));
+        }
         self.insert_hook_handler(on.as_str().to_owned(), handler)?;
-        self.manifest.hooks.push(ManifestHook { on, mode, options });
+        self.manifest.hooks.push(ManifestHook {
+            on,
+            mode,
+            priority,
+            options,
+        });
         Ok(())
     }
 
@@ -715,6 +783,22 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         self.register_fixed_hook_with_options(
             LifecycleEvent::ContinueAfterStop,
+            ManifestHookOptions {
+                max_per_turn: Some(options.max_per_turn),
+            },
+            handler,
+        )
+    }
+
+    pub(crate) fn register_continue_after_stop_hook_with_priority(
+        &mut self,
+        options: ContinueAfterStopOptions,
+        priority: i32,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_fixed_hook_opt(
+            LifecycleEvent::ContinueAfterStop,
+            Some(priority),
             ManifestHookOptions {
                 max_per_turn: Some(options.max_per_turn),
             },
@@ -1046,6 +1130,50 @@ mod tests {
             LifecycleEvent::AfterProviderResponse.into()
         );
         assert_eq!(fixed_hooks[2].mode, HookMode::Advisory);
+    }
+
+    #[test]
+    fn hook_priority_is_recorded_and_validated() {
+        let mut registry = HandlerRegistry::new("test-extension");
+        let handler = crate::worker::hook_handler(|_| async {
+            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
+        });
+
+        registry
+            .register_hook_with_priority(
+                LifecycleEvent::TurnEnd,
+                HookMode::NonBlocking,
+                5,
+                Arc::clone(&handler),
+            )
+            .unwrap();
+        registry
+            .register_fixed_hook_with_priority(LifecycleEvent::PreToolUse, 9, Arc::clone(&handler))
+            .unwrap();
+        registry
+            .register_compact_hook_with_priority(CompactEvent::PreCompact, 3, handler)
+            .unwrap();
+
+        assert_eq!(registry.manifest.hooks[0].priority, Some(5));
+        assert_eq!(registry.manifest.hooks[1].priority, Some(9));
+        assert_eq!(registry.manifest.hooks[2].priority, Some(3));
+
+        let mut registry = HandlerRegistry::new("test-extension");
+        let handler = crate::worker::hook_handler(|_| async {
+            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
+        });
+        let error = registry
+            .register_hook_with_priority(
+                LifecycleEvent::TurnEnd,
+                HookMode::NonBlocking,
+                -1,
+                handler,
+            )
+            .expect_err("negative priority must be rejected locally");
+        assert_eq!(
+            error.code_enum(),
+            Some(WireErrorCode::InvalidHookRegistration)
+        );
     }
 
     #[test]

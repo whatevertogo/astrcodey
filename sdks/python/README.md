@@ -64,6 +64,7 @@ EOF(stdin 关闭)时干净退出。
 | `on_after_provider_response` | 固定 advisory hook |
 | `on_pre_compact` / `on_post_compact` | compact hook(blocking) |
 | `on_continue_after_stop(max_per_turn, handler)` | `-1` 表示无限 |
+| 以上 hook 方法的 keyword-only `priority` | 跨扩展调度优先级(非负整数,缺省 0;宿主降序调度,同级保持注册顺序) |
 | `continuation_hook_handler(on, handler)` | 仅由 hook continuation 调用 |
 | `command(SlashCommand(...), handler)` | slash command(execute + completion) |
 | `custom_event(...)` / `on_custom_event(...)` | custom event 声明与订阅 |

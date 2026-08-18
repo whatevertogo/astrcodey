@@ -354,6 +354,7 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `tool_result_read` | `astrcode.tool_result.read` | 读取当前 session 拥有的 opaque 工具结果 artifact；按 `4..=20_000` UTF-8 字节分页，并使用响应中的 `next_byte_offset` 续读。 |
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；相对路径限定工作区内并拒绝 symlink 组件，绝对路径按文件系统解析；均拒绝 `..` 穿越与密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑非敏感文件；相对路径限定工作区内并拒绝 symlink 组件，绝对路径按文件系统解析；写入目标为 symlink 时拒绝；均拒绝 `..` 穿越与密钥类路径。 |
+| `workspace_sensitive_paths` | 敏感路径绕过（随 resource lease 生效） | 宿主信任特权：在已批准 tool plan（resource lease）的执行期间允许读写密钥类路径（`.env`、`.git`、credentials 等）。仅第一方 bundled 扩展可声明；磁盘 s5r manifest 声明该 capability 会被直接拒绝加载。 |
 | `process_spawn` | `astrcode.process.*` | 运行并管理受监管的 stdin/stdout/stderr pipes process；cwd 默认工作区，可传绝对路径（按文件系统解析）或相对路径（限定工作区内）。并发、总时长、stdin 和输出均受限；Unix 用 process group、Windows 用 Job Object 管理完整进程树；不提供 PTY 或 resize operation。 |
 | `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 请求。worker 与进程内扩展共用同一个宿主出站网络服务；统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。作者 API 接收原始响应字节，线缆使用 base64；`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 不跟随重定向但返回有界 3xx body。同名响应头不保留重复值，并通过 `final_url` 返回最终地址。并发、总时长和重定向次数均受限；并发上限全局共享，当前不承诺 extension 级公平配额。 |
 
@@ -377,6 +378,12 @@ compact、provider、blocking tool intercept、continue-after-stop 等敏感注�
 capability 时会直接拒绝加载。生命周期事件中只有 `TurnStart` 和
 `UserPromptSubmit` 可以使用 Blocking；session、step 和结束类事件可选择同步等待但
 fail-open 的 Advisory，或由宿主管理生命周期的 NonBlocking 通知。
+磁盘 s5r manifest 的每个 hook 可声明可选 `priority`（非负整数，缺省 0，负数在
+manifest 归一化边界拒绝）；宿主按与 bundled 注册 API 相同的降序稳定顺序调度，
+同优先级保持注册顺序。Rust worker 通过 `hook_with_priority` /
+`fixed_hook_with_priority` / `compact_hook_with_priority` /
+`on_continue_after_stop_with_priority` 声明；Python SDK 的 `Worker.hook` 与各
+`on_*` 注册方法接受 keyword-only `priority` 参数。
 
 所有来源最终都解析成 runner 内唯一的 `ResolvedExtensionManifest`。索引、快照、
 能力检查和冲突检查只读取这份运行时清单，不再分别维护扩展实例、注册记录和任务表。

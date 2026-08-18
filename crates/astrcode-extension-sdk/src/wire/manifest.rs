@@ -104,6 +104,10 @@ where
 pub struct ManifestHook {
     pub on: ManifestHookEvent,
     pub mode: HookMode,
+    /// 可选调度优先级,缺省为 0;宿主按降序调度,同优先级保持注册顺序。
+    /// 缺省时省略序列化,旧 host 的 `deny_unknown_fields` 校验因此不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "ManifestHookOptions::is_empty")]
     pub options: ManifestHookOptions,
 }
@@ -297,6 +301,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_hook_priority_is_optional_and_omitted_when_default() {
+        let without: ManifestHook =
+            serde_json::from_value(serde_json::json!({"on": "turn_end", "mode": "non_blocking"}))
+                .unwrap();
+        assert_eq!(without.priority, None);
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("priority")
+                .is_none(),
+            "default priority must stay absent for old deny_unknown_fields hosts"
+        );
+
+        let with: ManifestHook = serde_json::from_value(
+            serde_json::json!({"on": "turn_end", "mode": "non_blocking", "priority": 9}),
+        )
+        .unwrap();
+        assert_eq!(with.priority, Some(9));
+        assert_eq!(serde_json::to_value(&with).unwrap()["priority"], 9);
+    }
+
+    #[test]
     fn initialize_manifest_preserves_required_shapes_and_rejects_unknown_values() {
         let manifest = InitializeManifest {
             required_transport_features: vec![TransportFeature::AuthenticatedHttp],
@@ -305,6 +331,7 @@ mod tests {
             hooks: vec![ManifestHook {
                 on: LifecycleEvent::ContinueAfterStop.into(),
                 mode: HookMode::Blocking,
+                priority: None,
                 options: ManifestHookOptions {
                     max_per_turn: Some(ContinueAfterStopLimit::unlimited()),
                 },

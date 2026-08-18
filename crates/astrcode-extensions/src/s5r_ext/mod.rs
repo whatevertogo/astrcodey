@@ -171,13 +171,14 @@ impl Extension for S5rExtension {
         }
         for subscription in &registration.subscriptions {
             let event_name = subscription.event_name();
+            let priority = subscription.priority();
             let session = Arc::clone(&self.session);
             let ext_id = registration.extension_id.clone();
             match subscription {
-                HookSubscription::Compact(event) => match event {
+                HookSubscription::Compact { event, .. } => match event {
                     astrcode_extension_sdk::extension::CompactEvent::PreCompact => {
                         reg.on_pre_compact(
-                            0,
+                            priority,
                             Arc::new(S5rPreCompactHandler {
                                 session,
                                 ext_id,
@@ -187,7 +188,7 @@ impl Extension for S5rExtension {
                     },
                     astrcode_extension_sdk::extension::CompactEvent::PostCompact => {
                         reg.on_post_compact(
-                            0,
+                            priority,
                             Arc::new(S5rPostCompactHandler {
                                 session,
                                 ext_id,
@@ -200,10 +201,11 @@ impl Extension for S5rExtension {
                     event,
                     mode,
                     options,
+                    ..
                 } => match event {
                     LifecycleEvent::ToolInputTransform => {
                         reg.on_tool_input_transform(
-                            0,
+                            priority,
                             Arc::new(S5rToolInputTransformHandler {
                                 session,
                                 ext_id,
@@ -213,7 +215,7 @@ impl Extension for S5rExtension {
                     },
                     LifecycleEvent::PreToolUse => {
                         reg.on_pre_tool_use(
-                            0,
+                            priority,
                             Arc::new(S5rPreToolUseHandler {
                                 session,
                                 ext_id,
@@ -224,7 +226,7 @@ impl Extension for S5rExtension {
                     LifecycleEvent::PostToolUse => {
                         reg.on_post_tool_use(
                             *mode,
-                            0,
+                            priority,
                             Arc::new(S5rPostToolUseHandler {
                                 session,
                                 ext_id,
@@ -235,7 +237,7 @@ impl Extension for S5rExtension {
                     LifecycleEvent::BeforeProviderRequest => {
                         reg.on_before_provider_request(
                             *mode,
-                            0,
+                            priority,
                             Arc::new(S5rProviderHandler {
                                 session,
                                 ext_id,
@@ -245,7 +247,7 @@ impl Extension for S5rExtension {
                     },
                     LifecycleEvent::ProviderContribution => {
                         reg.on_provider_contribution(
-                            0,
+                            priority,
                             Arc::new(S5rProviderContributionHandler {
                                 session,
                                 ext_id,
@@ -255,7 +257,7 @@ impl Extension for S5rExtension {
                     },
                     LifecycleEvent::AfterProviderResponse => {
                         reg.on_after_provider_response(
-                            0,
+                            priority,
                             Arc::new(S5rProviderHandler {
                                 session,
                                 ext_id,
@@ -265,7 +267,7 @@ impl Extension for S5rExtension {
                     },
                     LifecycleEvent::ContinueAfterStop => {
                         reg.on_continue_after_stop(
-                            0,
+                            priority,
                             *options,
                             Arc::new(S5rContinueAfterStopHandler {
                                 session,
@@ -276,7 +278,7 @@ impl Extension for S5rExtension {
                     },
                     LifecycleEvent::PromptBuild => {
                         reg.on_prompt_build(
-                            0,
+                            priority,
                             Arc::new(S5rPromptBuildHandler {
                                 session,
                                 ext_id,
@@ -295,7 +297,7 @@ impl Extension for S5rExtension {
                         reg.on_lifecycle(
                             other.clone(),
                             *mode,
-                            0,
+                            priority,
                             Arc::new(S5rLifecycleHandler {
                                 session,
                                 ext_id,
