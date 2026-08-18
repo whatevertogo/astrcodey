@@ -12,7 +12,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-dirs = { workspace = true }
+astrcode-paths = { path = "../astrcode-paths" }
 fs2 = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }

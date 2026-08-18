@@ -1,13 +1,16 @@
 //! 配置解析：将原始 Config 转换为 EffectiveConfig。纯函数，无 IO 操作。
 //!
+//! 从 `astrcode-core::config::resolve` 迁移而来：解析编排的全部外部消费者
+//! 都集中在 server，归入配置管理职责。通过 [`ConfigResolve`] 扩展 trait 提供
+//! `Config::effective_from()` / `Config::into_effective()` 方法语义。
+//!
 //! 本模块包含：
-//! - [`Config::into_effective()`]：将原始配置解析为有效配置
-//! - [`resolve_api_key()`]：解析 API 密钥（支持环境变量引用）
+//! - [`ConfigResolve`]：将原始配置解析为有效配置
 //! - [`merge_overlay()`]：合并项目级覆盖配置
 
 use std::{collections::BTreeMap, process::Command};
 
-use crate::config::{effective::*, raw::*};
+use astrcode_core::config::{effective::*, raw::*};
 
 /// 环境变量查找函数。注入式解析让纯函数可测，测试无需修改进程环境。
 type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -201,7 +204,7 @@ fn resolve_llm_settings(
 
     // Resolve thinking capability: explicit override > built-in lookup
     let capability = model.thinking_capability.clone().or_else(|| {
-        crate::config::resolve_thinking_capability(
+        crate::config_manager::provider_catalog::resolve_thinking_capability(
             &profile.provider_kind,
             profile.wire_format,
             &model.id,
@@ -211,7 +214,7 @@ fn resolve_llm_settings(
     // Log validation issues for non-trivial mismatches
     if thinking_configured {
         if let Some(ref cap) = capability {
-            let issues = crate::llm::thinking::validate_thinking(&thinking, cap);
+            let issues = astrcode_core::llm::thinking::validate_thinking(&thinking, cap);
             for issue in &issues {
                 tracing::warn!(
                     model = %model.id,
@@ -236,22 +239,22 @@ fn resolve_llm_settings(
         model_id: model_name.into(),
         max_tokens: model
             .max_tokens
-            .unwrap_or(super::defaults::DEFAULT_LLM_MAX_TOKENS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_MAX_TOKENS),
         context_limit: model
             .context_limit
-            .unwrap_or(super::defaults::DEFAULT_LLM_CONTEXT_LIMIT),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_CONTEXT_LIMIT),
         connect_timeout_secs: runtime
             .llm_connect_timeout_secs
-            .unwrap_or(super::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
         read_timeout_secs: runtime
             .llm_read_timeout_secs
-            .unwrap_or(super::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS),
         max_retries: runtime
             .llm_max_retries
-            .unwrap_or(super::defaults::DEFAULT_LLM_MAX_RETRIES),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_MAX_RETRIES),
         retry_base_delay_ms: runtime
             .llm_retry_base_delay_ms
-            .unwrap_or(super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
         supports_prompt_cache_key: profile
             .capabilities
             .supports_prompt_cache_key
@@ -268,7 +271,11 @@ fn resolve_llm_settings(
     })
 }
 
-impl Config {
+/// 把 [`Config`] 解析为 [`EffectiveConfig`] 的扩展 trait。
+///
+/// 解析逻辑随 server 配置管理职责迁移（原本是 core 上的 inherent impl）；
+/// 调用点需要 `use crate::config_manager::effective::ConfigResolve;`。
+pub trait ConfigResolve: Sized {
     /// 将原始配置解析为 [`EffectiveConfig`]（借用版本，不消耗 [`Config`]）。
     ///
     /// 解析流程：
@@ -276,7 +283,16 @@ impl Config {
     /// 2. 根据 `active_model` 查找对应的模型配置
     /// 3. 解析 API 密钥（支持 `env:` 前缀和环境变量名）
     /// 4. 合并运行时配置段的超时/重试参数与默认值
-    pub fn effective_from(&self) -> Result<EffectiveConfig, ResolveError> {
+    fn effective_from(&self) -> Result<EffectiveConfig, ResolveError>;
+
+    /// 消耗 [`Config`] 并解析为 [`EffectiveConfig`]。
+    fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
+        self.effective_from()
+    }
+}
+
+impl ConfigResolve for Config {
+    fn effective_from(&self) -> Result<EffectiveConfig, ResolveError> {
         let llm = resolve_llm_settings(
             &self.profiles,
             &self.active_profile,
@@ -305,11 +321,6 @@ impl Config {
             extensions: build_extension_settings(&self.runtime, self.extensions.as_ref()),
         })
     }
-
-    /// 消耗 [`Config`] 并解析为 [`EffectiveConfig`]。
-    pub fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
-        self.effective_from()
-    }
 }
 
 /// 解析 API 密钥：支持 `env:VAR` 前缀和环境变量名。
@@ -321,10 +332,6 @@ impl Config {
 /// - 其他字符串：直接作为密钥使用
 ///
 /// 空字符串在此函数被调用前已由调用方（`into_effective`）拦截。
-pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
-    resolve_api_key_with_policy(raw, true, &process_env_lookup)
-}
-
 fn resolve_api_key_with_policy(
     raw: &str,
     allow_shell_command: bool,
@@ -385,40 +392,44 @@ fn build_context_settings(runtime: &RuntimeSection) -> ContextSettings {
     ContextSettings {
         auto_compact_enabled: runtime
             .compact_auto_enabled
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
         predictive_compact_enabled: runtime
             .predictive_compact_enabled
-            .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED),
         compact_threshold_percent: runtime
             .compact_threshold_percent
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT),
         compact_max_retry_attempts: runtime
             .compact_max_retry_attempts
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS),
         compact_max_output_tokens: runtime
             .compact_max_output_tokens
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
         compact_keep_recent_turns: runtime
             .compact_keep_recent_turns
-            .or(super::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS),
+            .or(astrcode_core::config::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS),
         predictive_compact_baseline_growth_tokens: runtime
             .predictive_compact_baseline_growth_tokens
-            .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS),
+            .unwrap_or(
+                astrcode_core::config::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS,
+            ),
         compact_circuit_breaker_threshold: runtime
             .compact_circuit_breaker_threshold
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD),
         compact_circuit_breaker_cooldown_secs: runtime
             .compact_circuit_breaker_cooldown_secs
-            .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS),
+            .unwrap_or(
+                astrcode_core::config::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS,
+            ),
         post_compact_max_files: runtime
             .post_compact_max_files
-            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_FILES),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_POST_COMPACT_MAX_FILES),
         post_compact_token_budget: runtime
             .post_compact_token_budget
-            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET),
         post_compact_max_tokens_per_file: runtime
             .post_compact_max_tokens_per_file
-            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
     }
 }
 
@@ -426,14 +437,14 @@ fn build_agent_settings(runtime: &RuntimeSection) -> AgentSettings {
     AgentSettings {
         max_depth: runtime
             .agent_max_depth
-            .unwrap_or(super::defaults::DEFAULT_AGENT_MAX_DEPTH),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_AGENT_MAX_DEPTH),
         tool_max_parallel_calls: runtime
             .agent_tool_max_parallel_calls
-            .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
+            .unwrap_or(astrcode_core::config::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
         approval_mode: runtime
             .approval_mode
             .as_deref()
-            .and_then(crate::permission::ApprovalMode::parse)
+            .and_then(astrcode_core::permission::ApprovalMode::parse)
             .unwrap_or_default(),
     }
 }
@@ -865,7 +876,7 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(128000),
                     model_options: Some(ModelOptionsConfig {
-                        thinking: Some(crate::llm::thinking::ThinkingConfig {
+                        thinking: Some(astrcode_core::llm::thinking::ThinkingConfig {
                             enabled: true,
                             effort: Some("max".into()),
                             budget_tokens: Some(4096),
@@ -887,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_explicit_thinking_capability_override() {
-        use crate::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
 
         let config = Config {
             profiles: vec![Profile {
@@ -903,7 +914,7 @@ mod tests {
                     max_tokens: Some(4096),
                     context_limit: Some(65536),
                     model_options: Some(ModelOptionsConfig {
-                        thinking: Some(crate::llm::thinking::ThinkingConfig {
+                        thinking: Some(astrcode_core::llm::thinking::ThinkingConfig {
                             enabled: true,
                             effort: Some("medium".into()),
                             budget_tokens: None,

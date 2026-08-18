@@ -5,7 +5,7 @@
 //! wire format, auth scheme, common endpoint presets, seed model names, and
 //! built-in thinking capability defaults.
 
-use super::{ProviderAuthScheme, ProviderWireFormat};
+use astrcode_core::config::{ProviderAuthScheme, ProviderWireFormat};
 
 mod thinking;
 

@@ -8,8 +8,10 @@
 //! |------|------|------|
 //! | [`raw`] | `Config`, `ConfigOverlay`, `Profile`, `RuntimeSection` | 与 `config.toml` 字段一一对应的 serde 类型（字段多为 `Option`） |
 //! | [`effective`] | `EffectiveConfig`, `LlmSettings`, … | 解析后的具体值，供 LLM / compact / 扩展加载使用 |
-//! | [`resolve`] | `into_effective()`, `merge_overlay()`, `resolve_api_key()` | 纯函数解析与项目覆盖合并 |
 //! | [`defaults`] | 常量与 serde 默认值函数 | 内置默认 profile、超时、compact 阈值等 |
+//!
+//! raw → effective 的解析编排与厂商预设目录已随消费者迁入
+//! `astrcode-server::config_manager::{effective, provider_catalog}`。
 //!
 //! # 配置文件
 //!
@@ -25,38 +27,33 @@
 //! # 解析流程
 //!
 //! 1. 加载 `~/.astrcode/config.toml`（不存在则写入内置默认）。
-//! 2. 若存在 `<startup_cwd>/.astrcode/config.toml`，[`merge_overlay`] 合并 [`ConfigOverlay`]。
-//! 3. [`Config::effective_from()`] 解析主模型 / 小模型、API key、runtime、permissions、extensions。
+//! 2. 若存在 `<startup_cwd>/.astrcode/config.toml`，
+//!    `astrcode-server::config_manager::effective::merge_overlay` 合并 [`ConfigOverlay`]。
+//! 3. `astrcode-server::config_manager::effective::ConfigResolve::effective_from()` 解析主模型 /
+//!    小模型、API key、runtime、permissions、extensions。
 //! 4. 解析失败时服务端回退到 `.last-known-good.toml` 或内置 dummy LLM（见
 //!    `astrcode-server::bootstrap::config_resolve`）。
 //!
 //! # 新增字段
 //!
 //! 在以下三处同步添加：`raw.rs`（`Option` 字段）→ `effective.rs`（具体字段，若需）
-//! → `resolve.rs`（`build_*` 映射）；项目覆盖若需支持，在 [`ConfigOverlay`] 与 [`merge_overlay`]
-//! 中补充。
+//! → `astrcode-server::config_manager::effective.rs`（`build_*` 映射）；项目覆盖若需支持，在
+//! [`ConfigOverlay`] 与 `merge_overlay` 中补充。
 //!
 //! 用户可见说明见仓库根目录 [`docs/configuration.md`](../../../../docs/configuration.md)。
 
 pub mod defaults;
 pub mod effective;
-pub mod provider_catalog;
 pub mod raw;
-pub mod resolve;
 
 pub use effective::{
     AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-};
-pub use provider_catalog::{
-    ProviderEndpointPreset, ProviderSpec, ProviderSpecCapabilities, builtin_provider_catalog,
-    resolve_thinking_capability,
 };
 pub use raw::{
     Config, ConfigOverlay, ExtensionRawConfig, ModelConfig, ModelOptionsConfig, ModelSelection,
     OpenAiApiMode, Profile, ProviderAuthScheme, ProviderCapabilities, ProviderWireFormat,
     RuntimeSection,
 };
-pub use resolve::{ResolveError, merge_overlay, profile_has_resolvable_api_key, resolve_api_key};
 
 /// 配置持久化 trait。
 ///

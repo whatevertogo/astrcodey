@@ -31,10 +31,13 @@ use super::{
     },
     ConfigRequestError, reload_extension_registry, update_config,
 };
-use crate::protocol_mapping::{
-    custom_event_declaration_to_dto, custom_event_subscription_to_dto, extension_capability_to_dto,
-    extension_http_method_to_dto, keybinding_to_dto, slash_command_to_dto, status_item_to_dto,
-    transport_feature_to_dto,
+use crate::{
+    config_manager::ConfigResolve,
+    protocol_mapping::{
+        custom_event_declaration_to_dto, custom_event_subscription_to_dto,
+        extension_capability_to_dto, extension_http_method_to_dto, keybinding_to_dto,
+        slash_command_to_dto, status_item_to_dto, transport_feature_to_dto,
+    },
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {

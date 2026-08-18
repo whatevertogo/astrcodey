@@ -1,10 +1,7 @@
 //! 配置查看 / 重载 / 激活选择路由。
 
 use astrcode_core::{
-    config::{
-        Config, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities, ProviderSpec,
-        builtin_provider_catalog, resolve_thinking_capability,
-    },
+    config::{Config, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities},
     llm::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping, validate_thinking},
     permission::ApprovalMode,
 };
@@ -27,7 +24,10 @@ use super::{
 };
 use crate::{
     bootstrap::{self, BootstrapOptions},
-    config_manager::{ConfigUpdateError, PreparedConfigError},
+    config_manager::{
+        ConfigResolve, ConfigUpdateError, PreparedConfigError, ProviderSpec,
+        builtin_provider_catalog, profile_has_resolvable_api_key, resolve_thinking_capability,
+    },
 };
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
@@ -49,7 +49,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
             wire_format: p.wire_format.into(),
             auth_scheme: p.auth_scheme.into(),
             base_url: p.base_url.clone(),
-            has_api_key: astrcode_core::config::profile_has_resolvable_api_key(p),
+            has_api_key: profile_has_resolvable_api_key(p),
             models: p
                 .models
                 .iter()

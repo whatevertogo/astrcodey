@@ -47,7 +47,7 @@ pub(crate) async fn load_merged_config(
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     if let Some(overlay) = config_store.load_overlay(&cwd.to_string_lossy()).await? {
-        config = astrcode_core::config::merge_overlay(config, overlay);
+        config = crate::config_manager::merge_overlay(config, overlay);
     }
     apply_approval_mode_bootstrap_options(&mut config, opts);
     Ok(config)

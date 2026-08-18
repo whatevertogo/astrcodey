@@ -17,7 +17,7 @@ use std::{
 
 use astrcode_ai::create_provider;
 use astrcode_core::{
-    config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
+    config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings},
     llm::{LlmClientConfig, LlmProvider},
 };
 use astrcode_extension_sdk::transport::TransportProfile;
@@ -30,6 +30,16 @@ use futures_util::FutureExt;
 use parking_lot::RwLock;
 use tokio::sync::{Notify, oneshot};
 use tracing::Instrument;
+
+pub(crate) mod effective;
+pub(crate) mod provider_catalog;
+
+pub(crate) use effective::{
+    ConfigResolve, ResolveError, merge_overlay, profile_has_resolvable_api_key,
+};
+pub(crate) use provider_catalog::{
+    ProviderSpec, builtin_provider_catalog, resolve_thinking_capability,
+};
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,

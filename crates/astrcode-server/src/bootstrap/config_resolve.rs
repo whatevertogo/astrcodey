@@ -3,6 +3,8 @@
 use astrcode_core::config::{Config, EffectiveConfig};
 use astrcode_storage::config_store::FileConfigStore;
 
+use crate::config_manager::ConfigResolve;
+
 /// 从已加载的 raw 配置解析 `EffectiveConfig`，失败时按 last-known-good → 内置默认回退。
 pub(super) async fn resolve_effective_config(
     config_store: &FileConfigStore,

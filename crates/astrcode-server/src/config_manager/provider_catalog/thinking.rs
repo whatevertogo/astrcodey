@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use crate::{
+use astrcode_core::{
     config::raw::ProviderWireFormat,
     llm::thinking::{ThinkingCapability, ThinkingWireMapping},
 };
