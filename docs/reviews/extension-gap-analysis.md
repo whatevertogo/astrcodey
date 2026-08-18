@@ -76,6 +76,8 @@
 
 ### P0 — 应尽快补
 
+> #1–#4(请求改写链四项)已按「统一链式原语」定型设计,见 `docs/provider-request-rewrite-chain-design.md`(2026-08-18 提案):扩展现有 `before_provider_request` 为类型化 fold 链,`ProviderRequestEffect` 封闭枚举 + 显式组合语义;#5(逐 chunk 流包裹)维持 decision-pending。
+
 | # | 能力 | deepseek 参照 | 我方现状 | 接入方式 |
 |---|------|--------------|---------|---------|
 | 1 | 请求改写链·换模型 | `agent/request` waterfall 重写整个 `LlmCallConfig`(core/agent:244) | `before_provider_request` 输入含 messages(含系统消息)+ 只读 model,结果只有 Replace/Append/Block Messages;provider 实例在 hook 前已固定(turn_runner.rs:530),hook 应用为请求级非 durable(turn_runner.rs:846-876) | `ProviderResult` 加 `OverrideModel` 变体 + provider 解析挪到 hook 后 |
