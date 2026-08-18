@@ -674,7 +674,7 @@ async fn create_root_session_applies_extension_customization() {
     // 独立的小模型 id 才能证明 model_preference 走的是覆盖路径而非默认值巧合。
     let mut effective = mock_effective_config();
     effective.small_llm = mock_llm_settings("mock-small");
-    let ops = assemble_test_ops(Arc::clone(&store), Arc::clone(&llm), llm, effective);
+    let ops = assemble_test_ops(Arc::clone(&store), llm.clone(), llm, effective);
 
     let created = ops
         .create_root_session(CreateRootSessionRequest {
