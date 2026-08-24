@@ -1,63 +1,42 @@
-## v0.3.15
+## v0.3.16
 
-Released: 2026-08-17
+Released: 2026-08-24
 
 ### ✨ Features
 
-- feat: 优化持久化文件写入逻辑，使用独立临时文件以支持并发替换 (57d031ce)
-- feat: refine provider normalization logic for tool entries during execution (3ad9e094)
-- feat: enhance message list handling with pagination and action block management (3b47e4d3)
-- feat: optimize event handling and transcript management in streaming (a979d4ce)
-- feat: implement conversation timeline with pagination and state management (5ecb6e69)
-- feat(storage): add performance baseline documentation for astrcode-storage (befaee17)
-- feat: introduce per-tool execution timeout policy (327e955c)
-- feat: update cold open benchmark to support multiple event counts (8b712a9f)
-- feat: implement session ownership lease and session projection (a20a7d65)
-- feat: Final cleanliness pass for PR #47 (275fea1e)
-- feat(tests): enhance extension integration tests with planning context and resource lease (c9c07e58)
-- feat: add S5R Phase-0 cleanliness audit documentation (674e7a14)
-- feat: enhance early tool execution and session management (64b7bcc7)
-- feat: 更新 DurableEventPayload 的序列化逻辑以兼容旧日志格式 (08f18eb0)
-- feat: 更新 CustomEventConsumerStatus 和 DTO，调整 quarantined_events 类型为 u64 (600a907c)
-- feat: 更新 S5R 3.0 协议，添加效果常量并优化文档 (93b5a09d)
-- feat: update extension protocol to S5R 3.0 and improve documentation (e2fd26a4)
-- feat: Introduce event consumer state management and custom event handling (24b75dc3)
-- feat: Enhance event emission system with new EventPublishReceipt and error handling (d7795ff1)
+- feat(worker): worker_prelude 再导出 WireErrorCode (f898d51f)
+- feat: introduce hook registration modifiers for tool hooks (0cd77a17)
+- feat(worker): Rust worker SDK 的 BackgroundHost 补 fork_root 委托 (5386485e)
+- feat(sdk): Python SDK 同步 root 定制与 fork,并更新协议文档 (c6fc33c6)
+- feat(extensions): root 会话创建支持定制字段并新增 session.root.fork (a89282a4)
+- feat(docs): 添加请求改写链设计文档，定义统一链式原语及相关能力 (8f3b1e9d)
+- feat: add workspace_sensitive_paths capability and hook priority support (79a273a3)
+- feat(sdk): 补齐 Python SDK 的 HTTP route、shutdown hook 与 BackgroundHost (52e584fd)
+- feat(extensions): 补齐后台驱动型扩展的宿主能力并新增类型化 hook 构造器 (efbec865)
 
 ### 🐛 Bug Fixes
 
-- fix: update parameter type for extension command context and request handling (d5ccdc87)
-- fix(extensions): harden S5R lifecycle and clarify ownership (5a0ece23)
-- fix(extensions): 收紧 S5R 运行时边界 (86c0dffc)
-- fix: 修正持久化自定义事件处理中的变量命名 (ddd4c19a)
+- fix(sdk): 补齐 SessionRootFork 的进程内类型化客户端覆盖并修测试构造 (12e4eabb)
+- fix(extensions): 跳过与全局目录相同 canonical 路径的项目扩展扫描 (cb23e959)
 
 ### 🔧 Refactors
 
-- refactor: 收敛跨模块重复实现与遗留契约 (1a951cfd)
-- Refactor LlmMessage handling to use Arc for shared ownership (564a9fbb)
-- Refactor session storage and message handling for improved performance (fe1756d2)
-- refactor: rename SessionEventPublisher to SessionEventSink and update related documentation (9919f897)
-- Refactor and clean up extension worker and manifest handling (9c1ed550)
-- refactor(extensions): 收敛作者契约与宿主分发 (f5d4da30)
-- refactor(extensions): 移除 host 能力 JSON Schema 发布 (abbac3c6)
-- refactor(wire): 统一跨线缆错误码为单点定义的 WireErrorCode (0bf9dda4)
-- refactor(extensions): 统一宿主线缆契约与运行时边界 (50c599df)
-- Refactor session context handling and tool execution (3cddb7a0)
-- refactor(extensions): 统一扩展作者接口与宿主能力 (64635f22)
+- refactor(log): astrcode-log 直接依赖 astrcode-paths 而非 astrcode-core (c6b5777e)
+- refactor(session): 谱系遍历与 session ID 校验移出 core 到各自消费方 (fc57f5eb)
+- refactor(server): 配置解析与厂商预设目录迁入 server config_manager (d54bd3af)
+- refactor(core): 扩展共享原语下沉到 astrcode-core,SDK 保留 re-export (32a28daf)
+- refactor(context): token 估算模块从 core 迁到 astrcode-context (36449517)
+- refactor(sdk): 收窄 SDK 作者面,wire DTO 走单一来源 (7a0470a4)
+- refactor(s5r): S5R peer 运行时下沉为独立 astrcode-s5r-runtime crate (2cf1cd4c)
+- refactor(paths): 引入 astrcode-paths 进程级路径原语 crate (0f24c2c8)
+- refactor(commands): 统一斜杠命令契约与分发链路 (feeb6f18)
+- refactor(sdk): host_operations 收拢为 worker 侧单拷贝 (dc74a3a8)
+- refactor(sdk): 收敛 dispose_root 的重复调用-校验逻辑 (054b0fae)
+- refactor(ai): 收敛 LLM 传输层重复实现与 crate 内部可见性 (2834d48b)
 
 ### 📝 Other
 
-- Add extension gap analysis document comparing astrcodey and deepseek-harness capabilities (395437ca)
-- Add in-memory transport and comprehensive tests for frame handling and handshake protocol (6a5036ce)
-- clean (0b0461d9)
-- all (808f0ad8)
-- clean (df671e21)
-- better (5851e2de)
-- Update AstrCodey runtime and extension integration (3c0cbf39)
-
-### Pull Requests
-
-- #47
+- Remove outdated performance baseline documentation for astrcode-storage. The document included benchmark results and analysis from Phase 0 and Phase 1, which are no longer relevant. Future measurements and conclusions regarding snapshot recovery and performance optimizations will be documented separately. (b5a7e7b6)
 
 ### Contributors
 
@@ -65,4 +44,4 @@ Released: 2026-08-17
 
 ---
 
-**Install:** `npm install -g @whatevertogo/astrcode@0.3.15`
+**Install:** `npm install -g @whatevertogo/astrcode@0.3.16`
