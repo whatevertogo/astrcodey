@@ -16,7 +16,10 @@ use astrcode_core::{
         ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, EventPayload, LiveEventPayload, Phase},
-    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
+    llm::{
+        LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits,
+        testing::ScriptedLlm,
+    },
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
@@ -59,7 +62,6 @@ impl ProviderMessages for SessionReadModel {
     }
 }
 
-struct MockLlm;
 struct ReactiveCompactLlm {
     calls: AtomicUsize,
 }
@@ -69,14 +71,10 @@ struct AutoCompactFailingLlm {
     compact_calls: AtomicUsize,
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for MockLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta {
+/// 压缩 summary 回复。
+fn mock_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta {
             delta: r#"<summary>
 1. Primary Request and Intent:
    Compacted conversation summary
@@ -106,19 +104,11 @@ impl LlmProvider for MockLlm {
    - (none)
 </summary>"#
                 .into(),
-        });
-        let _ = tx.send(LlmEvent::Done {
+        },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
 }
 
 #[async_trait::async_trait]
@@ -286,10 +276,6 @@ struct BlockFirstThenImmediateLlm {
 }
 struct DelayedLlm {
     started: tokio::sync::watch::Sender<bool>,
-}
-struct StreamErrorLlm;
-struct ReadThenEditAcrossTurnsLlm {
-    call_count: AtomicUsize,
 }
 
 struct FailingSessionStartObserver {
@@ -664,87 +650,57 @@ impl LlmProvider for DelayedLlm {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for StreamErrorLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::Error {
-            message: "stream failed".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
-    }
+fn stream_error_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![LlmEvent::Error {
+        message: "stream failed".into(),
+    }])
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for ReadThenEditAcrossTurnsLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let call = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        match call {
-            0 => {
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "read-call".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
-                });
+/// read → 完成 → edit → 完成 的跨 turn 工具调用脚本。
+fn read_then_edit_across_turns_llm() -> ScriptedLlm {
+    ScriptedLlm::new(vec![
+        vec![
+            LlmEvent::ToolCallStart {
+                call_id: "read-call".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
             },
-            1 => {
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "read complete".into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
             },
-            2 => {
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "edit-call".into(),
-                    name: "edit".into(),
-                    arguments: serde_json::json!({
-                        "path": "note.txt",
-                        "oldText": "alpha",
-                        "newText": "gamma"
-                    })
-                    .to_string(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
-                });
+        ],
+        vec![
+            LlmEvent::ContentDelta {
+                delta: "read complete".into(),
             },
-            _ => {
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "edit complete".into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
+            LlmEvent::Done {
+                finish_reason: "stop".into(),
             },
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
+        ],
+        vec![
+            LlmEvent::ToolCallStart {
+                call_id: "edit-call".into(),
+                name: "edit".into(),
+                arguments: serde_json::json!({
+                    "path": "note.txt",
+                    "oldText": "alpha",
+                    "newText": "gamma"
+                })
+                .to_string(),
+            },
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            },
+        ],
+        vec![
+            LlmEvent::ContentDelta {
+                delta: "edit complete".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "stop".into(),
+            },
+        ],
+    ])
 }
 
 #[async_trait::async_trait]
@@ -918,7 +874,7 @@ fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntim
 }
 
 fn test_runtime() -> Arc<ServerRuntime> {
-    test_runtime_with_llm(Arc::new(MockLlm))
+    test_runtime_with_llm(Arc::new(mock_llm()))
 }
 
 fn coding_extension() -> Arc<dyn Extension> {
@@ -1339,7 +1295,7 @@ async fn create_session_persists_initial_system_prompt() {
 async fn client_create_session_ignores_start_observer_failure() {
     let calls = Arc::new(AtomicUsize::new(0));
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(FailingSessionStartObserver {
             calls: Arc::clone(&calls),
         })],
@@ -1361,7 +1317,7 @@ async fn client_create_session_ignores_start_observer_failure() {
 async fn reopening_persisted_session_emits_resume_once_per_runtime() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(RecordSessionResumeExtension {
             events: Arc::clone(&events),
         })],
@@ -1388,7 +1344,7 @@ async fn reopening_persisted_session_emits_resume_once_per_runtime() {
 async fn failed_session_resume_observer_does_not_fail_or_repeat_open() {
     let calls = Arc::new(AtomicUsize::new(0));
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(FailingSessionResumeObserver {
             calls: Arc::clone(&calls),
         })],
@@ -1416,7 +1372,7 @@ async fn concurrent_open_waits_for_initial_session_resume() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
@@ -1460,7 +1416,7 @@ async fn cancelled_initial_resume_allows_retry() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
@@ -1846,7 +1802,7 @@ async fn submit_prompt_queues_second_running_turn_for_next_turn() {
 
 #[tokio::test]
 async fn queue_input_started_from_idle_is_cleaned_up() {
-    let runtime = test_runtime_with_llm(Arc::new(MockLlm));
+    let runtime = test_runtime_with_llm(Arc::new(mock_llm()));
     let scheduler = test_scheduler(&runtime);
     let created = runtime.session_manager().create(".").await.unwrap();
     let sid = created.id().clone();
@@ -1969,7 +1925,7 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
 async fn stream_error_still_dispatches_turn_end() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let runtime = test_runtime_with_extensions(
-        Arc::new(StreamErrorLlm),
+        Arc::new(stream_error_llm()),
         vec![Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
         })],
@@ -1995,9 +1951,7 @@ async fn read_before_edit_guard_survives_across_turns() {
     let path = workspace.join("note.txt");
     fs::write(&path, "alpha").unwrap();
     let runtime = test_runtime_with_extensions(
-        Arc::new(ReadThenEditAcrossTurnsLlm {
-            call_count: AtomicUsize::new(0),
-        }),
+        Arc::new(read_then_edit_across_turns_llm()),
         vec![coding_extension()],
     )
     .await;
@@ -2177,7 +2131,7 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
 #[tokio::test]
 async fn compact_command_rewrites_transcript_with_summary() {
     let settings = astrcode_context::ContextSettings::default();
-    let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
+    let runtime = test_runtime_with_settings(Arc::new(mock_llm()), settings);
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2229,7 +2183,8 @@ async fn compact_command_rewrites_transcript_with_summary() {
 #[tokio::test]
 async fn slash_compact_uses_backend_command_without_user_message() {
     let runtime =
-        test_runtime_with_extensions(Arc::new(MockLlm), vec![session_commands_extension()]).await;
+        test_runtime_with_extensions(Arc::new(mock_llm()), vec![session_commands_extension()])
+            .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2331,7 +2286,7 @@ async fn empty_slash_falls_through_as_regular_prompt() {
 #[tokio::test]
 async fn extension_display_slash_command_returns_content_in_handled_message() {
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(StaticCommandExtension {
             id: "test-extension",
             command_name: "demo-cmd",
@@ -2359,7 +2314,7 @@ async fn extension_display_slash_command_returns_content_in_handled_message() {
 #[tokio::test]
 async fn invoke_command_normalizes_name_at_session_boundary() {
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![Arc::new(StaticCommandExtension {
             id: "test-extension",
             command_name: "demo-cmd",
@@ -2470,7 +2425,7 @@ async fn session_commands_share_extension_resolution_and_transport_admission() {
     let interactive_execute_calls = Arc::new(AtomicUsize::new(0));
     let interactive_completion_calls = Arc::new(AtomicUsize::new(0));
     let runtime = test_runtime_with_extensions(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         vec![
             session_commands_extension(),
             astrcode_extension_skill::extension(),
@@ -2586,7 +2541,7 @@ async fn session_commands_share_extension_resolution_and_transport_admission() {
 #[tokio::test]
 async fn compact_command_compacts_existing_hidden_context_again() {
     let settings = astrcode_context::ContextSettings::default();
-    let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
+    let runtime = test_runtime_with_settings(Arc::new(mock_llm()), settings);
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2669,7 +2624,7 @@ async fn auto_compact_applies_in_memory_during_turn() {
         compact_threshold_percent: 0.0,
         ..Default::default()
     };
-    let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
+    let runtime = test_runtime_with_settings(Arc::new(mock_llm()), settings);
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2886,7 +2841,7 @@ async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
 #[tokio::test]
 async fn auto_compact_uses_configured_keep_recent_turns() {
     let runtime = test_runtime_with_settings(
-        Arc::new(MockLlm),
+        Arc::new(mock_llm()),
         astrcode_context::ContextSettings {
             compact_threshold_percent: 0.0,
             compact_keep_recent_turns: Some(2),
@@ -3019,64 +2974,42 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
 
 // ─── 流式工具调用测试 ──────────────────────────────────────────────────
 
-/// Mock LLM：发送两个 read 工具调用，并在两个调用都 start 后再发送完成信号。
-/// 第二次调用（工具结果反馈后）返回文本完成。
-struct StreamingToolCallLlm {
-    call_count: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for StreamingToolCallLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let call = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        match call {
-            0 => {
-                // 两个工具调用先后开始；OpenAI Chat Completions 的 done-marker fallback
-                // 也可能形成这种“全部 start 后再 completed”的事件顺序。
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "stream-read-1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
-                });
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "stream-read-2".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({ "path": "README.md" }).to_string(),
-                });
-
-                let _ = tx.send(LlmEvent::ToolCallCompleted {
-                    call_id: "stream-read-1".into(),
-                });
-                let _ = tx.send(LlmEvent::ToolCallCompleted {
-                    call_id: "stream-read-2".into(),
-                });
-
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
-                });
+/// 发送两个 read 工具调用,并在两个调用都 start 后再发送完成信号;
+/// 第二次调用(工具结果反馈后)返回文本完成。
+fn streaming_tool_call_llm() -> ScriptedLlm {
+    ScriptedLlm::new(vec![
+        vec![
+            // OpenAI Chat Completions 的 done-marker fallback
+            // 也可能形成这种“全部 start 后再 completed”的事件顺序。
+            LlmEvent::ToolCallStart {
+                call_id: "stream-read-1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
             },
-            _ => {
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "done".into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
+            LlmEvent::ToolCallStart {
+                call_id: "stream-read-2".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "README.md" }).to_string(),
             },
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
+            LlmEvent::ToolCallCompleted {
+                call_id: "stream-read-1".into(),
+            },
+            LlmEvent::ToolCallCompleted {
+                call_id: "stream-read-2".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            },
+        ],
+        vec![
+            LlmEvent::ContentDelta {
+                delta: "done".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "stop".into(),
+            },
+        ],
+    ])
 }
 
 /// 验证带 `ToolCallCompleted` 事件的流式工具调用能正确执行并提交结果。
@@ -3086,9 +3019,7 @@ async fn streaming_tool_call_completed_executes_tools() {
     fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
     fs::write(workspace.join("README.md"), "# test\n").unwrap();
 
-    let llm = Arc::new(StreamingToolCallLlm {
-        call_count: AtomicUsize::new(0),
-    });
+    let llm = Arc::new(streaming_tool_call_llm());
     let runtime = test_runtime_with_extensions(llm, vec![coding_extension()]).await;
     let event_tx = event_channel(128);
     let mut event_rx = event_tx.subscribe();

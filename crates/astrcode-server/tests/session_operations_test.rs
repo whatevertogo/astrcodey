@@ -15,7 +15,7 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits, testing::ScriptedLlm},
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionAccess,
         SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionLifecycleState,
@@ -39,10 +39,6 @@ use astrcode_storage::{
     in_memory::InMemoryEventStore,
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot};
-
-struct StaticTextLlm {
-    text: &'static str,
-}
 
 /// 在发送 Done 前阻塞，便于在活跃 turn 期间调用 `inject_message`。
 struct GateLlm {
@@ -112,28 +108,13 @@ impl LlmProvider for GateLlm {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for StaticTextLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta {
-            delta: self.text.into(),
-        });
-        let _ = tx.send(LlmEvent::Done {
+fn static_text_llm(text: &'static str) -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta { delta: text.into() },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
 }
 
 struct BlockingChildCreateStore {
@@ -640,7 +621,7 @@ fn build_test_ops(
     store: Arc<dyn SessionStore>,
     llm_text: &'static str,
 ) -> Arc<ServerSessionOperations> {
-    build_test_ops_with_llm(store, Arc::new(StaticTextLlm { text: llm_text }))
+    build_test_ops_with_llm(store, Arc::new(static_text_llm(llm_text)))
 }
 
 #[tokio::test]
@@ -673,7 +654,7 @@ async fn create_root_session_persists_source_extension_attribution() {
 #[tokio::test]
 async fn create_root_session_applies_extension_customization() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm = Arc::new(StaticTextLlm { text: "unused" });
+    let llm = Arc::new(static_text_llm("unused"));
     // 独立的小模型 id 才能证明 model_preference 走的是覆盖路径而非默认值巧合。
     let mut effective = mock_effective_config();
     effective.small_llm = mock_llm_settings("mock-small");

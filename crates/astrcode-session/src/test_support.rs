@@ -12,7 +12,7 @@ use astrcode_core::{
         DurableEvent, DurableEventPayload, Event, PersistedSystemPrompt, SessionStarted,
         StoredEvent, SystemPromptSource,
     },
-    llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits},
+    llm::{LlmProvider, testing::NeverLlm},
     tool::SessionToolSelection,
     types::SessionId,
 };
@@ -39,26 +39,6 @@ pub(crate) fn read_model(session_id: SessionId) -> SessionReadModel {
     );
 
     replay(session_id, &[StoredEvent::new(0, started)]).unwrap()
-}
-
-/// LLM provider 桩：测试不真正调用 LLM，任何调用都是测试设计的错误。
-pub(crate) struct UnusedLlm;
-
-#[async_trait::async_trait]
-impl LlmProvider for UnusedLlm {
-    async fn generate_request(
-        &self,
-        _request: LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        unreachable!("test does not call the LLM")
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
-    }
 }
 
 /// 统一的 mock LlmSettings，避免各测试重复完整字段字面量。
@@ -148,7 +128,7 @@ pub(crate) fn test_runtime_services() -> Arc<crate::SessionRuntimeServices> {
 pub(crate) fn test_runtime_services_with_hooks(
     turn_hooks: Arc<dyn TurnHooks>,
 ) -> Arc<crate::SessionRuntimeServices> {
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not call the LLM"));
     Arc::new(crate::SessionRuntimeServices::new_with_context_assembler(
         llm.clone(),
         llm,

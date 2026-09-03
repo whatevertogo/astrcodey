@@ -9,7 +9,7 @@ use astrcode_core::{
         CustomEventData, DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload,
         StoredEvent,
     },
-    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits},
+    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits, testing::ScriptedLlm},
     tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id, new_turn_id},
 };
@@ -62,8 +62,6 @@ use tower::ServiceExt;
 fn router(runtime: Arc<ServerRuntime>) -> Result<Router, astrcode_server::http::HttpServerError> {
     app_router(ServerApp::new(runtime))
 }
-
-struct ImmediateLlm;
 
 struct HttpRoutesExtension;
 
@@ -140,33 +138,18 @@ impl CustomEventHandler for EventConsumerHttpHandler {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for ImmediateLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta {
+fn immediate_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta {
             delta: "hello from http".into(),
-        });
-        let _ = tx.send(LlmEvent::Done {
+        },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
 }
 
 struct PendingLlm;
-
-struct SummaryLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
@@ -185,14 +168,9 @@ impl LlmProvider for PendingLlm {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for SummaryLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta {
+fn summary_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta {
             delta: r#"<summary>
 1. Primary Request and Intent:
    Compacted conversation summary
@@ -222,24 +200,16 @@ impl LlmProvider for SummaryLlm {
    - (none)
 </summary>"#
                 .into(),
-        });
-        let _ = tx.send(LlmEvent::Done {
+        },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
 }
 
 #[tokio::test]
 async fn http_routes_do_not_require_auth_token() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     let no_auth = app
@@ -258,7 +228,7 @@ async fn http_routes_do_not_require_auth_token() {
 
 #[tokio::test]
 async fn cors_allows_supported_tauri_origins_only() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(runtime).unwrap();
 
     for origin in [
@@ -319,7 +289,7 @@ async fn cors_allows_supported_tauri_origins_only() {
 
 #[tokio::test]
 async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let created = post_json_owned(
         app.clone(),
@@ -404,8 +374,11 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
 
 #[tokio::test]
 async fn extension_http_routes_allow_only_declared_public_routes() {
-    let runtime =
-        runtime_with_extensions(Arc::new(ImmediateLlm), vec![Arc::new(HttpRoutesExtension)]).await;
+    let runtime = runtime_with_extensions(
+        Arc::new(immediate_llm()),
+        vec![Arc::new(HttpRoutesExtension)],
+    )
+    .await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
@@ -492,7 +465,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
 
 #[tokio::test]
 async fn provider_catalog_route_returns_endpoint_presets() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     let catalog = get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog").await;
@@ -540,7 +513,7 @@ async fn provider_catalog_route_returns_endpoint_presets() {
 
 #[tokio::test]
 async fn provider_preset_apply_persists_profile_from_catalog() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "qwen",
@@ -579,7 +552,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
 
 #[tokio::test]
 async fn concurrent_config_updates_preserve_both_profiles() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let first = post_json_owned(
         app.clone(),
@@ -625,7 +598,7 @@ async fn concurrent_config_updates_preserve_both_profiles() {
 
 #[tokio::test]
 async fn provider_preset_apply_uses_submitted_api_key() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "openai-compatible",
@@ -695,7 +668,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 
 #[tokio::test]
 async fn model_options_rejects_unknown_profile() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "profileName": "nonexistent",
@@ -714,7 +687,7 @@ async fn model_options_rejects_unknown_profile() {
 
 #[tokio::test]
 async fn model_options_rejects_unknown_model() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     // First create a profile via provider preset
@@ -745,7 +718,7 @@ async fn model_options_rejects_unknown_model() {
 
 #[tokio::test]
 async fn model_options_rejects_thinking_without_capability() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     // openai-compatible has no built-in thinking capability
@@ -776,7 +749,7 @@ async fn model_options_rejects_thinking_without_capability() {
 
 #[tokio::test]
 async fn model_options_persists_thinking() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
@@ -824,7 +797,7 @@ async fn model_options_persists_thinking() {
 
 #[tokio::test]
 async fn model_options_can_disable_thinking() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     // Use deepseek which has a built-in thinking capability
@@ -905,7 +878,7 @@ async fn model_options_can_disable_thinking() {
 
 #[tokio::test]
 async fn model_options_null_thinking_restores_model_default() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     let body = serde_json::json!({
@@ -944,7 +917,7 @@ async fn model_options_null_thinking_restores_model_default() {
 
 #[tokio::test]
 async fn get_config_exposes_thinking_and_capability() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat mapping)
@@ -1042,7 +1015,7 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 
 #[tokio::test]
 async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let attachment_session_id = create_session(app.clone()).await;
     let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
@@ -1094,7 +1067,7 @@ async fn inject_route_writes_mid_turn_user_message() {
 
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let inject_uri = format!("/api/sessions/{session_id}/inject");
@@ -1105,7 +1078,7 @@ async fn inject_route_without_active_turn_returns_client_error() {
 
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -1166,7 +1139,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 
 #[tokio::test]
 async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapshot_contract() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let session_id_value = SessionId::new(&session_id);
@@ -1290,7 +1263,7 @@ fn visible_texts(blocks: &[ConversationBlockDto]) -> Vec<&str> {
 
 #[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -1321,7 +1294,7 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -1363,7 +1336,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 
 #[tokio::test]
 async fn stream_preserves_ask_user_events_during_replay_drain() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -1422,7 +1395,7 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
 
 #[tokio::test]
 async fn stream_suppresses_current_session_ask_user_global_copy() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -1475,7 +1448,7 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
 #[tokio::test]
 async fn event_consumer_http_control_reports_pending_events_and_updates_persisted_state() {
     let runtime = runtime_with_extensions(
-        Arc::new(ImmediateLlm),
+        Arc::new(immediate_llm()),
         vec![Arc::new(EventConsumerHttpExtension)],
     )
     .await;
@@ -1591,7 +1564,7 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
 
 #[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -1668,7 +1641,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
 
 #[tokio::test]
 async fn snapshot_and_replay_preserve_durable_errors() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -1775,7 +1748,7 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 
 #[tokio::test]
 async fn stream_invalid_cursors_request_rehydrate_and_close() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -1806,7 +1779,7 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
 
 #[tokio::test]
 async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -1847,7 +1820,7 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
 
 #[tokio::test]
 async fn stream_ignores_events_from_other_sessions() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_a = create_session(app.clone()).await;
     let session_b = create_session(app.clone()).await;
@@ -1887,7 +1860,7 @@ async fn stream_ignores_events_from_other_sessions() {
 
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone()).await;
     let parent_sid = SessionId::from(session_id.clone());
@@ -1951,7 +1924,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -1988,7 +1961,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 
 #[tokio::test]
 async fn invoke_command_route_toggles_mode() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -2012,7 +1985,7 @@ async fn invoke_command_route_toggles_mode() {
 
 #[tokio::test]
 async fn command_completion_route_returns_empty_for_commands_without_completion() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
 
@@ -2032,7 +2005,7 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 
 #[tokio::test]
 async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
-    let runtime = runtime(Arc::new(SummaryLlm)).await;
+    let runtime = runtime(Arc::new(summary_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());
@@ -2097,7 +2070,7 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     // bundled set(含 astrcode-coding)已由 runtime helper 经 source generation 加载。
-    let runtime = runtime(Arc::new(SummaryLlm)).await;
+    let runtime = runtime(Arc::new(summary_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone()).await;
     let sid = SessionId::from(session_id.clone());

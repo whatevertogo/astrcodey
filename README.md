@@ -544,6 +544,11 @@ Extensions can register additional slash commands and keybindings at runtime.
 | [Configuration Guide](docs/configuration.md) | Full `config.toml` reference |
 | [Extension System](docs/extension-system.md) | Built-in vs disk IPC extensions, host capabilities |
 | [Extension Author Guide](docs/extension-author-guide.md) | Disk s5r extension development guide |
+| [Crate Guide](docs/crates.md) | Per-crate responsibilities, module map, and dependency boundaries |
+| [Design: LLM Message Sharing](docs/llm-message-sharing-design.md) | Zero-copy `LlmMessage` sharing across projection, context, and provider requests |
+| [Design: Provider Request Rewrite Chain](docs/provider-request-rewrite-chain-design.md) | Unified chained primitive for provider request rewrites |
+| [Architecture: Unified Extension Tool Runtime](docs/architecture/unified-extension-tool-runtime.md) | Unified extension tool runtime boundaries and migration notes |
+| [Architecture: S5R 3.0 Implementation](docs/architecture/s5r-3-implementation.md) | S5R 3.0 implementation decisions and status |
 | [Release Guide](docs/release.md) | Version sync, release workflows, and npm/GitHub distribution |
 | [TODO](docs/TODO.md) | Project roadmap and pending items |
 

@@ -68,3 +68,5 @@ astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
 # 同理：合并 astrcode-extensions 的 testing feature,使 cfg(test) 与 tests/
 # 能访问 gated 的 runner register 与 testing::extension_runner_with_extensions。
 astrcode-extensions = { path = "../astrcode-extensions", features = ["testing"] }
+# 同理：启用 core 的 llm::testing 测试脚手架。
+astrcode-core = { path = "../astrcode-core", features = ["testing"] }
