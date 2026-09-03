@@ -33,20 +33,6 @@ pub struct InProcessTransport {
 }
 
 impl InProcessTransport {
-    /// 启动后台服务器任务并返回已连接的传输实例。
-    ///
-    /// 进程内模式（TUI / exec）在配置未写 `runtime.approvalMode` 时默认 **yolo**；
-    /// 显式写入 `manual` 的配置仍会尊重用户选择。
-    /// TODO: A BETTER WAY
-    #[allow(dead_code)] // 便捷入口；TUI/exec 使用 `start_with` 传入审批模式选项。
-    pub fn start() -> Self {
-        Self::start_with(astrcode_server::bootstrap::BootstrapOptions {
-            default_approval_mode_if_unset: Some(astrcode_core::permission::ApprovalMode::Yolo),
-            transport_profile: astrcode_extension_sdk::transport::TransportProfile::default(),
-            ..Default::default()
-        })
-    }
-
     /// 可覆盖审批模式等启动选项的进程内传输。
     pub fn start_with(bootstrap_opts: bootstrap::BootstrapOptions) -> Self {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<ClientCommand>(CLIENT_COMMAND_CAPACITY);

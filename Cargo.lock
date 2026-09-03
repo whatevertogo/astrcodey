@@ -308,7 +308,6 @@ name = "astrcode-context"
 version = "0.3.16"
 dependencies = [
  "astrcode-core",
- "async-trait",
  "criterion",
  "serde_json",
  "tokio",
@@ -328,7 +327,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]

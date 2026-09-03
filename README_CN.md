@@ -544,7 +544,6 @@ Identity → System → Task Guidelines → Communication → Environment
 | [配置指南](docs/configuration.md) | 完整 `config.toml` 参考 |
 | [扩展系统](docs/extension-system.md) | 内置与磁盘 IPC 扩展、宿主能力 |
 | [扩展作者指南](docs/extension-author-guide.md) | 磁盘 s5r 扩展开发入门 |
-| [UI 渲染协议](docs/ui-render-spec.md) | 工具结果的结构化渲染协议 |
 | [发布指南](docs/release.md) | 版本同步、发布 workflow、npm/GitHub 分发 |
 | [待办事项](docs/TODO.md) | 项目路线图与待办项 |
 

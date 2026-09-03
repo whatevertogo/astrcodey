@@ -544,7 +544,6 @@ Extensions can register additional slash commands and keybindings at runtime.
 | [Configuration Guide](docs/configuration.md) | Full `config.toml` reference |
 | [Extension System](docs/extension-system.md) | Built-in vs disk IPC extensions, host capabilities |
 | [Extension Author Guide](docs/extension-author-guide.md) | Disk s5r extension development guide |
-| [UI Render Spec](docs/ui-render-spec.md) | Structured rendering protocol for tool results |
 | [Release Guide](docs/release.md) | Version sync, release workflows, and npm/GitHub distribution |
 | [TODO](docs/TODO.md) | Project roadmap and pending items |
 

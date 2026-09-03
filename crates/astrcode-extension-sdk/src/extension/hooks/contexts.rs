@@ -453,17 +453,6 @@ impl ProviderPayload {
         &self.messages
     }
 
-    #[deprecated(
-        note = "copies all messages by value; use `shared_messages()` for zero-copy access. This \
-                accessor will be removed after one more version"
-    )]
-    pub fn messages(&self) -> Vec<crate::llm::LlmMessage> {
-        self.shared_messages()
-            .iter()
-            .map(|message| (**message).clone())
-            .collect()
-    }
-
     pub(crate) fn replace_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
         self.messages = messages.into_iter().map(Arc::new).collect();
     }
