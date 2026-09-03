@@ -2,10 +2,10 @@
 """Check workspace crate dependency direction rules.
 
 Layer hierarchy:
-  L1 Foundation:   astrcode-core, astrcode-desktop
+  L1 Foundation:   astrcode-core, astrcode-desktop, astrcode-paths
   L2 Primitives:   astrcode-session-projection
   L3 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
-                   astrcode-log, astrcode-storage
+                   astrcode-log, astrcode-storage, astrcode-s5r-runtime
   L4 Integration:  astrcode-protocol, astrcode-extensions,
                    astrcode-extension-*
   L5 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
@@ -31,6 +31,7 @@ LAYERS: dict[str, int] = {
     # L1 – Foundation
     "astrcode-core": 1,
     "astrcode-desktop": 1,
+    "astrcode-paths": 1,
     # L2 – Primitive contracts
     "astrcode-session-projection": 2,
     # L3 – Services
@@ -40,6 +41,7 @@ LAYERS: dict[str, int] = {
     "astrcode-context": 3,
     "astrcode-log": 3,
     "astrcode-storage": 3,
+    "astrcode-s5r-runtime": 3,
     # L4 – Integration and extension implementations
     "astrcode-protocol": 4,
     "astrcode-extensions": 4,
@@ -77,7 +79,15 @@ LAYER_NAMES: dict[int, str] = {
     7: "CLI",
 }
 
-ALLOWED_SAME_LAYER: set[tuple[str, str]] = set()
+# Same-layer exceptions: (dependent, dependency). Each entry states the
+# invariant that the strict layer numbering cannot express.
+ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
+    # astrcode-paths is a leaf path primitive; core is its only same-layer consumer.
+    ("astrcode-core", "astrcode-paths"),
+    # astrcode-s5r-runtime is the s5r subprocess runtime shared by host and
+    # worker; it sits beside the SDK layer it is written against.
+    ("astrcode-s5r-runtime", "astrcode-extension-sdk"),
+}
 
 FORBIDDEN_DEPS: dict[str, set[str]] = {
     # Session owns prompt lifecycle and intentionally depends on context's
