@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 from .context import (
     CancelToken,
     WorkerCallContext,
+    WorkerServiceContext,
     WorkerCommandContext,
     WorkerCommandInvocation,
     WorkerCustomEventContext,
@@ -59,6 +60,7 @@ from .protocol import (
     CONFORMANCE_UNKNOWN_ERROR,
     CONFORMANCE_WAIT_FOR_CANCEL,
     FEATURE_CUSTOM_EVENT_V1,
+    FEATURE_EXTENSION_SERVICES_V1,
     FEATURE_MODEL_STREAM_V1,
     FEATURE_NESTED_INVOKE_V1,
     S5R_VERSION,
@@ -79,6 +81,7 @@ from .protocol import (
     stream_message,
 )
 from .results import HandlerEffect, HandlerResult, ToolPlan
+from .service import DependencyKind, ServiceKey
 
 ToolHandlerFn = Callable[[Any, WorkerInvocationContext], Awaitable[HandlerResult]]
 ToolPlannerFn = Callable[[Any, WorkerToolPlanContext], Awaitable[ToolPlan]]
@@ -87,13 +90,18 @@ ContinuationHandlerFn = Callable[[Any, WorkerCallContext], Awaitable[HandlerResu
 CommandHandlerFn = Callable[[WorkerCommandContext], Awaitable[HandlerResult]]
 CustomEventHandlerFn = Callable[[Any, WorkerCustomEventContext], Awaitable[HandlerResult]]
 HttpHandlerFn = Callable[[Any, WorkerCallContext], Awaitable[Mapping[str, Any]]]
+ServiceHandlerFn = Callable[[Any, WorkerServiceContext], Awaitable[Any]]
 ActivationHandlerFn = Callable[[Any], Awaitable[None]]
 ShutdownHandlerFn = Callable[[], Awaitable[None]]
 
-# The Rust worker declares all three v1 features; the conformance host requires
-# all of them, so this set is not configurable.
+# Feature support mirrors Rust; declarations determine the required subset.
 _SUPPORTED_FEATURES = frozenset(
-    {FEATURE_NESTED_INVOKE_V1, FEATURE_MODEL_STREAM_V1, FEATURE_CUSTOM_EVENT_V1}
+    {
+        FEATURE_NESTED_INVOKE_V1,
+        FEATURE_MODEL_STREAM_V1,
+        FEATURE_CUSTOM_EVENT_V1,
+        FEATURE_EXTENSION_SERVICES_V1,
+    }
 )
 
 _WRITE_QUEUE_CAPACITY = 256
@@ -104,7 +112,7 @@ _STREAM_IDLE_TIMEOUT = 120.0
 _CANCELLED_REQUEST_CAPACITY = 256
 _MAX_IN_FLIGHT_REQUESTS = 256
 
-_HANDLER_ID_KINDS = frozenset({"tool", "hook", "command", "http", "event"})
+_HANDLER_ID_KINDS = frozenset({"tool", "hook", "command", "http", "event", "service"})
 
 MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN = 64
 
@@ -144,6 +152,9 @@ class Worker:
         self._commands: dict[str, CommandHandlerFn] = {}
         self._custom_events: dict[str, CustomEventHandlerFn] = {}
         self._http_routes: dict[str, HttpHandlerFn] = {}
+        self._services: dict[str, ServiceHandlerFn] = {}
+        self._service_dependencies: list[dict[str, str]] = []
+        self._service_permissions: list[str] = []
         self._tool_manifest: list[dict[str, Any]] = []
         self._hook_manifest: list[dict[str, Any]] = []
         self._command_manifest: list[dict[str, Any]] = []
@@ -406,6 +417,39 @@ class Worker:
         self._custom_event_subscription_manifest.append(subscription.to_manifest())
         return handler
 
+    def service(
+        self, key: ServiceKey, handler: ServiceHandlerFn | None = None
+    ) -> ServiceHandlerFn | Callable[[ServiceHandlerFn], ServiceHandlerFn]:
+        if handler is None:
+            return lambda fn: self.service(key, fn)
+        name = str(key)
+        if name in self._services or any(
+            dependency["service"] == name for dependency in self._service_dependencies
+        ):
+            raise ValueError("duplicate service or self dependency")
+        self._services[name] = handler
+        return handler
+
+    def dependency(self, key: ServiceKey, kind: DependencyKind) -> None:
+        name = str(key)
+        if name in self._services or any(
+            dependency["service"] == name for dependency in self._service_dependencies
+        ):
+            raise ValueError("duplicate dependency or self dependency")
+        self._service_dependencies.append(
+            {"service": name, "kind": DependencyKind(kind).value}
+        )
+
+    def allow_service(self, key: ServiceKey) -> None:
+        name = str(key)
+        if name not in self._service_permissions:
+            self._service_permissions.append(name)
+
+    def _uses_services(self) -> bool:
+        return bool(
+            self._services or self._service_dependencies or self._service_permissions
+        )
+
     def http_route(
         self,
         route: ExtensionHttpRoute,
@@ -583,7 +627,9 @@ class Worker:
             "worker": {"name": self._extension_id, "version": self._version},
             "protocol_version": S5R_VERSION,
             "supported_features": sorted(_SUPPORTED_FEATURES),
-            "required_features": [],
+            "required_features": (
+                [FEATURE_EXTENSION_SERVICES_V1] if self._uses_services() else []
+            ),
             "negotiated_features": sorted(negotiated),
             "manifest": self._manifest_json(),
         }
@@ -621,6 +667,14 @@ class Worker:
                     WireErrorCode.INVALID_REQUEST, f"duplicate host operation {operation}"
                 )
             seen.add(operation)
+        if (
+            self._uses_services()
+            and FEATURE_EXTENSION_SERVICES_V1 not in message.supported_features
+        ):
+            raise S5rError.of(
+                WireErrorCode.INVALID_REQUEST,
+                "plugin services require extension_services_v1",
+            )
         return negotiate_features(
             set(_SUPPORTED_FEATURES),
             message.supported_features,
@@ -664,7 +718,7 @@ class Worker:
         )
 
     def _manifest_json(self) -> dict[str, Any]:
-        return {
+        manifest = {
             "required_transport_features": list(self._transport_features),
             "capabilities": list(self._capabilities),
             "tools": list(self._tool_manifest),
@@ -674,6 +728,14 @@ class Worker:
             "custom_events": list(self._custom_event_manifest),
             "custom_event_subscriptions": list(self._custom_event_subscription_manifest),
         }
+
+        if self._services:
+            manifest["services"] = list(self._services)
+        if self._service_dependencies:
+            manifest["service_dependencies"] = list(self._service_dependencies)
+        if self._service_permissions:
+            manifest["service_permissions"] = list(self._service_permissions)
+        return manifest
 
     # ── inbound dispatch ────────────────────────────────────────────────────
 
@@ -751,6 +813,8 @@ class Worker:
         owner, kind, name = parts
         if owner != self._extension_id:
             raise S5rError.of(WireErrorCode.UNKNOWN_HANDLER, f"unknown handler: {handler_id}")
+        if kind == "service":
+            return await self._dispatch_service(name, event, token)
         facts = _CallFacts.from_event(event)
         if kind == "tool":
             return await self._dispatch_tool(name, event, facts, token)
@@ -921,6 +985,30 @@ class Worker:
             cancel_token=token,
         )
         return _ensure_handler_result(await _resolve(handler(event, context)))
+
+    async def _dispatch_service(
+        self, name: str, event: Any, token: CancelToken
+    ) -> HandlerResult:
+        handler = self._services.get(name)
+        if handler is None:
+            raise S5rError.of(WireErrorCode.UNKNOWN_HANDLER, f"unknown service: {name}")
+        fields = {"caller_extension_id", "working_dir", "session_id", "input"}
+        if not isinstance(event, dict) or set(event) != fields:
+            raise S5rError.of(WireErrorCode.INVALID_INPUT, "invalid service invocation")
+        if not isinstance(event["caller_extension_id"], str) or any(
+            event[field] is not None and not isinstance(event[field], str)
+            for field in ("working_dir", "session_id")
+        ):
+            raise S5rError.of(WireErrorCode.INVALID_INPUT, "invalid service context")
+        context = WorkerServiceContext(
+            extension_id=self._extension_id,
+            cancel_token=token,
+            caller_extension_id=event["caller_extension_id"],
+            working_dir=event["working_dir"],
+            session_id=event["session_id"],
+        )
+        output = await _resolve(handler(event["input"], context))
+        return HandlerResult(effect=HandlerEffect.OK, data=output)
 
     async def _dispatch_http(
         self, name: str, event: Any, token: CancelToken

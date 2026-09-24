@@ -212,6 +212,16 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         })],
     ));
     session_manager.bind_custom_event_runner(Arc::clone(&extension_runner));
+    let services = Arc::downgrade(&runtime_services);
+    let notifications = Arc::clone(session_manager.event_bus());
+    extension_runner.bind_runtime_change_publisher(move |generation| {
+        if let Some(services) = services.upgrade() {
+            services.publish_extension_generation(generation);
+        }
+        notifications.send_notification(
+            astrcode_protocol::events::ClientNotification::ExtensionRegistryChanged,
+        );
+    });
 
     let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
     let scheduler = Arc::new(TurnScheduler::new(

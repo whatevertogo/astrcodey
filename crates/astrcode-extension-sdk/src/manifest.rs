@@ -20,6 +20,8 @@ pub struct ExtensionManifest {
     description: Option<String>,
     capabilities: Vec<ExtensionCapability>,
     required_transport_features: Vec<TransportFeature>,
+    dependencies: Vec<crate::extension::ServiceDependency>,
+    service_permissions: Vec<crate::extension::ServiceKey>,
 }
 
 impl ExtensionManifest {
@@ -38,9 +40,36 @@ impl ExtensionManifest {
             description,
             capabilities,
             required_transport_features,
+            dependencies: Vec::new(),
+            service_permissions: Vec::new(),
         }
     }
 
+    pub(crate) fn with_service_access(
+        mut self,
+        dependencies: Vec<crate::extension::ServiceDependency>,
+        permissions: Vec<crate::extension::ServiceKey>,
+    ) -> Self {
+        self.dependencies = dependencies;
+        self.service_permissions = permissions;
+        self
+    }
+
+    pub fn dependencies(&self) -> &[crate::extension::ServiceDependency] {
+        &self.dependencies
+    }
+    pub fn service_permissions(&self) -> &[crate::extension::ServiceKey] {
+        &self.service_permissions
+    }
+    pub fn effective_service_permissions(
+        &self,
+    ) -> std::collections::BTreeSet<crate::extension::ServiceKey> {
+        self.dependencies
+            .iter()
+            .map(|d| d.service.clone())
+            .chain(self.service_permissions.iter().cloned())
+            .collect()
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -67,6 +96,14 @@ impl ExtensionManifest {
 
     pub fn validate(&self) -> Result<(), ExtensionManifestError> {
         validate_extension_id(&self.id)?;
+        let mut keys = std::collections::BTreeSet::new();
+        for dependency in &self.dependencies {
+            if !keys.insert(&dependency.service) {
+                return Err(ExtensionManifestError::DuplicateDependency {
+                    service: dependency.service.to_string(),
+                });
+            }
+        }
         if self.name.trim().is_empty() {
             return Err(ExtensionManifestError::MissingName {
                 id: self.id.clone(),
@@ -108,6 +145,8 @@ pub fn validate_extension_id(id: &str) -> Result<(), ExtensionManifestError> {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ExtensionManifestError {
+    #[error("duplicate service dependency: {service}")]
+    DuplicateDependency { service: String },
     #[error("extension manifest id is required")]
     MissingId,
     #[error(

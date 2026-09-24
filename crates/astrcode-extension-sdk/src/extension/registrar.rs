@@ -42,6 +42,7 @@ use crate::{
 ///    prevent external code from holding it as long-lived data.
 #[derive(Default)]
 pub struct Registrar {
+    service_handlers: Vec<(String, Arc<dyn super::ServiceHandler>)>,
     registrations: ExtensionRegistrations,
 }
 
@@ -51,6 +52,7 @@ pub struct Registrar {
 /// vectors alongside it.
 #[derive(Default)]
 pub struct ExtensionRegistrations {
+    services: Vec<super::ServiceRegistration>,
     tools: Vec<ToolRegistration>,
     tool_discovery: Vec<Arc<dyn ToolDiscoveryHandler>>,
     commands: Vec<(SlashCommand, Option<Arc<dyn CommandHandler>>)>,
@@ -121,6 +123,10 @@ impl ToolRegistration {
 }
 
 impl Registrar {
+    pub fn service(&mut self, key: impl ToString, handler: Arc<dyn super::ServiceHandler>) {
+        self.service_handlers.push((key.to_string(), handler));
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -369,12 +375,24 @@ impl Registrar {
         manifest
             .validate()
             .map_err(|error| invalid_registration(manifest.id(), error.to_string()))?;
+        for (key, handler) in self.service_handlers {
+            let key = key
+                .parse()
+                .map_err(|error| invalid_registration(manifest.id(), error))?;
+            self.registrations
+                .services
+                .push(super::ServiceRegistration { key, handler });
+        }
         self.registrations.validate(&manifest)?;
         Ok((manifest, self.registrations))
     }
 }
 
 impl ExtensionRegistrations {
+    pub fn services(&self) -> &[super::ServiceRegistration] {
+        &self.services
+    }
+
     pub fn tools(&self) -> &[ToolRegistration] {
         &self.tools
     }
@@ -462,6 +480,20 @@ impl ExtensionRegistrations {
     fn validate(&mut self, manifest: &ExtensionManifest) -> Result<(), RegistrationError> {
         let extension_id = manifest.id();
         let capabilities = manifest.capabilities();
+        let mut service_keys = HashSet::new();
+        for service in &self.services {
+            if !service_keys.insert(service.key())
+                || manifest
+                    .dependencies()
+                    .iter()
+                    .any(|d| &d.service == service.key())
+            {
+                return Err(RegistrationError::Invalid {
+                    extension_id: extension_id.to_owned(),
+                    reason: format!("duplicate service or self dependency: {}", service.key()),
+                });
+            }
+        }
 
         require_capability(
             extension_id,

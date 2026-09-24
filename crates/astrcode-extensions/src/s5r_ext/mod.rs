@@ -114,6 +114,9 @@ fn parse_env(manifest: &ExtensionPackageManifest) -> Vec<(String, String)> {
 
 #[async_trait::async_trait]
 impl Extension for S5rExtension {
+    fn runtime_failure(&self) -> Option<tokio::sync::watch::Receiver<Option<String>>> {
+        Some(self.session.runtime_failure())
+    }
     fn manifest(&self) -> astrcode_extension_sdk::extension::ExtensionManifest {
         let registration = self.session.registration();
         let builder = registration.capabilities.iter().copied().fold(
@@ -122,6 +125,16 @@ impl Extension for S5rExtension {
                 .description("External S5R extension"),
             |builder, capability| builder.capability(capability),
         );
+        let builder = registration
+            .service_dependencies
+            .iter()
+            .fold(builder, |builder, d| {
+                builder.dependency(d.service.clone(), d.kind)
+            });
+        let builder = registration
+            .service_permissions
+            .iter()
+            .fold(builder, |builder, key| builder.allow_service(key.clone()));
         registration
             .required_transport_features
             .iter()
@@ -134,6 +147,15 @@ impl Extension for S5rExtension {
 
     fn register(&self, reg: &mut Registrar) {
         let registration = self.session.registration();
+        for key in &registration.services {
+            reg.service(
+                key.clone(),
+                Arc::new(S5rServiceHandler {
+                    session: self.session.clone(),
+                    key: key.clone(),
+                }),
+            );
+        }
         for decl in &registration.custom_events {
             reg.declare_custom_event(decl.clone());
         }
@@ -857,5 +879,60 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 "unexpected {effect:?} effect from custom event handler"
             ))),
         }
+    }
+}
+
+struct S5rServiceHandler {
+    session: Arc<S5rSession>,
+    key: astrcode_extension_sdk::extension::ServiceKey,
+}
+#[async_trait::async_trait]
+impl astrcode_extension_sdk::extension::ServiceHandler for S5rServiceHandler {
+    async fn invoke(
+        &self,
+        ctx: astrcode_extension_sdk::extension::ServiceContext,
+        input: Value,
+    ) -> Result<Value, astrcode_extension_sdk::host::HostError> {
+        use astrcode_extension_sdk::{
+            host::HostError,
+            wire::{WireErrorCode, service::ServiceInvocation},
+        };
+        let id = HandlerId::new(
+            ctx.extension_id(),
+            HandlerKind::Service,
+            &self.key.to_string(),
+        )
+        .map_err(|e| HostError::new(WireErrorCode::InvalidInput, e))?;
+        let invoke_context =
+            crate::runner::transport_invoke_context(ctx.host()).ok_or_else(|| {
+                HostError::new(
+                    WireErrorCode::ContextUnavailable,
+                    "service call context is unavailable",
+                )
+            })?;
+        let event = serde_json::to_value(ServiceInvocation {
+            caller_extension_id: ctx.caller_extension_id().into(),
+            working_dir: ctx.working_dir().map(|p| p.to_string_lossy().into_owned()),
+            session_id: ctx.session_id().map(str::to_owned),
+            input,
+        })
+        .map_err(|e| HostError::new(WireErrorCode::SerializationFailed, e.to_string()))?;
+        let result = self
+            .session
+            .invoke_handler(&id, event, &invoke_context)
+            .await
+            .map_err(|e| match e {
+                ExtensionError::Host(error) => error,
+                other => HostError::new(WireErrorCode::DispatchFailed, other.to_string()),
+            })?;
+        if result.effect != astrcode_extension_sdk::wire::HandlerEffect::Ok
+            || !result.continuations.is_empty()
+        {
+            return Err(HostError::new(
+                WireErrorCode::InvalidInput,
+                "invalid service handler result",
+            ));
+        }
+        Ok(result.data)
     }
 }

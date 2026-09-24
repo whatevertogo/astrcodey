@@ -770,6 +770,14 @@ pub struct CustomEventConsumerListResponseDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionDeclarationDto {
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<ExtensionServiceDependencyDto>,
+    #[serde(default)]
+    pub service_permissions: Vec<String>,
+    #[serde(default)]
+    pub blocked_reasons: Vec<ExtensionServiceBlockDto>,
     pub id: String,
     pub capabilities: Vec<ExtensionCapabilityDto>,
     pub required_transport_features: Vec<TransportFeatureDto>,
@@ -1164,6 +1172,40 @@ pub struct ModelListResponseDto {
 pub struct ModelTestResponseDto {
     pub success: bool,
     pub message: String,
+}
+
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionServiceDependencyDto {
+    pub service: String,
+    pub kind: ExtensionDependencyKindDto,
+}
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionDependencyKindDto {
+    Required,
+    Optional,
+}
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtensionServiceBlockDto {
+    MissingService {
+        service: String,
+    },
+    ProviderConflict {
+        service: String,
+        providers: Vec<String>,
+    },
+    DependencyCycle {
+        members: Vec<String>,
+    },
+    DependencyBlocked {
+        provider: String,
+    },
 }
 
 #[cfg(test)]

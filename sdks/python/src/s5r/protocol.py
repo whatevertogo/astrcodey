@@ -17,6 +17,7 @@ S5R_VERSION = "3.0"
 
 FEATURE_NESTED_INVOKE_V1 = "nested_invoke_v1"
 FEATURE_MODEL_STREAM_V1 = "model_stream_v1"
+FEATURE_EXTENSION_SERVICES_V1 = "extension_services_v1"
 FEATURE_CUSTOM_EVENT_V1 = "custom_event_v1"
 
 CAP_HANDLER_INVOKE = "handler.invoke"

@@ -473,6 +473,8 @@ impl CustomEventConsumer {
                 llm_providers: None,
                 generation_gate: crate::host_router::ExtensionGenerationGate::default(),
                 public_http_dispatcher: None,
+                service_dispatcher: None,
+                service_chain: Vec::new(),
                 cancellation: self.cancellation.clone(),
             },
         ) {

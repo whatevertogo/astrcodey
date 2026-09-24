@@ -3,6 +3,8 @@ import type { CustomEventDeclarationDto } from "./CustomEventDeclarationDto";
 import type { CustomEventSubscriptionDto } from "./CustomEventSubscriptionDto";
 import type { ExtensionCapabilityDto } from "./ExtensionCapabilityDto";
 import type { ExtensionHttpRouteDto } from "./ExtensionHttpRouteDto";
+import type { ExtensionServiceBlockDto } from "./ExtensionServiceBlockDto";
+import type { ExtensionServiceDependencyDto } from "./ExtensionServiceDependencyDto";
 import type { KeybindingDto } from "./KeybindingDto";
 import type { SlashCommandInfoDto } from "./SlashCommandInfoDto";
 import type { StatusItemDto } from "./StatusItemDto";
@@ -15,4 +17,4 @@ import type { TransportFeatureDto } from "./TransportFeatureDto";
  * 定位为开放 API 的自描述契约：除前端外，第三方调用方也可据此
  * 了解扩展提供的全部能力，因此各声明字段即使前端未消费也保留。
  */
-export type ExtensionDeclarationDto = { id: string, capabilities: Array<ExtensionCapabilityDto>, requiredTransportFeatures: Array<TransportFeatureDto>, tools: Array<ToolDefinitionDto>, dynamicTools: boolean, commands: Array<SlashCommandInfoDto>, dynamicCommands: boolean, keybindings: Array<KeybindingDto>, statusItems: Array<StatusItemDto>, customEvents: Array<CustomEventDeclarationDto>, customEventSubscriptions: Array<CustomEventSubscriptionDto>, httpRoutes: Array<ExtensionHttpRouteDto>, };
+export type ExtensionDeclarationDto = { services: Array<string>, dependencies: Array<ExtensionServiceDependencyDto>, servicePermissions: Array<string>, blockedReasons: Array<ExtensionServiceBlockDto>, id: string, capabilities: Array<ExtensionCapabilityDto>, requiredTransportFeatures: Array<TransportFeatureDto>, tools: Array<ToolDefinitionDto>, dynamicTools: boolean, commands: Array<SlashCommandInfoDto>, dynamicCommands: boolean, keybindings: Array<KeybindingDto>, statusItems: Array<StatusItemDto>, customEvents: Array<CustomEventDeclarationDto>, customEventSubscriptions: Array<CustomEventSubscriptionDto>, httpRoutes: Array<ExtensionHttpRouteDto>, };

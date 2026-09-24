@@ -9,6 +9,10 @@ pub struct ExtensionRegistrySnapshot {
 
 #[derive(Debug, Clone)]
 pub struct ExtensionDeclarationSnapshot {
+    pub services: Vec<ServiceKey>,
+    pub dependencies: Vec<ServiceDependency>,
+    pub service_permissions: Vec<ServiceKey>,
+    pub blocked_reasons: Vec<super::ServiceBlockReason>,
     pub id: String,
     pub generation: u64,
     pub runtime_state: ExtensionRuntimeState,
@@ -55,49 +59,70 @@ impl ExtensionRunner {
             if !publication.is_stable_generation(generation_pin.generation()) {
                 continue;
             }
-            break hosted_extensions
+            let mut declarations: Vec<_> = hosted_extensions
                 .iter()
                 .map(|hosted| {
                     let manifest = &hosted.manifest;
-                    let registrations = &manifest.registrations;
+
                     let runtime = hosted.supervisor.admission().snapshot();
-                    ExtensionDeclarationSnapshot {
-                        id: manifest.id().to_owned(),
-                        generation: runtime.generation,
-                        runtime_state: (&runtime.state).into(),
-                        capabilities: manifest.capabilities().to_vec(),
-                        required_transport_features: manifest
-                            .required_transport_features()
-                            .to_vec(),
-                        tools: registrations
-                            .tools()
-                            .iter()
-                            .map(|registration| registration.definition().clone())
-                            .collect(),
-                        dynamic_tools: !registrations.tool_discoveries().is_empty(),
-                        commands: registrations
-                            .commands()
-                            .iter()
-                            .map(|(command, _)| command.clone())
-                            .collect(),
-                        dynamic_commands: !registrations.command_discoveries().is_empty(),
-                        keybindings: registrations.keybindings().to_vec(),
-                        status_items: registrations.status_items().to_vec(),
-                        custom_events: registrations.custom_event_declarations().to_vec(),
-                        custom_event_subscriptions: registrations
-                            .custom_event_subscriptions()
-                            .iter()
-                            .map(|registration| registration.subscription().clone())
-                            .collect(),
-                        http_routes: registrations
-                            .http_routes()
-                            .iter()
-                            .map(|registration| registration.route.clone())
-                            .collect(),
-                    }
+                    declaration_snapshot(manifest, runtime.generation, (&runtime.state).into())
                 })
                 .collect();
+            declarations.extend(self.registry.blocked.read().iter().cloned());
+            break declarations;
         };
         ExtensionRegistrySnapshot { extensions }
+    }
+}
+
+pub(super) fn declaration_snapshot(
+    manifest: &super::manifest::ResolvedExtensionManifest,
+    generation: u64,
+    runtime_state: ExtensionRuntimeState,
+) -> ExtensionDeclarationSnapshot {
+    let registrations = &manifest.registrations;
+    ExtensionDeclarationSnapshot {
+        services: registrations
+            .services()
+            .iter()
+            .map(|s| s.key().clone())
+            .collect(),
+        dependencies: manifest.author.dependencies().to_vec(),
+        service_permissions: manifest
+            .author
+            .effective_service_permissions()
+            .into_iter()
+            .collect(),
+        blocked_reasons: Vec::new(),
+        id: manifest.id().to_owned(),
+        generation,
+        runtime_state,
+        capabilities: manifest.capabilities().to_vec(),
+        required_transport_features: manifest.required_transport_features().to_vec(),
+        tools: registrations
+            .tools()
+            .iter()
+            .map(|registration| registration.definition().clone())
+            .collect(),
+        dynamic_tools: !registrations.tool_discoveries().is_empty(),
+        commands: registrations
+            .commands()
+            .iter()
+            .map(|(command, _)| command.clone())
+            .collect(),
+        dynamic_commands: !registrations.command_discoveries().is_empty(),
+        keybindings: registrations.keybindings().to_vec(),
+        status_items: registrations.status_items().to_vec(),
+        custom_events: registrations.custom_event_declarations().to_vec(),
+        custom_event_subscriptions: registrations
+            .custom_event_subscriptions()
+            .iter()
+            .map(|registration| registration.subscription().clone())
+            .collect(),
+        http_routes: registrations
+            .http_routes()
+            .iter()
+            .map(|registration| registration.route.clone())
+            .collect(),
     }
 }

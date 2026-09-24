@@ -287,6 +287,8 @@ pub struct InvokeContext {
     pub generation_gate: ExtensionGenerationGate,
     /// Extension-to-extension HTTP dispatcher bound to the caller's runtime snapshot.
     pub(crate) public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
+    pub(crate) service_dispatcher: Option<Arc<crate::runner::service::ServiceDispatcher>>,
+    pub(crate) service_chain: Vec<ExtensionInstanceId>,
     /// 调用是否来自 handler 上下文（有父调用，可能持有 admission permit)。
     /// 是 `wait_for_result` 死锁防护的唯一判据；后台任务（无父调用）不持有 permit。
     pub on_peer_io_thread: bool,
@@ -401,6 +403,15 @@ impl HostRouter {
                 self.network
                     .invoke(operation, input, context.cancel_token.as_ref())
                     .await
+            },
+            HostOperationGroup::Service => {
+                let request: astrcode_extension_sdk::wire::service::ServiceInvokeRequest =
+                    parse_wire_request(&input, operation.wire_name())?;
+                let dispatcher = context
+                    .service_dispatcher
+                    .as_ref()
+                    .ok_or_else(|| backend_unavailable("service dispatcher is not published"))?;
+                dispatcher.invoke(request, context).await
             },
             HostOperationGroup::ExtensionHttp => {
                 self.extension_http.invoke(operation, input, context).await
@@ -613,6 +624,9 @@ fn required_resource_accesses(
         | HostOperation::ProcessKill
         | HostOperation::ProcessList => Ok(vec![ResourceAccess::host(HostResource::Process)]),
         _ => match operation.spec().group {
+            HostOperationGroup::Service => {
+                Ok(vec![ResourceAccess::host(HostResource::ExtensionService)])
+            },
             HostOperationGroup::Llm => Ok(vec![ResourceAccess::host(HostResource::Model)]),
             HostOperationGroup::Session => Ok(vec![ResourceAccess::host(HostResource::Session)]),
             HostOperationGroup::Network => Ok(vec![ResourceAccess::host(HostResource::Network)]),

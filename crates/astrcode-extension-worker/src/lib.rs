@@ -13,6 +13,15 @@ pub mod testing {
     pub use super::worker::testing::*;
 }
 
+/// Authoring contracts available without a direct dependency on the SDK crate.
+///
+/// ```
+/// use astrcode_extension_worker::{Worker, worker_prelude::*};
+///
+/// let mut worker = Worker::new("memory-consumer", "1");
+/// let key = ServiceKey::new("memory.entries.list", 1).unwrap();
+/// worker.dependency(key, DependencyKind::Required).unwrap();
+/// ```
 pub mod worker_prelude {
     pub use astrcode_extension_sdk::{
         WireErrorCode,
@@ -37,11 +46,11 @@ pub mod worker_prelude {
             CommandAvailability, CommandCompletionItem, CommandCompletions, CommandExecution,
             CompactContributions, CompactRetainedContext, CompactTrigger, ContinueAfterStopResult,
             CustomEventDeclaration, CustomEventDelivery, CustomEventDisposition,
-            CustomEventSubscription, ExtensionCapability, ExtensionCommandResult,
+            CustomEventSubscription, DependencyKind, ExtensionCapability, ExtensionCommandResult,
             ExtensionHttpDispatchRequest, ExtensionHttpMethod, ExtensionHttpRequest,
             ExtensionHttpResponse, ExtensionHttpRoute, HookMode, HookResult, LifecycleEvent,
             PostToolUseResult, PreCompactResult, PreToolUseResult, PromptContributions,
-            ProviderResult, SessionCommandKind, SlashCommand, ToolInputTransformResult,
+            ProviderResult, ServiceKey, SessionCommandKind, SlashCommand, ToolInputTransformResult,
             TransportFeature,
         },
         llm::LlmMessage,

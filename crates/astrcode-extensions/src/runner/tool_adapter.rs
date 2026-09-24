@@ -171,6 +171,7 @@ struct HandlerTool {
     operation_timeout: Duration,
     call_context_factory: ExtensionCallContextFactory,
     public_http_dispatcher: Arc<dyn crate::host_router::PublicHttpDispatcher>,
+    service_dispatcher: Arc<super::service::ServiceDispatcher>,
 }
 
 impl HandlerTool {
@@ -195,6 +196,11 @@ impl HandlerTool {
             operation_timeout: view.operation_timeout,
             call_context_factory: view.call_context_factory.clone(),
             public_http_dispatcher: view.public_http_dispatcher_for_index(&view.index),
+            service_dispatcher: super::service::ServiceDispatcher::for_index(
+                &view.index,
+                view.call_context_factory.clone(),
+                view.operation_timeout,
+            ),
         }
     }
 }
@@ -310,6 +316,8 @@ impl Tool for HandlerTool {
                 llm_providers: ctx.capabilities.host.llm_providers.clone(),
                 generation_gate: generation.generation_gate.clone(),
                 public_http_dispatcher: Some(Arc::clone(&self.public_http_dispatcher)),
+                service_dispatcher: Some(self.service_dispatcher.clone()),
+                service_chain: Vec::new(),
                 cancellation: ctx.cancellation().child_token(),
             },
         );

@@ -25,6 +25,7 @@ function sourceLabel(source: ExtensionStateView['source']): string {
 
 function statusLabel(extension: ExtensionStateView): string {
   if (!extension.enabled) return '已禁用'
+  if (extension.declaration?.blockedReasons?.length) return '依赖阻塞'
   if (!extension.loaded) return '未加载'
   return '已加载'
 }
@@ -202,6 +203,45 @@ export default function PluginsPage({
                           ? ` · ${extension.declaration.capabilities.join(', ')}`
                           : ''}
                       </div>
+                      {!!extension.declaration?.services?.length && (
+                        <div className="mt-2 text-[12px] text-text-secondary">
+                          提供服务：{extension.declaration.services.join(', ')}
+                        </div>
+                      )}
+                      {!!extension.declaration?.dependencies?.length && (
+                        <div className="mt-1 text-[12px] text-text-secondary">
+                          依赖：
+                          {extension.declaration.dependencies
+                            .map(
+                              (dependency) =>
+                                `${dependency.service}（${dependency.kind === 'required' ? '必需' : '可选'}）`
+                            )
+                            .join(', ')}
+                        </div>
+                      )}
+                      {!!extension.declaration?.servicePermissions?.length && (
+                        <div className="mt-1 text-[12px] text-text-muted">
+                          可调用：
+                          {extension.declaration.servicePermissions.join(', ')}
+                        </div>
+                      )}
+                      {extension.declaration?.blockedReasons?.map(
+                        (reason, index) => (
+                          <div
+                            key={index}
+                            className="mt-2 text-[12px] text-warning"
+                          >
+                            {reason.kind === 'missing_service' &&
+                              `缺少服务：${reason.service}`}
+                            {reason.kind === 'provider_conflict' &&
+                              `服务 ${reason.service} 的提供者冲突：${reason.providers.join(', ')}`}
+                            {reason.kind === 'dependency_cycle' &&
+                              `循环依赖：${reason.members.join(' → ')}`}
+                            {reason.kind === 'dependency_blocked' &&
+                              `上游插件受阻：${reason.provider}`}
+                          </div>
+                        )
+                      )}
                       {extension.diagnostics?.lastError && (
                         <div className="mt-2 text-[12px] text-danger">
                           {extension.diagnostics.lastError}

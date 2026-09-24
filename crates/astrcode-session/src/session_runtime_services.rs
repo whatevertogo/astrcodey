@@ -263,6 +263,19 @@ impl SessionRuntimeServices {
         }
     }
 
+    /// Publish a plugin failure transition without replacing configuration or providers.
+    /// The extension owner serializes this with configuration publication.
+    pub fn publish_extension_generation(&self, extension_generation: u64) {
+        let current = self.runtime_generation.load_full();
+        self.runtime_generation.store(Arc::new(RuntimeGeneration {
+            llm: current.llm.clone(),
+            small_llm: current.small_llm.clone(),
+            effective_config: current.effective_config.clone(),
+            context_assembler: current.context_assembler.clone(),
+            extension_generation,
+        }));
+    }
+
     pub fn publish_runtime_generation_for_extension(
         &self,
         effective_config: EffectiveConfig,

@@ -9,6 +9,12 @@ use super::{
 pub trait Extension: Send + Sync {
     fn manifest(&self) -> ExtensionManifest;
 
+    /// Runtime-owned terminal failure signal, when the extension has an external driver.
+    #[doc(hidden)]
+    fn runtime_failure(&self) -> Option<tokio::sync::watch::Receiver<Option<String>>> {
+        None
+    }
+
     fn register(&self, _registrar: &mut Registrar) {}
 
     /// Validate extension-owned configuration without changing runtime state.

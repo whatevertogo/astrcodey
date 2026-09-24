@@ -178,6 +178,7 @@ pub(crate) struct S5rV3Session {
     stderr_task: Mutex<Option<JoinHandle<()>>>,
     driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_s5r_runtime::PeerError>>>>,
     driver_shutdown: CancellationToken,
+    failure: tokio::sync::watch::Sender<Option<String>>,
     initialized_peer: Mutex<Option<Peer<StdioFrameTransport, HostInitialized>>>,
     handle: RwLock<Option<PeerHandle>>,
     host_invoke: Arc<HostInvokeState>,
@@ -220,6 +221,7 @@ impl S5rV3Session {
         );
         let features = BTreeSet::from([
             FeatureName::nested_invoke_v1(),
+            FeatureName::extension_services_v1(),
             FeatureName::model_stream_v1(),
             FeatureName::custom_event_v1(),
         ]);
@@ -268,11 +270,16 @@ impl S5rV3Session {
             stderr_task: Mutex::new(Some(stderr_task)),
             driver_task: Mutex::new(None),
             driver_shutdown,
+            failure: tokio::sync::watch::channel(None).0,
             initialized_peer: Mutex::new(Some(peer)),
             handle: RwLock::new(None),
             host_invoke,
             admission: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_INVOKES as usize)),
         }))
+    }
+
+    pub(crate) fn runtime_failure(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.failure.subscribe()
     }
 
     pub(crate) fn registration(&self) -> &crate::extension_manifest::ExtensionRegistration {
@@ -304,12 +311,23 @@ impl S5rV3Session {
         };
         let (handle, driver) = peer.into_runtime();
         *self.handle.write() = Some(handle);
-        let driver_task = tokio::spawn(driver.run_until(
-            Arc::new(V3HostInvokeHandler {
-                state: Arc::clone(&self.host_invoke),
-            }),
-            self.driver_shutdown.clone(),
-        ));
+        let state = Arc::clone(&self.host_invoke);
+        let shutdown = self.driver_shutdown.clone();
+        let failure = self.failure.clone();
+        let driver_task = tokio::spawn(async move {
+            let result = driver
+                .run_until(Arc::new(V3HostInvokeHandler { state }), shutdown.clone())
+                .await;
+            if !shutdown.is_cancelled() {
+                let message = match &result {
+                    Ok(()) => "worker connection closed".to_owned(),
+                    Err(error) => error.to_string(),
+                };
+                tracing::warn!(%message, "S5R worker terminated unexpectedly");
+                failure.send_replace(Some(message));
+            }
+            result
+        });
         *self.driver_task.lock() = Some(driver_task);
         Ok(())
     }

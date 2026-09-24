@@ -9,6 +9,18 @@ pub(super) struct ResolvedExtensionManifest {
 }
 
 impl ResolvedExtensionManifest {
+    pub(super) fn service_declaration(&self) -> super::dependency::ServiceDeclaration {
+        super::dependency::ServiceDeclaration {
+            id: self.id().to_owned(),
+            services: self
+                .registrations
+                .services()
+                .iter()
+                .map(|s| s.key().clone())
+                .collect(),
+            dependencies: self.author.dependencies().to_vec(),
+        }
+    }
     pub(super) fn id(&self) -> &str {
         self.author.id()
     }

@@ -13,10 +13,8 @@ use astrcode_extension_sdk::extension::{
     internal::{cancel_extension_tasks, extension_stop_context, wait_extension_tasks},
 };
 use futures_util::FutureExt;
-#[cfg(any(test, feature = "testing"))]
-use tokio::sync::Mutex as AsyncMutex;
 use tokio::{
-    sync::{Notify, OwnedMutexGuard, oneshot},
+    sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot},
     task::JoinSet,
 };
 use tracing::Instrument;
@@ -107,6 +105,7 @@ struct RetirementCompletion {
 }
 
 struct RetirementWork {
+    dependent_gates: Vec<Arc<AsyncMutex<()>>>,
     extension_id: String,
     extension: Arc<dyn Extension>,
     tasks: ExtensionTasks,
@@ -114,6 +113,25 @@ struct RetirementWork {
     publication_lease: Option<Arc<ExtensionPublicationLease>>,
     supervisor: Option<ExtensionSupervisor>,
     cleanup_host_resources: Option<(Arc<HostRouter>, ExtensionInstanceId)>,
+}
+
+impl RetirementWork {
+    fn from_hosted(
+        hosted: HostedExtension,
+        host_router: Arc<HostRouter>,
+        dependent_gates: Vec<Arc<AsyncMutex<()>>>,
+    ) -> Self {
+        Self {
+            dependent_gates,
+            extension_id: hosted.manifest.id().to_owned(),
+            extension: hosted.extension,
+            tasks: hosted.tasks,
+            generation_gate: hosted.generation_gate,
+            publication_lease: Some(hosted.publication_lease),
+            supervisor: Some(hosted.supervisor),
+            cleanup_host_resources: Some((host_router, hosted.instance_id)),
+        }
+    }
 }
 
 /// Owns a registration after its runtime resources exist but before publication.
@@ -179,6 +197,7 @@ impl PendingRegistration<'_> {
     fn take_work(&mut self) -> Option<RetirementWork> {
         let resources = self.resources.take()?;
         Some(RetirementWork {
+            dependent_gates: Vec::new(),
             extension_id: resources.extension_id,
             extension: resources.extension,
             tasks: resources.tasks,
@@ -320,15 +339,26 @@ impl RetirementSupervisor {
         operation_guard: OwnedMutexGuard<()>,
         cleanup_host_resources: Arc<HostRouter>,
     ) -> RetirementTicket {
-        let work = RetirementWork {
-            extension_id: hosted.manifest.id().to_owned(),
-            extension: hosted.extension,
-            tasks: hosted.tasks,
-            generation_gate: hosted.generation_gate,
-            publication_lease: Some(hosted.publication_lease),
-            supervisor: Some(hosted.supervisor),
-            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
-        };
+        self.retire_after(
+            hosted,
+            reason,
+            operation_timeout,
+            operation_guard,
+            cleanup_host_resources,
+            Vec::new(),
+        )
+    }
+
+    pub(super) fn retire_after(
+        &self,
+        hosted: HostedExtension,
+        reason: StopReason,
+        operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+        cleanup_host_resources: Arc<HostRouter>,
+        dependent_gates: Vec<Arc<AsyncMutex<()>>>,
+    ) -> RetirementTicket {
+        let work = RetirementWork::from_hosted(hosted, cleanup_host_resources, dependent_gates);
         self.spawn_ticketed_retirement(work, reason, operation_timeout, operation_guard)
     }
 
@@ -369,16 +399,9 @@ impl RetirementSupervisor {
         operation_timeout: std::time::Duration,
         operation_guard: OwnedMutexGuard<()>,
         cleanup_host_resources: Arc<HostRouter>,
+        dependent_gates: Vec<Arc<AsyncMutex<()>>>,
     ) {
-        let work = RetirementWork {
-            extension_id: hosted.manifest.id().to_owned(),
-            extension: hosted.extension,
-            tasks: hosted.tasks,
-            generation_gate: hosted.generation_gate,
-            publication_lease: Some(hosted.publication_lease),
-            supervisor: Some(hosted.supervisor),
-            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
-        };
+        let work = RetirementWork::from_hosted(hosted, cleanup_host_resources, dependent_gates);
         self.spawn_retirement(work, reason, operation_timeout, operation_guard, None, true);
     }
 
@@ -433,6 +456,9 @@ impl RetirementSupervisor {
         let span = tracing::info_span!("extension.retirement", %extension_id, ?reason);
         let retirement = async move {
             let mut work = work;
+            for gate in std::mem::take(&mut work.dependent_gates) {
+                drop(gate.lock_owned().await);
+            }
             let supervisor = work.supervisor.take();
             let supervisor_control = supervisor.as_ref().map(ExtensionSupervisor::control);
             let cleanup_host_resources = work.cleanup_host_resources.take();

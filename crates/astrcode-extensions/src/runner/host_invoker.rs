@@ -46,6 +46,8 @@ pub(super) struct ExtensionCallContextInput {
     pub(super) llm_providers: Option<LlmProviderBindings>,
     pub(super) generation_gate: ExtensionGenerationGate,
     pub(super) public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
+    pub(super) service_dispatcher: Option<Arc<super::service::ServiceDispatcher>>,
+    pub(super) service_chain: Vec<ExtensionInstanceId>,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -164,6 +166,8 @@ impl ExtensionCallContextInput {
             llm_providers: None,
             generation_gate: ExtensionGenerationGate::default(),
             public_http_dispatcher: None,
+            service_dispatcher: None,
+            service_chain: Vec::new(),
             cancellation,
         }
     }
@@ -187,6 +191,8 @@ impl ExtensionCallContextInput {
             llm_providers: runtime.llm_providers().cloned(),
             generation_gate: ExtensionGenerationGate::default(),
             public_http_dispatcher: None,
+            service_dispatcher: None,
+            service_chain: Vec::new(),
             cancellation,
         }
     }
@@ -231,6 +237,8 @@ impl ExtensionCallContextFactory {
             llm_providers,
             generation_gate,
             public_http_dispatcher,
+            service_dispatcher,
+            service_chain,
             cancellation,
         } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
@@ -290,6 +298,8 @@ impl ExtensionCallContextFactory {
             declared_capabilities: capabilities.to_vec(),
             generation_gate,
             public_http_dispatcher,
+            service_dispatcher,
+            service_chain,
             on_peer_io_thread: false,
         };
         let scope = HostScope::new(
@@ -393,6 +403,11 @@ impl ExtensionView {
         })?;
         input.generation_gate = generation.generation_gate.clone();
         input.public_http_dispatcher = Some(self.public_http_dispatcher_for_index(index));
+        input.service_dispatcher = Some(super::service::ServiceDispatcher::for_index(
+            index,
+            self.call_context_factory.clone(),
+            self.operation_timeout,
+        ));
         Ok(self.call_context_factory.make_extension_call_context(
             extension_id,
             generation.instance_id,
@@ -483,6 +498,8 @@ mod tests {
                     llm_providers: None,
                     generation_gate: ExtensionGenerationGate::default(),
                     public_http_dispatcher: None,
+                    service_dispatcher: None,
+                    service_chain: Vec::new(),
                     cancellation: cancellation.clone(),
                 },
             );

@@ -17,5 +17,6 @@ tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

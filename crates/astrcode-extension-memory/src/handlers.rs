@@ -262,7 +262,7 @@ pub(crate) struct MemoryListHandler {
 }
 
 #[derive(Deserialize)]
-struct ListArgs {
+pub(crate) struct ListArgs {
     query: Option<String>,
     #[serde(default = "default_list_limit")]
     limit: usize,
@@ -284,19 +284,7 @@ impl ToolHandler for MemoryListHandler {
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: ListArgs = ctx.arguments()?;
         let working_dir = tool_working_dir(&ctx);
-        let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
-        let query = args.query.filter(|q| !q.trim().is_empty());
-
-        let entries =
-            with_scoped_stores(
-                self.store_pool.clone(),
-                working_dir,
-                move |stores| match query {
-                    Some(query) => stores.search(&query, limit),
-                    None => stores.list_entries(limit),
-                },
-            )
-            .await?;
+        let entries = list_memories(self.store_pool.clone(), working_dir, args).await?;
 
         if entries.is_empty() {
             Ok(ok_text("No memories found.".to_string()).into())
@@ -383,4 +371,21 @@ impl LifecycleHandler for MemorySessionStartHandler {
 
         Ok(HookResult::Allow)
     }
+}
+
+pub(crate) async fn list_memories(
+    store_pool: Arc<MemoryStorePool>,
+    working_dir: String,
+    args: ListArgs,
+) -> Result<Vec<String>, ExtensionError> {
+    let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
+    let query = args.query.filter(|q| !q.trim().is_empty());
+
+    let entries = with_scoped_stores(store_pool, working_dir, move |stores| match query {
+        Some(query) => stores.search(&query, limit),
+        None => stores.list_entries(limit),
+    })
+    .await?;
+
+    Ok(entries)
 }

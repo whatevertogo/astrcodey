@@ -69,6 +69,7 @@ pub enum HostResourceDto {
     Network,
     Event,
     ExtensionHttp,
+    ExtensionService,
 }
 
 impl From<&ToolPlan> for ToolPlanDto {
@@ -159,6 +160,7 @@ impl From<HostResource> for HostResourceDto {
             HostResource::Network => Self::Network,
             HostResource::Event => Self::Event,
             HostResource::ExtensionHttp => Self::ExtensionHttp,
+            HostResource::ExtensionService => Self::ExtensionService,
         }
     }
 }
@@ -173,6 +175,7 @@ impl From<HostResourceDto> for HostResource {
             HostResourceDto::Network => Self::Network,
             HostResourceDto::Event => Self::Event,
             HostResourceDto::ExtensionHttp => Self::ExtensionHttp,
+            HostResourceDto::ExtensionService => Self::ExtensionService,
         }
     }
 }

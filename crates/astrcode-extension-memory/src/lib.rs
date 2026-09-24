@@ -14,6 +14,7 @@ mod index;
 mod pipeline;
 mod prompts;
 mod scope;
+mod service;
 mod store;
 mod turn_recall;
 mod workers;
@@ -113,6 +114,12 @@ impl Extension for MemoryExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
+        reg.service(
+            service::MEMORY_LIST_SERVICE,
+            Arc::new(service::MemoryListService {
+                store_pool: self.store_pool.clone(),
+            }),
+        );
         reg.declare_custom_event(custom_event(handlers::MEMORY_CREATED_EVENT_TYPE).build());
         reg.declare_custom_event(custom_event(handlers::MEMORY_DELETED_EVENT_TYPE).build());
 

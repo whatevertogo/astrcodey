@@ -7,9 +7,9 @@ mod workspace_patch;
 use std::sync::Arc;
 
 pub use client::{
-    ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
-    SessionHistoryClient, SessionInspectClient, SessionStateClient, ToolResultClient,
-    WorkspaceClient,
+    ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, ServiceClient,
+    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+    ToolResultClient, WorkspaceClient,
 };
 use domain_client::HostClientTransport;
 pub use error::HostError;
@@ -186,6 +186,11 @@ impl ExtensionHost {
         Ok(NetworkClient::new(self.clone()))
     }
 
+    pub fn services(&self) -> Result<client::ServiceClient, HostError> {
+        self.inner.scope.preflight(HostOperation::ServiceInvoke)?;
+        Ok(client::ServiceClient::new(self.clone()))
+    }
+
     pub fn extension_http(&self) -> Result<ExtensionHttpClient, HostError> {
         self.inner
             .scope
@@ -251,7 +256,7 @@ pub mod internal {
             EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
             HostClientTransport, ModelClient as TypedModelClient,
             NetworkClient as TypedNetworkClient, ProcessClient as TypedProcessClient,
-            SessionControlClient as TypedSessionControlClient,
+            ServiceClient as TypedServiceClient, SessionControlClient as TypedSessionControlClient,
             SessionHistoryClient as TypedSessionHistoryClient,
             SessionInspectClient as TypedSessionInspectClient,
             SessionStateClient as TypedSessionStateClient,

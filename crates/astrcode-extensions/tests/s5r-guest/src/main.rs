@@ -108,6 +108,23 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ErrorPayload> {
+    if let Ok(id) = std::env::var("ASTRCODE_TEST_SERVICE_ID") {
+        let mut worker = Worker::new(&id, "1");
+        let key = format!("{id}.echo@1").parse().map_err(|e| ErrorPayload::new(WireErrorCode::InvalidInput, e))?;
+        for name in ["native.echo@1", "worker-b.echo@1"] {
+            worker.allow_service(name.parse().map_err(|e| ErrorPayload::new(WireErrorCode::InvalidInput, e))?);
+        }
+        worker.service(key, service_handler(|input, context| async move {
+            if input == json!("crash") { std::process::exit(7); }
+            if let Some(target) = input.get("target").and_then(Value::as_str) {
+                let key = target.parse().map_err(|e| ErrorPayload::new(WireErrorCode::InvalidInput, e))?;
+                return HostClient::services().invoke(&key, json!({})).await;
+            }
+            Ok(json!({ "provider": context.extension_id(), "caller": context.caller_extension_id(), "workspace": context.working_dir(), "session": context.session_id() }))
+        }))?;
+        return worker.run_stdio().await;
+    }
+
     let mut worker = Worker::new(EXT_ID, "0.1.0");
     worker
         .capability(ExtensionCapability::SmallModel)
