@@ -197,7 +197,8 @@ pub async fn prepare_extension_generation(
         .filter(|c| !discovered_ids.contains(c.id.as_str()))
         .map(|c| c.id.clone())
         .collect::<Vec<_>>();
-    for candidate in &discovered {
+    let mut configured_candidates = Vec::with_capacity(discovered.len());
+    for candidate in discovered {
         let config = configs
             .get(&candidate.extension_id)
             .cloned()
@@ -205,32 +206,25 @@ pub async fn prepare_extension_generation(
         let fingerprint = configured_source_fingerprint(&candidate.fingerprint, &config);
         if !current_by_source
             .get(candidate.source_key.as_str())
-            .is_some_and(|c| c.id == candidate.extension_id && c.fingerprint == fingerprint)
+            .is_some_and(|current| {
+                current.id == candidate.extension_id && current.fingerprint == fingerprint
+            })
         {
             roots.push(candidate.extension_id.clone());
         }
+        configured_candidates.push((candidate, config, fingerprint));
     }
     let affected = runner.affected_service_dependents(roots).await;
-    let mut entries = Vec::with_capacity(discovered.len());
-    for candidate in discovered {
+    let mut entries = Vec::with_capacity(configured_candidates.len());
+    for (candidate, config, fingerprint) in configured_candidates {
         let ExtensionCandidate {
             source_key,
-            fingerprint,
             extension_id,
             load,
+            ..
         } = candidate;
-        let config = configs
-            .get(&extension_id)
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        let fingerprint = configured_source_fingerprint(&fingerprint, &config);
-        if !affected.contains(&extension_id)
-            && current_by_source
-                .get(source_key.as_str())
-                .is_some_and(|current| {
-                    current.id == extension_id && current.fingerprint == fingerprint
-                })
-        {
+        // The affected closure includes every new or changed source and its Required consumers.
+        if !affected.contains(&extension_id) {
             entries.push(SourceGenerationEntry::Retain {
                 id: extension_id,
                 key: source_key,

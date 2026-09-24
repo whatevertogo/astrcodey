@@ -314,6 +314,15 @@ enum ResolvedSourceEntry {
     Start(Box<ResolvedSourceExtension>),
 }
 
+impl ResolvedSourceEntry {
+    fn id(&self) -> &str {
+        match self {
+            Self::Retain { id, .. } => id,
+            Self::Start(candidate) => candidate.manifest.id(),
+        }
+    }
+}
+
 pub struct PreparedExtensionGeneration {
     index: Arc<HandlerIndex>,
     blocked: Vec<ExtensionDeclarationSnapshot>,
@@ -1199,60 +1208,46 @@ impl ExtensionRunner {
             candidate.extension.validate_config(&config)?;
         }
 
-        let declarations = {
+        let (plan, blocked) = {
             let current = self.registry.extensions.read().await;
-            resolved
+            let manifests = resolved
                 .iter()
-                .filter_map(|entry| match entry {
-                    ResolvedSourceEntry::Start(candidate) => {
-                        Some(candidate.manifest.service_declaration())
-                    },
+                .map(|entry| match entry {
+                    ResolvedSourceEntry::Start(candidate) => Ok(&candidate.manifest),
                     ResolvedSourceEntry::Retain { id, .. } => current
                         .iter()
-                        .find(|h| h.manifest.id() == id)
-                        .map(|h| h.manifest.service_declaration()),
+                        .find(|hosted| hosted.manifest.id() == id)
+                        .map(|hosted| &hosted.manifest)
+                        .ok_or_else(|| {
+                            ExtensionError::Internal(format!("retained extension {id} disappeared"))
+                        }),
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            let declarations = manifests
+                .iter()
+                .map(|manifest| manifest.service_declaration())
+                .collect::<Vec<_>>();
+            let plan = dependency::DependencyPlan::analyze(&declarations);
+            let blocked = manifests
+                .into_iter()
+                .filter_map(|manifest| {
+                    let reasons = plan.blocked.get(manifest.id())?;
+                    let mut declaration =
+                        snapshot::declaration_snapshot(manifest, 0, ExtensionRuntimeState::Stopped);
+                    declaration.blocked_reasons = reasons.clone();
+                    Some(declaration)
+                })
+                .collect();
+            (plan, blocked)
         };
-        let plan = dependency::DependencyPlan::analyze(&declarations);
-        let mut blocked = Vec::new();
-        let current = self.registry.extensions.read().await;
-        for entry in &resolved {
-            let manifest = match entry {
-                ResolvedSourceEntry::Start(candidate) => &candidate.manifest,
-                ResolvedSourceEntry::Retain { id, .. } => {
-                    match current.iter().find(|h| h.manifest.id() == id) {
-                        Some(hosted) => &hosted.manifest,
-                        None => {
-                            return Err(ExtensionError::Internal(format!(
-                                "retained extension {id} disappeared"
-                            )));
-                        },
-                    }
-                },
-            };
-            if let Some(reasons) = plan.blocked.get(manifest.id()) {
-                let mut declaration =
-                    snapshot::declaration_snapshot(manifest, 0, ExtensionRuntimeState::Stopped);
-                declaration.blocked_reasons = reasons.clone();
-                blocked.push(declaration);
-            }
-        }
-        drop(current);
-        resolved.retain(|entry| {
-            let id = match entry {
-                ResolvedSourceEntry::Start(candidate) => candidate.manifest.id(),
-                ResolvedSourceEntry::Retain { id, .. } => id,
-            };
-            !plan.blocked.contains_key(id)
-        });
-        resolved.sort_by_key(|entry| {
-            let id = match entry {
-                ResolvedSourceEntry::Start(candidate) => candidate.manifest.id(),
-                ResolvedSourceEntry::Retain { id, .. } => id,
-            };
-            plan.order.iter().position(|ordered| ordered == id)
-        });
+        resolved.retain(|entry| !plan.blocked.contains_key(entry.id()));
+        let activation_order = plan
+            .order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (id.as_str(), position))
+            .collect::<std::collections::HashMap<_, _>>();
+        resolved.sort_by_key(|entry| activation_order.get(entry.id()).copied());
 
         let retained = resolved
             .iter()

@@ -115,6 +115,25 @@ struct RetirementWork {
     cleanup_host_resources: Option<(Arc<HostRouter>, ExtensionInstanceId)>,
 }
 
+impl RetirementWork {
+    fn from_hosted(
+        hosted: HostedExtension,
+        host_router: Arc<HostRouter>,
+        dependent_gates: Vec<Arc<AsyncMutex<()>>>,
+    ) -> Self {
+        Self {
+            dependent_gates,
+            extension_id: hosted.manifest.id().to_owned(),
+            extension: hosted.extension,
+            tasks: hosted.tasks,
+            generation_gate: hosted.generation_gate,
+            publication_lease: Some(hosted.publication_lease),
+            supervisor: Some(hosted.supervisor),
+            cleanup_host_resources: Some((host_router, hosted.instance_id)),
+        }
+    }
+}
+
 /// Owns a registration after its runtime resources exist but before publication.
 ///
 /// Dropping an armed instance synchronously transfers those resources and the keyed lifecycle
@@ -339,16 +358,7 @@ impl RetirementSupervisor {
         cleanup_host_resources: Arc<HostRouter>,
         dependent_gates: Vec<Arc<AsyncMutex<()>>>,
     ) -> RetirementTicket {
-        let work = RetirementWork {
-            dependent_gates,
-            extension_id: hosted.manifest.id().to_owned(),
-            extension: hosted.extension,
-            tasks: hosted.tasks,
-            generation_gate: hosted.generation_gate,
-            publication_lease: Some(hosted.publication_lease),
-            supervisor: Some(hosted.supervisor),
-            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
-        };
+        let work = RetirementWork::from_hosted(hosted, cleanup_host_resources, dependent_gates);
         self.spawn_ticketed_retirement(work, reason, operation_timeout, operation_guard)
     }
 
@@ -391,16 +401,7 @@ impl RetirementSupervisor {
         cleanup_host_resources: Arc<HostRouter>,
         dependent_gates: Vec<Arc<AsyncMutex<()>>>,
     ) {
-        let work = RetirementWork {
-            dependent_gates,
-            extension_id: hosted.manifest.id().to_owned(),
-            extension: hosted.extension,
-            tasks: hosted.tasks,
-            generation_gate: hosted.generation_gate,
-            publication_lease: Some(hosted.publication_lease),
-            supervisor: Some(hosted.supervisor),
-            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
-        };
+        let work = RetirementWork::from_hosted(hosted, cleanup_host_resources, dependent_gates);
         self.spawn_retirement(work, reason, operation_timeout, operation_guard, None, true);
     }
 
