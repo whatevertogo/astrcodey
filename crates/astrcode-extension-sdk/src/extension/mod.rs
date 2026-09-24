@@ -16,6 +16,11 @@ mod paths;
 mod registrar;
 mod registration_validation;
 mod runtime;
+mod service;
+pub use service::{
+    DependencyKind, ServiceContext, ServiceDependency, ServiceHandler, ServiceKey,
+    ServiceRegistration,
+};
 mod tool_context;
 mod tool_plan_context;
 

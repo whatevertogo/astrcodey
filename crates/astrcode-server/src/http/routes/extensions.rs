@@ -187,14 +187,25 @@ async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
         .into_iter()
         .map(|declaration| (declaration.id.clone(), declaration))
         .collect();
-    let loaded_set: BTreeSet<_> = declarations.keys().cloned().collect();
+    let loaded_set: BTreeSet<_> = declarations
+        .iter()
+        .filter(|(_, d)| {
+            d.blocked_reasons.is_empty()
+                && !matches!(
+                    d.runtime_state,
+                    astrcode_extensions::runner::ExtensionRuntimeState::Failed
+                        | astrcode_extensions::runner::ExtensionRuntimeState::Stopped
+                )
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
     let diagnostics = runner.diagnostics_snapshot();
     let bundled_set: BTreeSet<_> = astrcode_bundled_extensions::bundled_extension_ids()
         .into_iter()
         .map(str::to_string)
         .collect();
 
-    let mut ids: BTreeSet<String> = loaded_set.iter().cloned().collect();
+    let mut ids: BTreeSet<String> = declarations.keys().cloned().collect();
     ids.extend(bundled_set.iter().cloned());
     ids.extend(effective.extensions.extension_states.keys().cloned());
     ids.extend(diagnostics.keys().cloned());
@@ -203,7 +214,7 @@ async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
         .map(|extension_id| {
             let source = if bundled_set.contains(&extension_id) {
                 ExtensionSourceDto::Builtin
-            } else if loaded_set.contains(&extension_id) {
+            } else if declarations.contains_key(&extension_id) {
                 ExtensionSourceDto::Disk
             } else {
                 ExtensionSourceDto::Unknown
@@ -234,6 +245,36 @@ fn extension_declaration_dto(
 ) -> ExtensionDeclarationDto {
     let id = declaration.id.clone();
     ExtensionDeclarationDto {
+        services: declaration
+            .services
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        dependencies: declaration
+            .dependencies
+            .iter()
+            .map(|d| astrcode_protocol::http::ExtensionServiceDependencyDto {
+                service: d.service.to_string(),
+                kind: match d.kind {
+                    astrcode_extension_sdk::extension::DependencyKind::Required => {
+                        astrcode_protocol::http::ExtensionDependencyKindDto::Required
+                    },
+                    astrcode_extension_sdk::extension::DependencyKind::Optional => {
+                        astrcode_protocol::http::ExtensionDependencyKindDto::Optional
+                    },
+                },
+            })
+            .collect(),
+        service_permissions: declaration
+            .service_permissions
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        blocked_reasons: declaration
+            .blocked_reasons
+            .into_iter()
+            .map(service_block_to_dto)
+            .collect(),
         id: declaration.id,
         capabilities: declaration
             .capabilities
@@ -321,5 +362,23 @@ fn extension_stage_diagnostics_dto(
         },
         duration_ms: diagnostics.duration_ms,
         error: diagnostics.error,
+    }
+}
+
+fn service_block_to_dto(
+    reason: astrcode_extensions::runner::ServiceBlockReason,
+) -> astrcode_protocol::http::ExtensionServiceBlockDto {
+    use astrcode_extensions::runner::ServiceBlockReason as Reason;
+    use astrcode_protocol::http::ExtensionServiceBlockDto as Dto;
+    match reason {
+        Reason::MissingService { service } => Dto::MissingService {
+            service: service.to_string(),
+        },
+        Reason::ProviderConflict { service, providers } => Dto::ProviderConflict {
+            service: service.to_string(),
+            providers,
+        },
+        Reason::DependencyCycle { members } => Dto::DependencyCycle { members },
+        Reason::DependencyBlocked { provider } => Dto::DependencyBlocked { provider },
     }
 }

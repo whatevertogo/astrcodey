@@ -19,6 +19,12 @@ use crate::wire::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeManifest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_dependencies: Vec<crate::wire::service::ServiceDependencyDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_permissions: Vec<String>,
     pub required_transport_features: Vec<TransportFeature>,
     #[serde(default)]
     pub capabilities: Vec<ExtensionCapability>,
@@ -560,6 +566,9 @@ mod tests {
     #[test]
     fn initialize_manifest_preserves_required_shapes_and_rejects_unknown_values() {
         let manifest = InitializeManifest {
+            services: Vec::new(),
+            service_dependencies: Vec::new(),
+            service_permissions: Vec::new(),
             required_transport_features: vec![TransportFeature::AuthenticatedHttp],
             capabilities: Vec::new(),
             tools: Vec::new(),

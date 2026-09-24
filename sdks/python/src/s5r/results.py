@@ -44,6 +44,7 @@ class HostResource:
     NETWORK = "network"
     EVENT = "event"
     EXTENSION_HTTP = "extension_http"
+    EXTENSION_SERVICE = "extension_service"
 
 
 @dataclass(frozen=True)

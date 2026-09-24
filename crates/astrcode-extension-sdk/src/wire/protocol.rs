@@ -20,6 +20,7 @@ pub const S5R_VERSION: &str = "3.0";
 pub const S5R_STACK: &str = "astrcode";
 pub const WIRE_CODEC_JSON: &str = "json";
 
+pub const FEATURE_EXTENSION_SERVICES_V1: &str = "extension_services_v1";
 pub const FEATURE_NESTED_INVOKE_V1: &str = "nested_invoke_v1";
 pub const FEATURE_MODEL_STREAM_V1: &str = "model_stream_v1";
 pub const FEATURE_CUSTOM_EVENT_V1: &str = "custom_event_v1";
@@ -95,6 +96,7 @@ pub enum HandlerKind {
     Command,
     Http,
     Event,
+    Service,
 }
 
 impl HandlerKind {
@@ -105,6 +107,7 @@ impl HandlerKind {
             Self::Command => "command",
             Self::Http => "http",
             Self::Event => "event",
+            Self::Service => "service",
         }
     }
 
@@ -115,6 +118,7 @@ impl HandlerKind {
             "command" => Self::Command,
             "http" => Self::Http,
             "event" => Self::Event,
+            "service" => Self::Service,
             _ => return None,
         })
     }
@@ -132,6 +136,10 @@ impl FeatureName {
         } else {
             Err(format!("invalid feature name {value:?}"))
         }
+    }
+
+    pub fn extension_services_v1() -> Self {
+        Self(FEATURE_EXTENSION_SERVICES_V1.into())
     }
 
     pub fn nested_invoke_v1() -> Self {

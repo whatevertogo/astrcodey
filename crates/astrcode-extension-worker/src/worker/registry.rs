@@ -78,6 +78,33 @@ pub type CommandHandlerFn = Arc<
     dyn Fn(WorkerCommandContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>> + Send + Sync,
 >;
 
+pub type ServiceHandlerFn = Arc<
+    dyn Fn(Value, WorkerServiceContext) -> BoxFuture<Result<Value, ErrorPayload>> + Send + Sync,
+>;
+#[derive(Clone)]
+pub struct WorkerServiceContext {
+    call: WorkerCallContext,
+    caller: String,
+    working_dir: Option<PathBuf>,
+    session_id: Option<String>,
+}
+impl WorkerServiceContext {
+    pub fn caller_extension_id(&self) -> &str {
+        &self.caller
+    }
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
+    }
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+    pub fn extension_id(&self) -> &str {
+        self.call.extension_id()
+    }
+    pub fn cancel_token(&self) -> &CancelToken {
+        self.call.cancel_token()
+    }
+}
 pub type HttpHandlerFn = Arc<
     dyn Fn(
             ExtensionHttpRequest,
@@ -470,6 +497,7 @@ pub(crate) struct HandlerRegistry {
     custom_events: HashMap<String, CustomEventHandlerFn>,
     commands: HashMap<String, CommandHandlerFn>,
     http_routes: HashMap<String, HttpHandlerFn>,
+    services: HashMap<String, ServiceHandlerFn>,
 }
 
 struct RegisteredTool {
@@ -488,6 +516,7 @@ impl HandlerRegistry {
             custom_events: HashMap::new(),
             commands: HashMap::new(),
             http_routes: HashMap::new(),
+            services: HashMap::new(),
         }
     }
 
@@ -496,6 +525,57 @@ impl HandlerRegistry {
         &self.manifest
     }
 
+    pub(crate) fn register_service(
+        &mut self,
+        key: crate::extension::ServiceKey,
+        handler: ServiceHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        let name = key.to_string();
+        if self.services.contains_key(&name)
+            || self
+                .manifest
+                .service_dependencies
+                .iter()
+                .any(|d| d.service == name)
+        {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                "duplicate service or self dependency",
+            ));
+        }
+        self.manifest.services.push(name.clone());
+        self.services.insert(name, handler);
+        Ok(())
+    }
+    pub(crate) fn declare_service_dependency(
+        &mut self,
+        service: crate::extension::ServiceKey,
+        kind: crate::extension::DependencyKind,
+    ) -> Result<(), ErrorPayload> {
+        let name = service.to_string();
+        if self.services.contains_key(&name)
+            || self
+                .manifest
+                .service_dependencies
+                .iter()
+                .any(|d| d.service == name)
+        {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                "duplicate dependency or self dependency",
+            ));
+        }
+        self.manifest
+            .service_dependencies
+            .push((&crate::extension::ServiceDependency { service, kind }).into());
+        Ok(())
+    }
+    pub(crate) fn allow_service(&mut self, key: crate::extension::ServiceKey) {
+        let key = key.to_string();
+        if !self.manifest.service_permissions.contains(&key) {
+            self.manifest.service_permissions.push(key);
+        }
+    }
     pub(crate) fn take_manifest(&mut self) -> InitializeManifest {
         std::mem::take(&mut self.manifest)
     }
@@ -942,6 +1022,23 @@ impl HandlerRegistry {
                     )
                 })?;
                 handler(facts.into_command(event, name)?).await
+            },
+            astrcode_extension_sdk::wire::HandlerKind::Service => {
+                let handler = self.services.get(name).ok_or_else(|| {
+                    ErrorPayload::new(WireErrorCode::UnknownHandler, "unknown service")
+                })?;
+                let request: crate::wire::service::ServiceInvocation =
+                    serde_json::from_value(event).map_err(|e| {
+                        ErrorPayload::new(WireErrorCode::InvalidInput, e.to_string())
+                    })?;
+                let context = WorkerServiceContext {
+                    call: facts.call,
+                    caller: request.caller_extension_id,
+                    working_dir: request.working_dir.map(Into::into),
+                    session_id: request.session_id,
+                };
+                let result = handler(request.input, context).await?;
+                Ok(HandlerResult::effect(HandlerEffect::Ok, result))
             },
             astrcode_extension_sdk::wire::HandlerKind::Http => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {

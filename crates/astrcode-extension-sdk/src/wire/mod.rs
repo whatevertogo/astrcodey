@@ -14,6 +14,7 @@ pub mod host;
 pub mod manifest;
 pub mod operation;
 pub mod protocol;
+pub mod service;
 pub mod session;
 pub mod session_inspect;
 pub mod stream;

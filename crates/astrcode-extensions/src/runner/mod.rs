@@ -40,13 +40,17 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, Semaphor
 mod commands;
 mod custom_event_control;
 mod custom_event_delivery;
+mod dependency;
 mod diagnostics;
+mod failure;
+pub use dependency::ServiceBlockReason;
 mod host_invoker;
 mod http;
 mod index;
 mod manifest;
 mod registration;
 mod retirement;
+pub(crate) mod service;
 mod snapshot;
 mod supervisor;
 mod tool_adapter;
@@ -104,6 +108,7 @@ pub struct ExtensionRunner {
     /// 宿主等待扩展控制面操作和同步 hook 的统一超时。
     operation_timeout: Duration,
     retirements: RetirementSupervisor,
+    failure_observers: parking_lot::Mutex<tokio::task::JoinSet<()>>,
     custom_event_permits: Arc<Semaphore>,
     custom_event_lanes: Arc<CustomEventLanes>,
     custom_event_quiescing: Arc<CustomEventQuiescing>,
@@ -158,6 +163,7 @@ struct LifecycleCoordination {
 }
 
 struct RuntimeRegistry {
+    blocked: parking_lot::RwLock<Vec<ExtensionDeclarationSnapshot>>,
     /// 已发布的扩展实例、清单与生命周期资源。
     extensions: RwLock<Vec<HostedExtension>>,
     /// 最后一个完成激活的 handler 索引。
@@ -167,6 +173,7 @@ struct RuntimeRegistry {
 }
 
 struct HostBindings {
+    runtime_change_publisher: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）。
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
     /// 扩展 `start()` 阶段取得的进程级事件通道。
@@ -244,6 +251,7 @@ struct HostedExtension {
     publication_lease: Arc<ExtensionPublicationLease>,
     generation_gate: ExtensionGenerationGate,
     public_http_dispatcher: Arc<GenerationPublicHttpDispatcher>,
+    service_dispatcher: Arc<service::ServiceDispatcher>,
 }
 
 enum ExtensionOrigin {
@@ -307,6 +315,8 @@ enum ResolvedSourceEntry {
 }
 
 pub struct PreparedExtensionGeneration {
+    index: Arc<HandlerIndex>,
+    blocked: Vec<ExtensionDeclarationSnapshot>,
     runner: Arc<ExtensionRunner>,
     _source_transaction: Option<OwnedMutexGuard<()>>,
     entries: Vec<PreparedSourceEntry>,
@@ -395,18 +405,19 @@ impl PreparedExtensionGeneration {
             &runner.registry.publication,
             &runner.registry.publication_stable,
         );
-        let generation = {
-            let mut state = runner.registry.publication.lock();
-            let generation = state.generation.wrapping_add(1);
-            state.pending_generation = Some(generation);
-            generation
-        };
-        let index = Arc::new(build_handler_index(&next, generation));
+        let index = Arc::clone(&self.index);
+        let generation = index.generation;
+        runner.registry.publication.lock().pending_generation = Some(generation);
         for hosted in &next {
             hosted.public_http_dispatcher.bind(&index);
+            hosted.service_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
         *active = next;
+        for blocked in &mut self.blocked {
+            blocked.generation = generation;
+        }
+        *runner.registry.blocked.write() = std::mem::take(&mut self.blocked);
         publish(generation);
         for hosted in active.iter() {
             hosted.generation_gate.activate();
@@ -418,24 +429,42 @@ impl PreparedExtensionGeneration {
         drop(lifecycle);
         drop(publication);
 
+        let old_plan = dependency::DependencyPlan::analyze(
+            &previous
+                .iter()
+                .map(|h| h.manifest.service_declaration())
+                .collect::<Vec<_>>(),
+        );
+        let old_gates = previous
+            .iter()
+            .map(|h| (h.manifest.id().to_owned(), h.operation_gate.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
         for (hosted, operation_guard) in previous.into_iter().zip(retiring_operation_guards) {
             let reason = if desired_ids.contains(hosted.manifest.id()) {
                 StopReason::Reload
             } else {
                 StopReason::Disabled
             };
+            let dependent_gates = old_plan
+                .affected([hosted.manifest.id().to_owned()])
+                .into_iter()
+                .filter(|id| id != hosted.manifest.id())
+                .filter_map(|id| old_gates.get(&id).cloned())
+                .collect();
             runner.retirements.retire_replaced(
                 hosted,
                 reason,
                 runner.operation_timeout,
                 operation_guard,
                 runner.host_router(),
+                dependent_gates,
             );
         }
         self._source_transaction.take();
     }
 
     pub async fn abort(mut self) {
+        self.index = Arc::default();
         let prepared = self
             .entries
             .drain(..)
@@ -481,12 +510,14 @@ impl ExtensionRunner {
                 shutdown: AsyncMutex::new(()),
             },
             registry: RuntimeRegistry {
+                blocked: parking_lot::RwLock::new(Vec::new()),
                 extensions: RwLock::new(Vec::new()),
                 index: ArcSwap::from_pointee(HandlerIndex::default()),
                 publication: parking_lot::Mutex::new(RuntimePublication::default()),
                 publication_stable: Notify::new(),
             },
             bindings: parking_lot::RwLock::new(HostBindings {
+                runtime_change_publisher: None,
                 session_ops: Arc::new(StdRwLock::new(None)),
                 startup_event_tx: None,
                 host_router: Arc::new(crate::host_router::HostRouter::from_backends(
@@ -496,6 +527,7 @@ impl ExtensionRunner {
             diagnostics: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
             operation_timeout,
             retirements: RetirementSupervisor::new(),
+            failure_observers: parking_lot::Mutex::new(tokio::task::JoinSet::new()),
             custom_event_permits: Arc::new(Semaphore::new(CUSTOM_EVENT_CONCURRENCY)),
             custom_event_lanes: Arc::new(CustomEventLanes::default()),
             custom_event_quiescing: Arc::new(CustomEventQuiescing::default()),
@@ -623,6 +655,10 @@ impl ExtensionRunner {
         let runtime_config = extension_config(&id, ext_config.clone());
         let generation_gate = ExtensionGenerationGate::candidate();
         let public_http_dispatcher = GenerationPublicHttpDispatcher::for_candidate(self);
+        let service_dispatcher = service::ServiceDispatcher::candidate(
+            self.extension_call_context_factory(),
+            self.operation_timeout,
+        );
         let instance_id = ExtensionInstanceId::new();
 
         self.record_stage_running(&id, DiagnosticStage::Start);
@@ -651,6 +687,7 @@ impl ExtensionRunner {
                         event_tx: startup_event_tx,
                         generation_gate: generation_gate.clone(),
                         public_http_dispatcher: Some(public_http_dispatcher.clone()),
+                        service_dispatcher: Some(service_dispatcher.clone()),
                         ..ExtensionCallContextInput::unscoped(tasks.cancellation())
                     },
                 ),
@@ -725,8 +762,9 @@ impl ExtensionRunner {
                 publication_lease: ExtensionPublicationLease::new(),
                 generation_gate: generation_gate.clone(),
                 public_http_dispatcher,
+                service_dispatcher,
             });
-            self.rebuild_index_before_stable(&extensions, || {
+            self.rebuild_index_before_stable(&extensions, |_| {
                 generation_gate.activate();
                 activate_extension_tasks(&tasks);
             });
@@ -776,6 +814,7 @@ impl ExtensionRunner {
     ///
     /// 返回是否从当前分发表移除了该扩展。generation gate 会先关闭并排空调用，
     /// 停止失败会记录日志，并由等待该退休结果的调用方或 [`Self::shutdown`] 汇总。
+    #[cfg(test)]
     async fn unregister(
         &self,
         extension_id: &str,
@@ -886,19 +925,54 @@ impl ExtensionRunner {
         {
             let _lifecycle = self.coordination.registry.lock().await;
         }
-        let ids = self.snapshot_registered_extension_ids().await;
+        let source = self.coordination.source_reconcile.lock().await;
+        let ids = {
+            let current = self.registry.extensions.read().await;
+            let plan = dependency::DependencyPlan::analyze(
+                &current
+                    .iter()
+                    .map(|h| h.manifest.service_declaration())
+                    .collect::<Vec<_>>(),
+            );
+            let mut ids = plan.order.into_iter().rev().collect::<Vec<_>>();
+            for hosted in current.iter() {
+                if !ids.iter().any(|id| id == hosted.manifest.id()) {
+                    ids.push(hosted.manifest.id().to_owned());
+                }
+            }
+            ids
+        };
         let mut errors = Vec::new();
         for id in ids {
-            if let Err(e) = self.unregister(&id, StopReason::Shutdown).await {
-                errors.push(format!("failed to stop extension {id}: {e}"));
+            match self
+                .unregister_with_retirement(&id, StopReason::Shutdown)
+                .await
+            {
+                Ok(Some(ticket)) => {
+                    if let Err(error) = ticket.wait().await {
+                        errors.push(error.to_string());
+                    }
+                },
+                Ok(None) => {},
+                Err(error) => errors.push(format!("failed to stop extension {id}: {error}")),
             }
         }
+        drop(source);
         // unregister 在释放 registry 锁前登记 retirement；此屏障保证 drain
         // 之后不会再出现属于本次 shutdown 的退休任务。
         {
             let _lifecycle = self.coordination.registry.lock().await;
         }
         errors.extend(self.retirements.drain().await);
+        let mut observers = std::mem::take(&mut *self.failure_observers.lock());
+        observers.abort_all();
+        while let Some(result) = observers.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                errors.push(error.to_string());
+            }
+        }
         errors
     }
 
@@ -908,6 +982,7 @@ impl ExtensionRunner {
         self.snapshot_registered_extension_ids().await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     async fn snapshot_registered_extension_ids(&self) -> Vec<String> {
         self.registry
             .extensions
@@ -943,6 +1018,18 @@ impl ExtensionRunner {
         Arc::clone(&self.coordination.source_reconcile)
             .lock_owned()
             .await
+    }
+
+    pub(crate) async fn affected_service_dependents(
+        &self,
+        roots: Vec<String>,
+    ) -> std::collections::BTreeSet<String> {
+        let current = self.registry.extensions.read().await;
+        let declarations = current
+            .iter()
+            .map(|h| h.manifest.service_declaration())
+            .collect::<Vec<_>>();
+        dependency::DependencyPlan::analyze(&declarations).affected(roots)
     }
 
     pub(crate) async fn prepare_source_generation(
@@ -1112,6 +1199,61 @@ impl ExtensionRunner {
             candidate.extension.validate_config(&config)?;
         }
 
+        let declarations = {
+            let current = self.registry.extensions.read().await;
+            resolved
+                .iter()
+                .filter_map(|entry| match entry {
+                    ResolvedSourceEntry::Start(candidate) => {
+                        Some(candidate.manifest.service_declaration())
+                    },
+                    ResolvedSourceEntry::Retain { id, .. } => current
+                        .iter()
+                        .find(|h| h.manifest.id() == id)
+                        .map(|h| h.manifest.service_declaration()),
+                })
+                .collect::<Vec<_>>()
+        };
+        let plan = dependency::DependencyPlan::analyze(&declarations);
+        let mut blocked = Vec::new();
+        let current = self.registry.extensions.read().await;
+        for entry in &resolved {
+            let manifest = match entry {
+                ResolvedSourceEntry::Start(candidate) => &candidate.manifest,
+                ResolvedSourceEntry::Retain { id, .. } => {
+                    match current.iter().find(|h| h.manifest.id() == id) {
+                        Some(hosted) => &hosted.manifest,
+                        None => {
+                            return Err(ExtensionError::Internal(format!(
+                                "retained extension {id} disappeared"
+                            )));
+                        },
+                    }
+                },
+            };
+            if let Some(reasons) = plan.blocked.get(manifest.id()) {
+                let mut declaration =
+                    snapshot::declaration_snapshot(manifest, 0, ExtensionRuntimeState::Stopped);
+                declaration.blocked_reasons = reasons.clone();
+                blocked.push(declaration);
+            }
+        }
+        drop(current);
+        resolved.retain(|entry| {
+            let id = match entry {
+                ResolvedSourceEntry::Start(candidate) => candidate.manifest.id(),
+                ResolvedSourceEntry::Retain { id, .. } => id,
+            };
+            !plan.blocked.contains_key(id)
+        });
+        resolved.sort_by_key(|entry| {
+            let id = match entry {
+                ResolvedSourceEntry::Start(candidate) => candidate.manifest.id(),
+                ResolvedSourceEntry::Retain { id, .. } => id,
+            };
+            plan.order.iter().position(|ordered| ordered == id)
+        });
+
         let retained = resolved
             .iter()
             .filter_map(|entry| match entry {
@@ -1145,6 +1287,8 @@ impl ExtensionRunner {
             })
             .collect::<Vec<_>>();
         let mut prepared_generation = PreparedExtensionGeneration {
+            index: self.registry.index.load_full(),
+            blocked,
             runner: Arc::clone(self),
             _source_transaction: Some(source_transaction),
             entries: Vec::with_capacity(resolved.len()),
@@ -1176,11 +1320,34 @@ impl ExtensionRunner {
             prepared_generation.entries.push(prepared);
         }
 
+        if changed {
+            let current = self.registry.extensions.read().await;
+            let kept = current.iter().filter(|hosted| match &hosted.origin {
+                #[cfg(any(test, feature = "testing"))]
+                ExtensionOrigin::Direct => true,
+                ExtensionOrigin::Source { key, fingerprint } => retained.contains(&(
+                    hosted.manifest.id().to_owned(),
+                    key.clone(),
+                    fingerprint.clone(),
+                )),
+            });
+            let fresh = prepared_generation
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    PreparedSourceEntry::Start(prepared) => Some(&prepared.hosted),
+                    PreparedSourceEntry::Retain { .. } => None,
+                });
+            let generation = self.registry.publication.lock().generation.wrapping_add(1);
+            prepared_generation.index =
+                Arc::new(build_handler_index(kept.chain(fresh), generation));
+        }
+
         Ok(prepared_generation)
     }
 
     async fn start_source_candidate(
-        &self,
+        self: &Arc<Self>,
         candidate: ResolvedSourceExtension,
         startup_working_dir: Option<&str>,
     ) -> Result<PreparedSourceExtension, ExtensionError> {
@@ -1196,6 +1363,10 @@ impl ExtensionRunner {
         let tasks = suspended_extension_tasks(extension_id.clone());
         let generation_gate = ExtensionGenerationGate::candidate();
         let public_http_dispatcher = GenerationPublicHttpDispatcher::for_candidate(self);
+        let service_dispatcher = service::ServiceDispatcher::candidate(
+            self.extension_call_context_factory(),
+            self.operation_timeout,
+        );
         let instance_id = ExtensionInstanceId::new();
         let operation_gate = Arc::new(AsyncMutex::new(()));
         let operation_guard = Arc::clone(&operation_gate).lock_owned().await;
@@ -1214,6 +1385,7 @@ impl ExtensionRunner {
                         event_tx: startup_event_tx,
                         generation_gate: generation_gate.clone(),
                         public_http_dispatcher: Some(public_http_dispatcher.clone()),
+                        service_dispatcher: Some(service_dispatcher.clone()),
                         ..ExtensionCallContextInput::unscoped(tasks.cancellation())
                     },
                 ),
@@ -1277,6 +1449,14 @@ impl ExtensionRunner {
         let operation_guard = pending
             .disarm()
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        if let Some(failure) = extension.runtime_failure() {
+            self.observe_failure(
+                extension_id.clone(),
+                instance_id,
+                failure,
+                tasks.cancellation(),
+            );
+        }
         Ok(PreparedSourceExtension {
             hosted: HostedExtension {
                 extension,
@@ -1289,6 +1469,7 @@ impl ExtensionRunner {
                 publication_lease: ExtensionPublicationLease::new(),
                 generation_gate,
                 public_http_dispatcher,
+                service_dispatcher,
             },
             operation_guard,
         })
@@ -1315,13 +1496,13 @@ impl ExtensionRunner {
     }
 
     fn rebuild_index(&self, extensions: &[HostedExtension]) {
-        self.rebuild_index_before_stable(extensions, || {});
+        self.rebuild_index_before_stable(extensions, |_| {});
     }
 
     fn rebuild_index_before_stable(
         &self,
         extensions: &[HostedExtension],
-        before_stable: impl FnOnce(),
+        before_stable: impl FnOnce(u64),
     ) {
         log_handler_dispatch_order(extensions);
         let _publication = RuntimePublicationGuard::begin(
@@ -1337,10 +1518,17 @@ impl ExtensionRunner {
         let index = Arc::new(build_handler_index(extensions, generation));
         for hosted in extensions {
             hosted.public_http_dispatcher.bind(&index);
+            hosted.service_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
-        before_stable();
+        before_stable(generation);
         self.registry.index.store(index);
+    }
+
+    /// Composition-root callback for runtime changes outside a configuration transaction.
+    /// Called inside the publication barrier; must not call back into the runner.
+    pub fn bind_runtime_change_publisher(&self, publish: impl Fn(u64) + Send + Sync + 'static) {
+        self.bindings.write().runtime_change_publisher = Some(Arc::new(publish));
     }
 
     /// 绑定会话原子操作能力。

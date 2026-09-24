@@ -94,6 +94,23 @@ domain_client!(WorkspaceClient);
 domain_client!(ProcessClient);
 domain_client!(NetworkClient);
 domain_client!(ExtensionHttpClient);
+domain_client!(ServiceClient);
+impl<T: HostClientTransport> ServiceClient<T> {
+    pub async fn invoke(
+        &self,
+        service: &crate::extension::ServiceKey,
+        input: Value,
+    ) -> Result<Value, T::Error> {
+        invoke::<operations::ServiceInvoke, _>(
+            &self.transport,
+            &crate::wire::service::ServiceInvokeRequest {
+                service: service.to_string(),
+                input,
+            },
+        )
+        .await
+    }
+}
 
 impl<T> ModelClient<T> {
     pub(crate) const fn transport(&self) -> &T {

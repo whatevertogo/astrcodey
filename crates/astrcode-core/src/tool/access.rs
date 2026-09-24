@@ -31,6 +31,7 @@ pub enum HostResource {
     Network,
     Event,
     ExtensionHttp,
+    ExtensionService,
 }
 
 /// 单次工具调用声明的资源访问。

@@ -39,6 +39,7 @@ pub type ToolResultClient = TypedToolResultClient<ExtensionHost>;
 pub type WorkspaceClient = TypedWorkspaceClient<ExtensionHost>;
 pub type ProcessClient = TypedProcessClient<ExtensionHost>;
 pub type NetworkClient = TypedNetworkClient<ExtensionHost>;
+pub type ServiceClient = super::domain_client::ServiceClient<ExtensionHost>;
 pub type ExtensionHttpClient = TypedExtensionHttpClient<ExtensionHost>;
 
 impl TypedModelClient<ExtensionHost> {
@@ -161,6 +162,7 @@ mod tests {
             HostOperation::ProcessKill,
             HostOperation::ProcessList,
             HostOperation::NetworkClient,
+            HostOperation::ServiceInvoke,
             HostOperation::ExtensionHttpPublic,
             HostOperation::SessionRootCreate,
             HostOperation::SessionRootSubmitTurn,
@@ -278,6 +280,12 @@ mod tests {
             host.network()
                 .unwrap()
                 .send(HostNetworkRequest::get("https://example.com")),
+        )
+        .await;
+        expect_backend_error(
+            host.services()
+                .unwrap()
+                .invoke(&"test@1".parse().unwrap(), json!({})),
         )
         .await;
         expect_backend_error(host.extension_http().unwrap().dispatch_public(

@@ -37,6 +37,7 @@ fn backend_available(
     ctx: &super::InvokeContext,
 ) -> bool {
     match backend {
+        HostBackendRequirement::ServiceDispatcher => ctx.service_dispatcher.is_some(),
         HostBackendRequirement::MainLlm => router.llm.has_main(ctx.llm_providers.as_ref()),
         HostBackendRequirement::SmallLlm => router.llm.has_small(ctx.llm_providers.as_ref()),
         HostBackendRequirement::SessionEventReader => router.session.has_event_reader(),

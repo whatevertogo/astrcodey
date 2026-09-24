@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    path::PathBuf,
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -281,6 +282,7 @@ fn full_host_test_lease(working_dir: &str) -> ResourceLease {
             HostResource::Network,
             HostResource::Event,
             HostResource::ExtensionHttp,
+            HostResource::ExtensionService,
         ]
         .map(ResourceAccess::host),
     );
@@ -891,4 +893,320 @@ async fn s5r_cancel_on_stop_during_slow_tool() {
             );
         },
     }
+}
+
+struct ServiceTestExtension;
+struct ServiceTestHandler;
+#[async_trait]
+impl Extension for ServiceTestExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        [
+            "native.echo@1",
+            "worker-a.echo@1",
+            "worker-b.echo@1",
+            "python-guest.echo@1",
+        ]
+        .into_iter()
+        .fold(manifest("native").version("1"), |builder, key| {
+            builder.allow_service(key.parse().unwrap())
+        })
+        .build()
+    }
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.service("native.echo@1", Arc::new(ServiceTestHandler));
+    }
+}
+struct ServiceTestCaller;
+#[async_trait]
+impl Extension for ServiceTestCaller {
+    fn manifest(&self) -> ExtensionManifest {
+        [
+            "native.echo@1",
+            "worker-a.echo@1",
+            "worker-b.echo@1",
+            "python-guest.echo@1",
+        ]
+        .into_iter()
+        .fold(manifest("client").version("1"), |builder, key| {
+            builder.allow_service(key.parse().unwrap())
+        })
+        .build()
+    }
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.tool(
+            astrcode_extension_sdk::builder::tool("service_call")
+                .description("Service test")
+                .parameters(serde_json::json!({"type":"object"}))
+                .build(),
+            Arc::new(ServiceTestHandler),
+        );
+    }
+}
+#[async_trait]
+impl astrcode_extension_sdk::extension::ServiceHandler for ServiceTestHandler {
+    async fn invoke(
+        &self,
+        context: astrcode_extension_sdk::extension::ServiceContext,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, astrcode_extension_sdk::host::HostError> {
+        Ok(
+            serde_json::json!({"provider":"native", "caller":context.caller_extension_id(), "workspace":context.working_dir(), "session":context.session_id()}),
+        )
+    }
+}
+#[async_trait]
+impl astrcode_extension_sdk::extension::ToolHandler for ServiceTestHandler {
+    async fn plan(
+        &self,
+        _: astrcode_extension_sdk::extension::ToolPlanContext,
+    ) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::ExtensionService))
+    }
+    async fn execute(
+        &self,
+        context: astrcode_extension_sdk::extension::ToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        use astrcode_extension_sdk::extension::ExtensionCall;
+        let arguments: serde_json::Value = context.arguments()?;
+        let key = arguments["service"].as_str().unwrap().parse().unwrap();
+        let result = context
+            .host()
+            .services()?
+            .invoke(&key, arguments["input"].clone())
+            .await?;
+        Ok(astrcode_extension_sdk::tool::ToolResult::text(
+            result.to_string(),
+            false,
+            Default::default(),
+        )
+        .into())
+    }
+}
+#[tokio::test]
+async fn service_calls_cross_native_and_two_real_worker_processes() {
+    let router = minimal_router();
+    let guest = ensure_guest_built();
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    runner.bind_host_router(router.clone());
+    runner
+        .register(Arc::new(ServiceTestExtension))
+        .await
+        .unwrap();
+    runner.register(Arc::new(ServiceTestCaller)).await.unwrap();
+    for id in ["worker-a", "worker-b"] {
+        let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+            "extension_id":id, "protocol":{"s5r":"3.0"}, "command":[guest.to_string_lossy()], "env":{"ASTRCODE_TEST_SERVICE_ID":id}
+        })).unwrap();
+        let worker = S5rExtension::load(dir.path(), &manifest, router.clone())
+            .await
+            .unwrap();
+        runner.register(worker).await.unwrap();
+    }
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id":"python-guest", "protocol":{"s5r":"3.0"},
+        "command":["python3", repo.join("crates/astrcode-extensions/tests/s5r-service-guest.py")],
+        "env":{"PYTHONPATH":repo.join("sdks/python/src")}
+    }))
+    .unwrap();
+    runner
+        .register(
+            S5rExtension::load(dir.path(), &manifest, router.clone())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let tool = runner_tool(&runner, "service_call", "/tmp").await;
+    for (service, input, provider, caller) in [
+        ("native.echo@1", serde_json::json!({}), "native", "client"),
+        (
+            "worker-a.echo@1",
+            serde_json::json!({}),
+            "worker-a",
+            "client",
+        ),
+        (
+            "worker-a.echo@1",
+            serde_json::json!({"target":"native.echo@1"}),
+            "native",
+            "worker-a",
+        ),
+        (
+            "worker-a.echo@1",
+            serde_json::json!({"target":"worker-b.echo@1"}),
+            "worker-b",
+            "worker-a",
+        ),
+        (
+            "python-guest.echo@1",
+            serde_json::json!({}),
+            "python-guest",
+            "client",
+        ),
+        (
+            "python-guest.echo@1",
+            serde_json::json!({"target":"native.echo@1"}),
+            "native",
+            "python-guest",
+        ),
+        (
+            "python-guest.echo@1",
+            serde_json::json!({"target":"worker-b.echo@1"}),
+            "worker-b",
+            "python-guest",
+        ),
+    ] {
+        let result = tool
+            .execute(
+                serde_json::json!({"service":service,"input":input}),
+                &core_tool_ctx("/tmp"),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.content);
+        let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(output["provider"], provider);
+        assert_eq!(output["caller"], caller);
+        assert_eq!(output["workspace"], "/tmp");
+        assert_eq!(output["session"], "e2e-session");
+    }
+    drop(tool);
+    assert!(runner.shutdown().await.is_empty());
+}
+
+struct RequiredServiceCaller;
+impl Extension for RequiredServiceCaller {
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("client")
+            .version("1")
+            .dependency(
+                "worker-a.echo@1".parse().unwrap(),
+                astrcode_extension_sdk::extension::DependencyKind::Required,
+            )
+            .build()
+    }
+    fn register(&self, registrar: &mut Registrar) {
+        ServiceTestCaller.register(registrar);
+    }
+}
+struct ServiceTestSource {
+    directory: PathBuf,
+    enabled: std::sync::atomic::AtomicBool,
+}
+#[async_trait]
+impl ExtensionSource for ServiceTestSource {
+    async fn discover(
+        &self,
+        ctx: &ExtensionLoadContext,
+    ) -> astrcode_extensions::loader::DiscoverExtensionsResult {
+        use astrcode_extensions::loader::ExtensionCandidate;
+        let mut candidates = vec![ExtensionCandidate::ready(
+            "client",
+            "1",
+            Arc::new(RequiredServiceCaller),
+        )];
+        if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            let directory = self.directory.clone();
+            let router = ctx.host_router.clone().unwrap();
+            candidates.push(ExtensionCandidate::lazy("worker", "1", "worker-a", move || async move {
+                let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+                    "extension_id":"worker-a", "protocol":{"s5r":"3.0"}, "command":[ensure_guest_built()], "env":{"ASTRCODE_TEST_SERVICE_ID":"worker-a"}
+                })).unwrap();
+                S5rExtension::load(&directory, &manifest, router).await.map(|extension| extension as Arc<dyn Extension>)
+            }));
+        }
+        astrcode_extensions::loader::DiscoverExtensionsResult {
+            candidates,
+            failures: Vec::new(),
+        }
+    }
+}
+#[tokio::test]
+async fn service_source_disable_crash_and_recovery_preserve_dependency_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = ServiceTestSource {
+        directory: directory.path().into(),
+        enabled: std::sync::atomic::AtomicBool::new(true),
+    };
+    let router = minimal_router();
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(2)));
+    runner.bind_host_router(router.clone());
+    let context = ExtensionLoadContext {
+        working_dir: Some("/tmp".into()),
+        host_router: Some(router),
+        transport_profile: Default::default(),
+    };
+    assert!(
+        sync_extension_sources(&runner, &context, &[&source])
+            .await
+            .is_empty()
+    );
+    source
+        .enabled
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        sync_extension_sources(&runner, &context, &[&source])
+            .await
+            .is_empty()
+    );
+    let snapshot = runner.registry_snapshot().await;
+    assert_eq!(snapshot.extensions.len(), 1);
+    assert!(!snapshot.extensions[0].blocked_reasons.is_empty());
+    source
+        .enabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        sync_extension_sources(&runner, &context, &[&source])
+            .await
+            .is_empty()
+    );
+    let tool = runner_tool(&runner, "service_call", "/tmp").await;
+    let result = tool
+        .execute(
+            serde_json::json!({"service":"worker-a.echo@1", "input":"crash"}),
+            &core_tool_ctx("/tmp"),
+        )
+        .await;
+    assert!(result.is_err() || result.unwrap().is_error);
+    drop(tool);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = runner.registry_snapshot().await;
+            if snapshot
+                .extensions
+                .iter()
+                .any(|d| d.id == "client" && !d.blocked_reasons.is_empty())
+            {
+                assert!(snapshot.extensions.iter().any(|d| d.id == "worker-a"
+                    && d.runtime_state
+                        == astrcode_extensions::runner::ExtensionRuntimeState::Failed));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        sync_extension_sources(&runner, &context, &[&source])
+            .await
+            .is_empty()
+    );
+    let tool = runner_tool(&runner, "service_call", "/tmp").await;
+    let result = tool
+        .execute(
+            serde_json::json!({"service":"worker-a.echo@1", "input":{}}),
+            &core_tool_ctx("/tmp"),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    drop(tool);
+    assert!(runner.shutdown().await.is_empty());
 }

@@ -789,3 +789,34 @@ RUST_LOG=astrcode_extensions=debug astrcode ...
 ```
 
 若工具未出现：检查 `extension_id`、握手是否成功、是否声明 `session_control`、handler 是否在 `worker.tool()` 注册。
+
+## Plugin services
+
+Declare Required/Optional dependencies with the manifest builder and register implementations
+with `Registrar::service("example.lookup@1", handler)`. Registration validates literal keys;
+callers use `ServiceKey::new("example.lookup", 1)?` or parse `"example.lookup@1"`. A dependency
+also grants permission to call that exact service. Use `allow_service(key)` for permission without
+an activation dependency. Duplicate providers are blocked rather than selected by load order.
+
+A `ServiceHandler` receives `ServiceContext` and JSON input and returns JSON or `HostError`.
+Read the direct caller with `caller_extension_id()` and scoped facts with `working_dir()` and
+`session_id()`. Implement the same input validation as any other external boundary. Do not read
+identity or workspace authority from business input. Obtain provider-owned host capabilities
+through `ExtensionCall::host()`.
+
+Call `host.services()?.invoke(&key, input).await` from native handlers. Rust workers use
+`HostClient::services().invoke(&key, input).await`, `Worker::service(key, service_handler(...))`,
+`Worker::dependency(key, kind)` and `Worker::allow_service(key)`. Python exposes `ServiceKey`,
+`DependencyKind`, `worker.service(key)` (including decorator form), `worker.dependency(...)`,
+`worker.allow_service(...)` and `HostClient.services().invoke(key, input)`. Worker background
+handles also expose `services()`, with the instance's detached scope.
+
+Tools must declare `HostResource::ExtensionService` plus any resources needed by the provider's
+nested host operations. Service permission does not expand an approved tool resource lease.
+Do not call services in native `start` or worker `on_activate`: Required dependencies are resolved
+before initialization, but the service call surface opens only after the candidate batch commits.
+Optional dependencies can return `backend_unavailable`; handle that result to degrade locally.
+
+Workers using services require `extension_services_v1`; older workers without service declarations
+continue to load. See [the service design](architecture/extension-services.md) for lifecycle,
+snapshot and wire compatibility rules.

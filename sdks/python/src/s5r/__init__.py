@@ -17,7 +17,9 @@ Quick start::
     worker.run_stdio()
 """
 
+from .service import ServiceKey, DependencyKind
 from .context import (
+    WorkerServiceContext,
     CancelToken,
     WorkerCallContext,
     WorkerCommandContext,

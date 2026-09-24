@@ -24,6 +24,7 @@ pub(super) struct ExtensionGenerationEntry {
     pub(super) instance_id: crate::host_router::ExtensionInstanceId,
     pub(super) generation_gate: crate::host_router::ExtensionGenerationGate,
     pub(super) capabilities: Arc<[ExtensionCapability]>,
+    pub(super) service_permissions: std::collections::BTreeSet<ServiceKey>,
     pub(super) custom_event_declarations: Vec<CustomEventDeclaration>,
     pub(super) tasks: ExtensionTasks,
     pub(super) admission: ExtensionAdmission,
@@ -57,6 +58,7 @@ pub(super) struct HttpRouteEntry {
 #[allow(clippy::type_complexity)]
 pub(super) struct HandlerIndex {
     pub(super) generation: u64,
+    pub(super) services: std::collections::BTreeMap<ServiceKey, super::service::ServiceEntry>,
     pub(super) tool_input_transform: Vec<ToolUseExtensionHandler<dyn ToolInputTransformHandler>>,
     pub(super) pre_tool_use: Vec<ToolUseExtensionHandler<dyn PreToolUseHandler>>,
     pub(super) post_tool_use: Vec<ToolExtensionHandler<dyn PostToolUseHandler>>,
@@ -82,7 +84,11 @@ pub(super) struct HandlerIndex {
     _publication_leases: Vec<ExtensionIndexLease>,
 }
 
-pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u64) -> HandlerIndex {
+pub(super) fn build_handler_index<'a>(
+    extensions: impl IntoIterator<Item = &'a HostedExtension>,
+    generation: u64,
+) -> HandlerIndex {
+    let mut services = std::collections::BTreeMap::new();
     let mut tool_input_transform = Vec::new();
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
@@ -103,9 +109,8 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut status_items = Vec::new();
     let mut http_routes = Vec::new();
     let mut indexed_extensions = HashMap::new();
-    let mut publication_leases = Vec::with_capacity(extensions.len());
-
-    let mut ordered_extensions = extensions.iter().collect::<Vec<_>>();
+    let mut ordered_extensions = extensions.into_iter().collect::<Vec<_>>();
+    let mut publication_leases = Vec::with_capacity(ordered_extensions.len());
     ordered_extensions.sort_by(|left, right| left.manifest.id().cmp(right.manifest.id()));
 
     for hosted in ordered_extensions {
@@ -117,10 +122,20 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
             instance_id: hosted.instance_id,
             generation_gate: hosted.generation_gate.clone(),
             capabilities: Arc::from(manifest.capabilities()),
+            service_permissions: manifest.author.effective_service_permissions(),
             custom_event_declarations: registrations.custom_event_declarations().to_vec(),
             tasks: hosted.tasks.clone(),
             admission: hosted.supervisor.admission(),
         });
+        for registration in registrations.services() {
+            services.insert(
+                registration.key().clone(),
+                super::service::ServiceEntry {
+                    handler: registration.handler().clone(),
+                    generation: generation_entry.clone(),
+                },
+            );
+        }
         publication_leases.push(hosted.publication_lease.acquire());
         for registration in registrations.tool_input_transforms() {
             tool_input_transform.push((
@@ -245,6 +260,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     }
 
     HandlerIndex {
+        services,
         generation,
         tool_input_transform: handlers_by_priority(tool_input_transform),
         pre_tool_use: handlers_by_priority(pre_tool_use),

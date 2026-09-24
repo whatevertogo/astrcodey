@@ -431,3 +431,13 @@ pub fn tool_plan_context(
     .with_turn_id(turn_id)
     .with_call_id(call_id)
 }
+
+/// Constructs a service call after the host has resolved and authorized its binding.
+pub fn service_context(
+    call: super::ExtensionCallContext,
+    caller: String,
+    working_dir: Option<std::path::PathBuf>,
+    session_id: Option<String>,
+) -> super::ServiceContext {
+    super::ServiceContext::from_runtime(call, caller, working_dir, session_id)
+}

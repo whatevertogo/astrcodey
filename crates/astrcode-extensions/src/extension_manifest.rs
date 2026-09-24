@@ -24,6 +24,9 @@ use astrcode_extension_sdk::{
 /// Host-normalized registration derived from a typed S5R initialize manifest.
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionRegistration {
+    pub(crate) services: Vec<astrcode_extension_sdk::extension::ServiceKey>,
+    pub(crate) service_dependencies: Vec<astrcode_extension_sdk::extension::ServiceDependency>,
+    pub(crate) service_permissions: Vec<astrcode_extension_sdk::extension::ServiceKey>,
     pub(crate) extension_id: String,
     pub(crate) version: String,
     pub(crate) required_transport_features:
@@ -116,6 +119,13 @@ pub(crate) fn validate_registration_features(
     registration: &ExtensionRegistration,
     negotiated_features: &BTreeSet<FeatureName>,
 ) -> Result<(), String> {
+    if (!registration.services.is_empty()
+        || !registration.service_dependencies.is_empty()
+        || !registration.service_permissions.is_empty())
+        && !negotiated_features.contains(&FeatureName::extension_services_v1())
+    {
+        return Err("plugin services require extension_services_v1".into());
+    }
     let uses_custom_events = !registration.custom_events.is_empty()
         || !registration.custom_event_subscriptions.is_empty();
     if uses_custom_events && !negotiated_features.contains(&FeatureName::custom_event_v1()) {
@@ -197,7 +207,25 @@ fn registration_from_manifest(
     let custom_events = manifest.custom_events;
     let custom_event_subscriptions = manifest.custom_event_subscriptions;
 
+    let services = manifest
+        .services
+        .into_iter()
+        .map(|key| key.parse())
+        .collect::<Result<_, String>>()?;
+    let service_dependencies = manifest
+        .service_dependencies
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<_, String>>()?;
+    let service_permissions = manifest
+        .service_permissions
+        .into_iter()
+        .map(|key| key.parse())
+        .collect::<Result<_, String>>()?;
     Ok(ExtensionRegistration {
+        services,
+        service_dependencies,
+        service_permissions,
         extension_id,
         version,
         required_transport_features,

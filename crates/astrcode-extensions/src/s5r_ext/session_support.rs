@@ -194,6 +194,9 @@ mod tests {
                 crate::host_router::HostBackends::default(),
             )),
             registration: ExtensionRegistration {
+                services: Vec::new(),
+                service_dependencies: Vec::new(),
+                service_permissions: Vec::new(),
                 extension_id: "ext".into(),
                 version: "0.0.0".into(),
                 required_transport_features: vec![],

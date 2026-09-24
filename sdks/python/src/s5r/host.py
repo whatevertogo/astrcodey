@@ -21,6 +21,7 @@ from .protocol import TERMINAL_STREAM_EVENTS
 
 
 class HostOperation:
+    SERVICE_INVOKE = "astrcode.service.invoke"
     """Stable wire names of every host operation (the handshake catalog)."""
 
     EVENT_EMIT = "astrcode.event.emit"
@@ -411,6 +412,17 @@ class NetworkClient:
         return await _call(HostOperation.NETWORK_CLIENT, request)
 
 
+class ServiceClient:
+    def __init__(self, invoke=_call):
+        self._invoke = invoke
+
+    async def invoke(self, service, input: Any) -> Any:
+        from .service import ServiceKey
+        if not isinstance(service, ServiceKey):
+            raise TypeError("service must be a ServiceKey")
+        return await self._invoke(HostOperation.SERVICE_INVOKE, {"service": str(service), "input": input})
+
+
 class ExtensionHttpClient:
     async def dispatch_public(self, request: Mapping[str, Any]) -> Any:
         return await _call(HostOperation.EXTENSION_HTTP_PUBLIC, request)
@@ -437,6 +449,9 @@ class BackgroundHost:
 
     def host_supports(self, operation: str) -> bool:
         return operation in self._host_operations
+
+    def services(self) -> ServiceClient:
+        return ServiceClient(self._invoke)
 
     def root_sessions(self) -> BackgroundRootSessionClient:
         return BackgroundRootSessionClient(self._invoke)
@@ -543,6 +558,10 @@ class HostClient:
     @staticmethod
     def network() -> NetworkClient:
         return _NETWORK
+
+    @staticmethod
+    def services() -> ServiceClient:
+        return ServiceClient()
 
     @staticmethod
     def extension_http() -> ExtensionHttpClient:

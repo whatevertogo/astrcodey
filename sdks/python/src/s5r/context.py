@@ -48,6 +48,13 @@ class WorkerCallContext:
 
 
 @dataclass(frozen=True)
+class WorkerServiceContext(WorkerCallContext):
+    caller_extension_id: str
+    working_dir: str | None
+    session_id: str | None
+
+
+@dataclass(frozen=True)
 class WorkerInvocationContext:
     """Host-attributed facts guaranteed for a session/workspace invocation."""
 

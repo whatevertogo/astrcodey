@@ -33,6 +33,8 @@ pub fn manifest(id: impl Into<String>) -> ExtensionManifestBuilder {
         description: None,
         capabilities: Vec::new(),
         required_transport_features: Vec::new(),
+        dependencies: Vec::new(),
+        service_permissions: Vec::new(),
     }
 }
 
@@ -43,6 +45,8 @@ pub struct ExtensionManifestBuilder {
     description: Option<String>,
     capabilities: Vec<ExtensionCapability>,
     required_transport_features: Vec<TransportFeature>,
+    dependencies: Vec<crate::extension::ServiceDependency>,
+    service_permissions: Vec<crate::extension::ServiceKey>,
 }
 
 impl ExtensionManifestBuilder {
@@ -75,6 +79,21 @@ impl ExtensionManifestBuilder {
         self
     }
 
+    pub fn dependency(
+        mut self,
+        service: crate::extension::ServiceKey,
+        kind: crate::extension::DependencyKind,
+    ) -> Self {
+        self.dependencies
+            .push(crate::extension::ServiceDependency { service, kind });
+        self
+    }
+    pub fn allow_service(mut self, service: crate::extension::ServiceKey) -> Self {
+        if !self.service_permissions.contains(&service) {
+            self.service_permissions.push(service);
+        }
+        self
+    }
     pub fn build(self) -> ExtensionManifest {
         ExtensionManifest::new(
             self.id,
@@ -84,6 +103,7 @@ impl ExtensionManifestBuilder {
             self.capabilities,
             self.required_transport_features,
         )
+        .with_service_access(self.dependencies, self.service_permissions)
     }
 
     pub fn build_checked(self) -> Result<ExtensionManifest, ExtensionManifestError> {

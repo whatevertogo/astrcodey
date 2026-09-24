@@ -274,6 +274,14 @@ typed_hook_handler!(
     }
 );
 
+pub fn service_handler<F, Fut>(f: F) -> super::registry::ServiceHandlerFn
+where
+    F: Fn(Value, super::registry::WorkerServiceContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |input, context| Box::pin(f(input, context)))
+}
+
 #[cfg(test)]
 mod tests {
     use astrcode_extension_sdk::wire::HandlerEffect;

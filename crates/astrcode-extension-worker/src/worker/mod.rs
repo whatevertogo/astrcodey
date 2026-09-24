@@ -13,8 +13,8 @@ pub use builder::{
     custom_event_handler, custom_event_handler_args, hook_handler, hook_handler_args, http_handler,
     parse_hook_input, parse_tool_arguments, post_compact_handler, post_tool_use_handler,
     pre_compact_handler, pre_tool_use_handler, prompt_build_handler, provider_contribution_handler,
-    provider_handler, tool_handler, tool_handler_args, tool_input_transform_handler, tool_planner,
-    tool_planner_args,
+    provider_handler, service_handler, tool_handler, tool_handler_args,
+    tool_input_transform_handler, tool_planner, tool_planner_args,
 };
 pub use host::{
     BackgroundHost, BackgroundRootSessionClient, EventClient, ExtensionHttpClient, HostClient,
@@ -46,8 +46,9 @@ pub use host::{
 };
 pub use registry::{
     CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn, HttpHandlerFn,
-    ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext, WorkerCommandInvocation,
-    WorkerCustomEventContext, WorkerInvocationContext, WorkerToolPlanContext,
+    ServiceHandlerFn, ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
+    WorkerCommandInvocation, WorkerCustomEventContext, WorkerInvocationContext,
+    WorkerServiceContext, WorkerToolPlanContext,
 };
 use serde_json::json;
 
@@ -134,6 +135,26 @@ impl std::ops::DerefMut for HookRegistration<'_> {
 }
 
 impl Worker {
+    pub fn service(
+        &mut self,
+        key: crate::extension::ServiceKey,
+        handler: registry::ServiceHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry.register_service(key, handler)?;
+        Ok(self)
+    }
+    pub fn dependency(
+        &mut self,
+        key: crate::extension::ServiceKey,
+        kind: crate::extension::DependencyKind,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry.declare_service_dependency(key, kind)?;
+        Ok(self)
+    }
+    pub fn allow_service(&mut self, key: crate::extension::ServiceKey) -> &mut Self {
+        self.registry.allow_service(key);
+        self
+    }
     pub fn new(extension_id: impl Into<String>, version: impl Into<String>) -> Self {
         let extension_id = extension_id.into();
         Self {
@@ -381,11 +402,20 @@ impl Worker {
         let extension_id = self.registry.extension_id().to_owned();
         let supported = BTreeSet::from([
             FeatureName::nested_invoke_v1(),
+            FeatureName::extension_services_v1(),
             FeatureName::model_stream_v1(),
             FeatureName::custom_event_v1(),
         ]);
         let mut initialization = WorkerInitialization::new(self.registry.take_manifest());
         initialization.supported_features = supported;
+        if !initialization.manifest.services.is_empty()
+            || !initialization.manifest.service_dependencies.is_empty()
+            || !initialization.manifest.service_permissions.is_empty()
+        {
+            initialization
+                .required_features
+                .insert(FeatureName::extension_services_v1());
+        }
         let activation = self.activation.take();
         let shutdown = self.shutdown.take();
         let peer = V3Peer::new(

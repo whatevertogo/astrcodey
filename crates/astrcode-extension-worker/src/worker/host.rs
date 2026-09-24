@@ -197,7 +197,25 @@ pub struct BackgroundHost {
     transport: BoundHostTransport,
 }
 
+pub struct BackgroundServiceClient {
+    inner: crate::host::internal::TypedServiceClient<BoundHostTransport>,
+}
+impl BackgroundServiceClient {
+    pub async fn invoke(
+        &self,
+        service: &crate::extension::ServiceKey,
+        input: Value,
+    ) -> Result<Value, ErrorPayload> {
+        self.inner.invoke(service, input).await
+    }
+}
 impl BackgroundHost {
+    pub fn services(&self) -> BackgroundServiceClient {
+        BackgroundServiceClient {
+            inner: crate::host::internal::TypedServiceClient::new(self.transport.clone()),
+        }
+    }
+
     pub(crate) fn new(api: Arc<dyn HostApi>) -> Self {
         Self {
             transport: BoundHostTransport { api },
@@ -317,6 +335,9 @@ impl HostClient {
         NetworkClient::new(WorkerHostTransport)
     }
 
+    pub const fn services() -> crate::host::internal::TypedServiceClient<WorkerHostTransport> {
+        crate::host::internal::TypedServiceClient::new(WorkerHostTransport)
+    }
     pub const fn extension_http() -> ExtensionHttpClient {
         ExtensionHttpClient::new(WorkerHostTransport)
     }
@@ -652,6 +673,7 @@ mod host_tests {
             HostOperation::ProcessKill,
             HostOperation::ProcessList,
             HostOperation::NetworkClient,
+            HostOperation::ServiceInvoke,
             HostOperation::ExtensionHttpPublic,
             HostOperation::SessionRootCreate,
             HostOperation::SessionRootSubmitTurn,
@@ -739,6 +761,10 @@ mod host_tests {
             expect_backend_error(HostClient::process().list()).await;
             expect_backend_error(
                 HostClient::network().send(HostNetworkRequest::get("https://example.com")),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::services().invoke(&"test@1".parse().unwrap(), serde_json::json!({})),
             )
             .await;
             expect_backend_error(HostClient::extension_http().dispatch_public(

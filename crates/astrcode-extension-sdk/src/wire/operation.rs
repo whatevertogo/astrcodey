@@ -105,6 +105,17 @@ pub trait HostOp: Send + Sync + 'static {
 }
 
 host_operations! {
+    ServiceInvoke {
+        name: "astrcode.service.invoke",
+        required: None,
+        context: None,
+        group: Service,
+        backend: ServiceDispatcher,
+        request: crate::wire::service::ServiceInvokeRequest,
+        response: serde_json::Value,
+        description: "Invoke a declared plugin service",
+        cancelable: true,
+    }
     EventEmit {
         name: "astrcode.event.emit",
         required: Some(ExtensionCapability::EmitCustomEvents),
@@ -633,6 +644,7 @@ pub enum HostOperationGroup {
     Process,
     Network,
     ExtensionHttp,
+    Service,
 }
 
 /// Backend availability predicate for an operation: the concrete host-side dependency the
@@ -654,6 +666,7 @@ pub enum HostBackendRequirement {
     ProcessWorkingDir,
     NetworkService,
     PublicHttpDispatcher,
+    ServiceDispatcher,
 }
 
 /// Canonical metadata shared by authorization, host dispatch, and the S5R operation catalog.
