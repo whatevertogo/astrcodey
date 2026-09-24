@@ -419,7 +419,6 @@ impl PreparedExtensionGeneration {
         runner.registry.publication.lock().pending_generation = Some(generation);
         for hosted in &next {
             hosted.public_http_dispatcher.bind(&index);
-            hosted.service_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
         *active = next;
@@ -430,9 +429,17 @@ impl PreparedExtensionGeneration {
         publish(generation);
         for hosted in active.iter() {
             hosted.generation_gate.activate();
+        }
+        // Retained background clients keep the old published view until the replacement is
+        // callable.
+        let previous_index = runner.registry.index.swap(Arc::clone(&index));
+        for hosted in active.iter() {
+            hosted.service_dispatcher.bind(&index);
+        }
+        drop(previous_index);
+        for hosted in active.iter() {
             activate_extension_tasks(&hosted.tasks);
         }
-        runner.registry.index.store(index);
         drop(fresh_operation_guards);
         drop(active);
         drop(lifecycle);
@@ -1515,11 +1522,14 @@ impl ExtensionRunner {
         let index = Arc::new(build_handler_index(extensions, generation));
         for hosted in extensions {
             hosted.public_http_dispatcher.bind(&index);
-            hosted.service_dispatcher.bind(&index);
             hosted.supervisor.mark_ready(generation);
         }
         before_stable(generation);
-        self.registry.index.store(index);
+        let previous_index = self.registry.index.swap(Arc::clone(&index));
+        for hosted in extensions {
+            hosted.service_dispatcher.bind(&index);
+        }
+        drop(previous_index);
     }
 
     /// Composition-root callback for runtime changes outside a configuration transaction.

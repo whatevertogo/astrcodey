@@ -946,8 +946,7 @@ impl HandlerRegistry {
                 format!("invalid handler invocation: {error}"),
             )
         })?;
-        let facts = WorkerCallFacts::from_event(self.extension_id.clone(), token, &request.event)?;
-        self.dispatch_handler(&request.handler_id, request.event, facts)
+        self.dispatch_handler(&request.handler_id, request.event, token)
             .await
     }
 
@@ -955,7 +954,7 @@ impl HandlerRegistry {
         &self,
         handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
-        facts: WorkerCallFacts,
+        token: CancelToken,
     ) -> Result<HandlerResult, ErrorPayload> {
         let (owner, kind, name) = handler_id.parts().ok_or_else(|| {
             ErrorPayload::new(
@@ -969,8 +968,11 @@ impl HandlerRegistry {
                 format!("unknown handler: {handler_id}"),
             ));
         }
+        let facts =
+            || WorkerCallFacts::from_event(self.extension_id.clone(), token.clone(), &event);
         match kind {
             astrcode_extension_sdk::wire::HandlerKind::Tool => {
+                let facts = facts()?;
                 let tool = self.tools.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -1003,6 +1005,7 @@ impl HandlerRegistry {
                 }
             },
             astrcode_extension_sdk::wire::HandlerKind::Hook => {
+                let facts = facts()?;
                 if let Some(handler) = self.hooks.get(name) {
                     handler(event, facts.into_invocation("hook")?).await
                 } else if let Some(handler) = self.continuation_hooks.get(name) {
@@ -1015,6 +1018,7 @@ impl HandlerRegistry {
                 }
             },
             astrcode_extension_sdk::wire::HandlerKind::Command => {
+                let facts = facts()?;
                 let handler = self.commands.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -1032,7 +1036,10 @@ impl HandlerRegistry {
                         ErrorPayload::new(WireErrorCode::InvalidInput, e.to_string())
                     })?;
                 let context = WorkerServiceContext {
-                    call: facts.call,
+                    call: WorkerCallContext {
+                        extension_id: self.extension_id.clone(),
+                        cancel_token: token,
+                    },
                     caller: request.caller_extension_id,
                     working_dir: request.working_dir.map(Into::into),
                     session_id: request.session_id,
@@ -1041,6 +1048,7 @@ impl HandlerRegistry {
                 Ok(HandlerResult::effect(HandlerEffect::Ok, result))
             },
             astrcode_extension_sdk::wire::HandlerKind::Http => {
+                let facts = facts()?;
                 let handler = self.http_routes.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -1063,6 +1071,7 @@ impl HandlerRegistry {
                 Ok(HandlerResult::effect(HandlerEffect::HttpResponse, data))
             },
             astrcode_extension_sdk::wire::HandlerKind::Event => {
+                let facts = facts()?;
                 let handler = self.custom_events.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,

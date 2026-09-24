@@ -1027,7 +1027,7 @@ async fn service_calls_cross_native_and_two_real_worker_processes() {
         ("native.echo@1", serde_json::json!({}), "native", "client"),
         (
             "worker-a.echo@1",
-            serde_json::json!({}),
+            serde_json::json!({"session_id": 42, "working_dir": {}, "turn_id": [], "tool_call_id": false}),
             "worker-a",
             "client",
         ),
@@ -1045,7 +1045,7 @@ async fn service_calls_cross_native_and_two_real_worker_processes() {
         ),
         (
             "python-guest.echo@1",
-            serde_json::json!({}),
+            serde_json::json!({"session_id": 42, "working_dir": {}, "turn_id": [], "tool_call_id": false}),
             "python-guest",
             "client",
         ),

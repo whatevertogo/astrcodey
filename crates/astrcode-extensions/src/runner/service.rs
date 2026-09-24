@@ -186,6 +186,7 @@ mod tests {
         failure: tokio::sync::watch::Sender<Option<String>>,
         id: &'static str,
         forward: Option<&'static str>,
+        dependency_kind: DependencyKind,
         marker: &'static str,
         starts: Arc<parking_lot::Mutex<Vec<String>>>,
         hosts: Arc<parking_lot::Mutex<Vec<ExtensionHost>>>,
@@ -198,7 +199,7 @@ mod tests {
         fn manifest(&self) -> ExtensionManifest {
             let mut builder = manifest(self.id).version("1");
             if let Some(forward) = self.forward {
-                builder = builder.dependency(forward.parse().unwrap(), DependencyKind::Required);
+                builder = builder.dependency(forward.parse().unwrap(), self.dependency_kind);
             }
             builder
                 .allow_service(format!("{}@1", self.id).parse().unwrap())
@@ -304,6 +305,7 @@ mod tests {
                     failure: tokio::sync::watch::channel(None).0,
                     id,
                     forward,
+                    dependency_kind: DependencyKind::Required,
                     marker,
                     starts: starts.clone(),
                     hosts: hosts.clone(),
@@ -322,6 +324,80 @@ mod tests {
             .await
             .unwrap()
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_optional_consumer_uses_published_services_during_commit() {
+        let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(2)));
+        let starts = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let hosts = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let source = |id, forward, marker| SourceGenerationEntry::Start {
+            extension: Arc::new(Probe {
+                failure: tokio::sync::watch::channel(None).0,
+                id,
+                forward,
+                dependency_kind: DependencyKind::Optional,
+                marker,
+                starts: starts.clone(),
+                hosts: hosts.clone(),
+            }),
+            key: id.into(),
+            fingerprint: marker.into(),
+            config: json!({}),
+        };
+        runner
+            .prepare_source_generation(
+                runner.begin_source_transaction().await,
+                vec![
+                    source("base", None, "old"),
+                    source("optional", Some("base@1"), "same"),
+                ],
+                None,
+            )
+            .await
+            .unwrap()
+            .commit_with(|_| {})
+            .await;
+        let services = hosts.lock()[1].services().unwrap();
+        let candidate = runner
+            .prepare_source_generation(
+                runner.begin_source_transaction().await,
+                vec![
+                    source("base", None, "new"),
+                    SourceGenerationEntry::Retain {
+                        id: "optional".into(),
+                        key: "optional".into(),
+                        fingerprint: "same".into(),
+                    },
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+        let (entered, publishing) = tokio::sync::oneshot::channel();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let release = barrier.clone();
+        let commit = tokio::spawn(async move {
+            candidate
+                .commit_with(|_| {
+                    entered.send(()).unwrap();
+                    release.wait();
+                })
+                .await;
+        });
+        publishing.await.unwrap();
+        let key = "base@1".parse().unwrap();
+        let during = services.invoke(&key, json!({})).await;
+        barrier.wait();
+        commit.await.unwrap();
+        assert_eq!(during.unwrap()["marker"], "old");
+        assert_eq!(
+            services.invoke(&key, json!({})).await.unwrap()["marker"],
+            "new"
+        );
+        drop(services);
+        hosts.lock().clear();
+        assert!(runner.shutdown().await.is_empty());
+    }
+
     #[tokio::test]
     async fn service_calls_preserve_permissions_context_snapshots_and_dependency_recovery() {
         let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(2)));

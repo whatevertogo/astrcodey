@@ -813,6 +813,8 @@ class Worker:
         owner, kind, name = parts
         if owner != self._extension_id:
             raise S5rError.of(WireErrorCode.UNKNOWN_HANDLER, f"unknown handler: {handler_id}")
+        if kind == "service":
+            return await self._dispatch_service(name, event, token)
         facts = _CallFacts.from_event(event)
         if kind == "tool":
             return await self._dispatch_tool(name, event, facts, token)
@@ -820,8 +822,6 @@ class Worker:
             return await self._dispatch_hook(name, event, facts, token)
         if kind == "command":
             return await self._dispatch_command(name, event, facts, token)
-        if kind == "service":
-            return await self._dispatch_service(name, event, token)
         if kind == "http":
             return await self._dispatch_http(name, event, token)
         return await self._dispatch_custom_event(name, event, facts, token)

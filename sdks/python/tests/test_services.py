@@ -26,9 +26,11 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(init.output["required_features"], ["extension_services_v1"])
         self.assertEqual(init.output["manifest"]["services"], [str(key)])
         self.assertTrue((await host.activate()).is_success)
-        await host.invoke_handler("service-1", f"{EXT_ID}:service:{key}", {"caller_extension_id": "client", "working_dir": "/trusted", "session_id": None, "input": {"caller_extension_id": "forged"}})
+        business_input = {"caller_extension_id": "forged", "session_id": 42, "working_dir": {}, "turn_id": [], "tool_call_id": False}
+        await host.invoke_handler("service-1", f"{EXT_ID}:service:{key}", {"caller_extension_id": "client", "working_dir": "/trusted", "session_id": None, "input": business_input})
         result = await host.recv()
         self.assertTrue(result.is_success)
+        self.assertEqual(result.output["data"]["input"], business_input)
         self.assertEqual(result.output["data"]["caller"], "client")
         self.assertEqual(result.output["data"]["workspace"], "/trusted")
         await host.shutdown()
