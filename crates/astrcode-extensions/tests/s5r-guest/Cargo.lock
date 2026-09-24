@@ -15,16 +15,17 @@ dependencies = [
 name = "astrcode-core"
 version = "0.3.16"
 dependencies = [
+ "astrcode-paths",
  "async-trait",
  "chrono",
- "dirs",
+ "fs2",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",
- "tracing",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]
@@ -34,7 +35,6 @@ dependencies = [
  "astrcode-core",
  "async-trait",
  "base64",
- "fs2",
  "futures-util",
  "serde",
  "serde_json",
@@ -43,7 +43,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "windows-sys",
 ]
 
 [[package]]
@@ -51,12 +50,34 @@ name = "astrcode-extension-worker"
 version = "0.3.16"
 dependencies = [
  "astrcode-extension-sdk",
+ "astrcode-s5r-runtime",
  "async-trait",
  "futures-util",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "astrcode-paths"
+version = "0.3.16"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
+name = "astrcode-s5r-runtime"
+version = "0.3.16"
+dependencies = [
+ "astrcode-extension-sdk",
+ "async-trait",
+ "futures-util",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

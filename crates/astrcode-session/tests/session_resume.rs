@@ -7,7 +7,7 @@ use std::sync::{
 
 use astrcode_core::{
     event::{PersistedSystemPrompt, SystemPromptSource},
-    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits, testing::NeverLlm},
     tool::{
         SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
     },
@@ -31,8 +31,6 @@ use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
-
-struct UnusedLlm;
 
 #[derive(Default)]
 struct RecordingToolsLlm {
@@ -118,23 +116,6 @@ impl PromptContributor for FailingPromptContributor {
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for UnusedLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        unreachable!("test does not run a turn")
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
-    }
-}
-
-#[async_trait::async_trait]
 impl LlmProvider for RecordingToolsLlm {
     async fn generate_request(
         &self,
@@ -163,7 +144,7 @@ impl LlmProvider for RecordingToolsLlm {
 }
 
 fn test_caps() -> Arc<SessionRuntimeServices> {
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not run a turn"));
     common::test_runtime_services(llm)
 }
 
@@ -339,7 +320,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
 #[tokio::test]
 async fn parent_and_spawned_child_each_emit_session_start_once() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not run a turn"));
     let hooks = Arc::new(RecordingLifecycleHooks(AtomicUsize::new(0)));
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(
@@ -398,7 +379,7 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
 #[tokio::test]
 async fn prompt_failure_does_not_create_session() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not run a turn"));
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(
         Arc::clone(&llm),
@@ -433,7 +414,7 @@ async fn prompt_failure_does_not_create_session() {
 #[tokio::test]
 async fn inherited_initial_prompt_survives_initialization_and_reopen() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not run a turn"));
     let caps = common::test_runtime_services(Arc::clone(&llm));
     let session_id = new_session_id();
     let inherited = PersistedSystemPrompt {

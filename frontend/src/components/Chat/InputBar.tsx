@@ -471,7 +471,10 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
           closeArgTrigger()
           return
         }
-        if (argItems.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        if (
+          argItems.length > 0 &&
+          (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+        ) {
           event.preventDefault()
           return
         }
@@ -490,7 +493,15 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         submit().catch((err) => console.error('submit failed:', err))
       }
     },
-    [submit, isComposing, slashTriggerVisible, closeSlashTrigger, argTrigger, argItems.length, closeArgTrigger]
+    [
+      submit,
+      isComposing,
+      slashTriggerVisible,
+      closeSlashTrigger,
+      argTrigger,
+      argItems.length,
+      closeArgTrigger,
+    ]
   )
 
   // Abort 防抖处理：500ms 内只允许一次 abort 调用

@@ -12,7 +12,7 @@ use astrcode_core::{
     event::DurableEventPayload,
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage,
-        LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
+        LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount, testing::ScriptedLlm,
     },
     tool::ToolDefinition,
     types::{new_message_id, new_turn_id},
@@ -38,56 +38,38 @@ impl ProviderMessages for SessionReadModel {
     }
 }
 
-struct ToolLoopLlm {
-    calls: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for ToolLoopLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let round = self.calls.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        if round == 0 {
-            let _ = tx.send(LlmEvent::ToolCallStart {
+/// 第一轮请求两个工具,第二轮给出最终回答。
+fn tool_loop_llm() -> ScriptedLlm {
+    ScriptedLlm::new(vec![
+        vec![
+            LlmEvent::ToolCallStart {
                 call_id: "call-a".into(),
                 name: "unknown_tool".into(),
                 arguments: "{}".into(),
-            });
-            let _ = tx.send(LlmEvent::ToolCallStart {
+            },
+            LlmEvent::ToolCallStart {
                 call_id: "call-b".into(),
                 name: "unknown_tool".into(),
                 arguments: "{}".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "tool_calls".into(),
-            });
-        } else {
-            let _ = tx.send(LlmEvent::ContentDelta {
+            },
+        ],
+        vec![
+            LlmEvent::ContentDelta {
                 delta: "final answer".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "stop".into(),
-            });
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 4096,
-        }
-    }
+            },
+        ],
+    ])
 }
 
 #[tokio::test]
 async fn ssot_tool_loop_projection_matches_provider_messages() {
-    let llm = Arc::new(ToolLoopLlm {
-        calls: AtomicUsize::new(0),
-    });
+    let llm = Arc::new(tool_loop_llm());
     let session = common::spawn_session(llm).await;
     let turn_id = new_turn_id();
     let handle = session
@@ -117,8 +99,6 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
         "expected final assistant text in projection"
     );
 }
-
-struct UsageLlm;
 
 struct FailingGenerateLlm;
 
@@ -167,14 +147,10 @@ async fn provider_start_error_is_persisted_as_durable_error() {
     assert!(errors[0].contains("Too Many Requests"));
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for UsageLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::Usage {
+/// 携带完整 token usage;上下文窗口 12345 与断言耦合。
+fn usage_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::Usage {
             usage: LlmTokenUsage {
                 input_tokens: Some(100),
                 cached_input_tokens: Some(64),
@@ -185,26 +161,22 @@ impl LlmProvider for UsageLlm {
                 total_tokens: Some(120),
                 source: None,
             },
-        });
-        let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
-        let _ = tx.send(LlmEvent::Done {
+        },
+        LlmEvent::ContentDelta { delta: "ok".into() },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 12345,
-            max_output_tokens: 4096,
-        }
-    }
+        },
+    ])
+    .with_limits(ModelLimits {
+        max_input_tokens: 12345,
+        max_output_tokens: 4096,
+    })
 }
 
 #[tokio::test]
 async fn top_level_turn_persists_the_current_main_model_before_running() {
     let (session, store, sid, services) =
-        common::spawn_session_with_services(Arc::new(UsageLlm)).await;
+        common::spawn_session_with_services(Arc::new(usage_llm())).await;
     let mut effective = services.read_effective().as_ref().clone();
     effective.llm.model_id = "new-main-model".into();
     // 默认 extension ports 无真实 runner,extension epoch 恒为 0。
@@ -237,7 +209,7 @@ async fn top_level_turn_persists_the_current_main_model_before_running() {
 
 #[tokio::test]
 async fn token_usage_is_persisted_as_durable_event() {
-    let (session, store, sid) = common::spawn_session_with_store(Arc::new(UsageLlm)).await;
+    let (session, store, sid) = common::spawn_session_with_store(Arc::new(usage_llm())).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("record usage".into(), turn_id, None)
@@ -352,55 +324,37 @@ async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
     );
 }
 
-struct ThinkingToolsLlm {
-    calls: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for ThinkingToolsLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let round = self.calls.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        if round == 0 {
-            let _ = tx.send(LlmEvent::ThinkingDelta {
+/// 第一轮思维链 + 工具调用,第二轮完成。
+fn thinking_tools_llm() -> ScriptedLlm {
+    ScriptedLlm::new(vec![
+        vec![
+            LlmEvent::ThinkingDelta {
                 delta: "private reasoning".into(),
-            });
-            let _ = tx.send(LlmEvent::ToolCallStart {
+            },
+            LlmEvent::ToolCallStart {
                 call_id: "call-1".into(),
                 name: "unknown_tool".into(),
                 arguments: "{}".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "tool_calls".into(),
-            });
-        } else {
-            let _ = tx.send(LlmEvent::ContentDelta {
+            },
+        ],
+        vec![
+            LlmEvent::ContentDelta {
                 delta: "done".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "stop".into(),
-            });
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 4096,
-        }
-    }
+            },
+        ],
+    ])
+    .with_limits(ModelLimits::testing(4096))
 }
 
 #[tokio::test]
 async fn ssot_thinking_and_tools_merge_in_projection() {
-    let session = common::spawn_session(Arc::new(ThinkingToolsLlm {
-        calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let session = common::spawn_session(Arc::new(thinking_tools_llm())).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("think then tool".into(), turn_id, None)
@@ -466,50 +420,35 @@ impl LlmProvider for DelayThenCompleteLlm {
     }
 }
 
-struct CompletedToolCallLlm {
-    calls: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for CompletedToolCallLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let round = self.calls.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        if round == 0 {
-            let _ = tx.send(LlmEvent::ContentDelta {
+/// 第一轮发出带 ToolCallCompleted 的工具调用,第二轮完成。
+fn completed_tool_call_llm() -> ScriptedLlm {
+    ScriptedLlm::new(vec![
+        vec![
+            LlmEvent::ContentDelta {
                 delta: "checking".into(),
-            });
-            let _ = tx.send(LlmEvent::ToolCallStart {
+            },
+            LlmEvent::ToolCallStart {
                 call_id: "call-early".into(),
                 name: "unknown_tool".into(),
                 arguments: "{}".into(),
-            });
-            let _ = tx.send(LlmEvent::ToolCallCompleted {
+            },
+            LlmEvent::ToolCallCompleted {
                 call_id: "call-early".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "tool_calls".into(),
-            });
-        } else {
-            let _ = tx.send(LlmEvent::ContentDelta {
+            },
+        ],
+        vec![
+            LlmEvent::ContentDelta {
                 delta: "done".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
+            },
+            LlmEvent::Done {
                 finish_reason: "stop".into(),
-            });
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 4096,
-        }
-    }
+            },
+        ],
+    ])
+    .with_limits(ModelLimits::testing(4096))
 }
 
 #[tokio::test]
@@ -543,10 +482,8 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 
 #[tokio::test]
 async fn ssot_tool_request_is_durable_after_assistant_message() {
-    let (session, store, sid) = common::spawn_session_with_store(Arc::new(CompletedToolCallLlm {
-        calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let (session, store, sid) =
+        common::spawn_session_with_store(Arc::new(completed_tool_call_llm())).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("trigger tool".into(), turn_id, None)

@@ -301,7 +301,7 @@ mod tests {
     use astrcode_context::ContextAssembler;
     use astrcode_core::{
         config::ContextSettings,
-        llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits},
+        llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits, testing::NeverLlm},
     };
     use astrcode_extension_sdk::runtime_ports::{
         NoopRuntimePorts, RuntimeSnapshotProvider, SessionOperationsProvider, TurnExtensionView,
@@ -310,7 +310,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::test_support::{NoopContextAssembler, UnusedLlm, test_effective_config};
+    use crate::test_support::{NoopContextAssembler, test_effective_config};
 
     struct TaggedLlm {
         max_input_tokens: usize,
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_custom_context_assembler() {
-        let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+        let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not call the LLM"));
         let context = ContextSettings {
             auto_compact_enabled: false,
             ..ContextSettings::default()
@@ -421,7 +421,7 @@ mod tests {
             generation: AtomicU64::new(1),
             view_calls: AtomicUsize::new(0),
         });
-        let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+        let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm::new("test does not call the LLM"));
         let context = ContextSettings::default();
         let services = SessionRuntimeServices::new_with_context_assembler(
             llm.clone(),

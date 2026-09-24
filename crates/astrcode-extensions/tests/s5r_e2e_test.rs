@@ -9,7 +9,7 @@ use std::{
 
 use astrcode_core::{
     event::{CustomEventData, DurableEventPayload, EventPayload},
-    llm::{LlmEvent, LlmProvider},
+    llm::{LlmEvent, testing::ScriptedLlm},
     tool::{
         ExecutionMode, Tool, ToolCapabilities, ToolExecutionContext,
         access::{FileOperation, HostResource, ResourceAccess, ResourceLease, ToolPlan},
@@ -118,8 +118,6 @@ fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
     ))
 }
 
-struct MockLlm;
-
 struct DispatchTargetExtension;
 
 struct DispatchTargetHandler;
@@ -157,30 +155,19 @@ impl Extension for DispatchTargetExtension {
     }
 }
 
-#[async_trait]
-impl LlmProvider for MockLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, astrcode_core::llm::LlmError> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(LlmEvent::ContentDelta {
+fn mock_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta {
             delta: "mock-llm-response".into(),
-        })
-        .ok();
-        tx.send(LlmEvent::Done {
+        },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        })
-        .ok();
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> astrcode_core::llm::ModelLimits {
-        astrcode_core::llm::ModelLimits {
-            max_input_tokens: 8192,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
+    .with_limits(astrcode_core::llm::ModelLimits {
+        max_input_tokens: 8192,
+        max_output_tokens: 1024,
+    })
 }
 
 fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
@@ -189,8 +176,8 @@ fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
     let session_reader: Arc<dyn SessionReader> = store;
     Arc::new(astrcode_extensions::HostRouter::from_backends(
         HostBackends {
-            main_llm: Some(Arc::new(MockLlm)),
-            small_llm: Some(Arc::new(MockLlm)),
+            main_llm: Some(Arc::new(mock_llm())),
+            small_llm: Some(Arc::new(mock_llm())),
             event_reader: Some(event_reader),
             session_reader: Some(session_reader),
             ..HostBackends::default()

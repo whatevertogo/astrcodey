@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod thinking;
 
 use thinking::{ThinkingCapability, ThinkingConfig};

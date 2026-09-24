@@ -544,7 +544,11 @@ Identity → System → Task Guidelines → Communication → Environment
 | [配置指南](docs/configuration.md) | 完整 `config.toml` 参考 |
 | [扩展系统](docs/extension-system.md) | 内置与磁盘 IPC 扩展、宿主能力 |
 | [扩展作者指南](docs/extension-author-guide.md) | 磁盘 s5r 扩展开发入门 |
-| [UI 渲染协议](docs/ui-render-spec.md) | 工具结果的结构化渲染协议 |
+| [Crate 指南](docs/crates.md) | 各 crate 职责、模块与依赖边界 |
+| [设计:LlmMessage 共享化](docs/llm-message-sharing-design.md) | 模型历史零拷贝共享(projection/context/provider 请求) |
+| [设计:Provider 请求改写链](docs/provider-request-rewrite-chain-design.md) | 统一的链式请求改写原语 |
+| [架构:统一 Extension 工具运行时](docs/architecture/unified-extension-tool-runtime.md) | 统一扩展工具运行时边界与迁移记录 |
+| [架构:S5R 3.0 实现](docs/architecture/s5r-3-implementation.md) | S5R 3.0 实现决策与状态 |
 | [发布指南](docs/release.md) | 版本同步、发布 workflow、npm/GitHub 分发 |
 | [待办事项](docs/TODO.md) | 项目路线图与待办项 |
 

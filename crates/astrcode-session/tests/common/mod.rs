@@ -127,6 +127,7 @@ pub async fn spawn_session_with_llm_assembler(
     (session, store, sid)
 }
 
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
 pub async fn spawn_session_with_context_and_services(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,
@@ -158,7 +159,6 @@ pub async fn spawn_session_with_context_and_services(
     (session, store, sid, caps)
 }
 
-#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
 pub fn test_runtime_services_with_context_and_extensions(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,

@@ -364,7 +364,7 @@ impl FileObservationStore for InMemoryFileObservationStore {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        llm::LlmProviderBindings,
+        llm::{LlmProviderBindings, testing::NeverLlm},
         permission::ApprovalMode,
         tool::{SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
         types::SessionId,
@@ -373,7 +373,6 @@ mod tests {
     use super::*;
     use crate::{
         permission::{ApprovalHistoryStore, PermissionChain},
-        test_support::UnusedLlm,
         turn_context::SharedTurnContext,
     };
 
@@ -441,8 +440,8 @@ mod tests {
                     working_dir: "/workspace".into(),
                     model_id: "model".into(),
                     llm_providers: LlmProviderBindings::new(
-                        Arc::new(UnusedLlm),
-                        Arc::new(UnusedLlm),
+                        Arc::new(NeverLlm::new("test does not call the LLM")),
+                        Arc::new(NeverLlm::new("test does not call the LLM")),
                     ),
                     session_store_dir: None,
                     turn_event_sender: None,

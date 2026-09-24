@@ -13,7 +13,9 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, LlmRole, ModelLimits},
+    llm::{
+        LlmContent, LlmError, LlmEvent, LlmProvider, LlmRole, ModelLimits, testing::ScriptedLlm,
+    },
     types::{SessionId, ToolCallId, new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
@@ -53,7 +55,6 @@ impl UntrackedStartForTest for TurnScheduler {
     }
 }
 
-struct StaticTextLlm;
 struct PendingLlm;
 struct GateFirstLlm {
     calls: Arc<AtomicUsize>,
@@ -66,26 +67,13 @@ struct FailSecondEnvelopeHandler {
     calls: Arc<AtomicUsize>,
 }
 
-#[async_trait::async_trait]
-impl LlmProvider for StaticTextLlm {
-    async fn generate_request(
-        &self,
-        _request: astrcode_core::llm::LlmRequest,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
-        let _ = tx.send(LlmEvent::Done {
+fn static_text_llm() -> ScriptedLlm {
+    ScriptedLlm::always(vec![
+        LlmEvent::ContentDelta { delta: "ok".into() },
+        LlmEvent::Done {
             finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
+        },
+    ])
 }
 
 #[async_trait::async_trait]
@@ -174,7 +162,7 @@ async fn seed_session(store: &Arc<dyn SessionStore>) -> SessionId {
 }
 
 fn build_scheduler(store: Arc<dyn SessionStore>) -> TurnScheduler {
-    build_scheduler_with_llm(store, Arc::new(StaticTextLlm))
+    build_scheduler_with_llm(store, Arc::new(static_text_llm()))
 }
 
 fn build_scheduler_with_llm(
