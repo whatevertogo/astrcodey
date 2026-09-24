@@ -1104,7 +1104,9 @@ impl ExtensionRunner {
         let changed = entries
             .iter()
             .any(|entry| matches!(entry, SourceGenerationEntry::Start { .. }))
-            || current_source_set != desired_source_set;
+            || current_source_set != desired_source_set
+            // Blocked declarations have no registered source instance to account for their removal.
+            || !self.registry.blocked.read().is_empty();
 
         let mut resolved = Vec::with_capacity(entries.len());
         for entry in entries {

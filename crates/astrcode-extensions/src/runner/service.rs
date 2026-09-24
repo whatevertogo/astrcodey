@@ -451,6 +451,15 @@ mod tests {
                 .iter()
                 .all(|d| !d.blocked_reasons.is_empty())
         );
+        let blocked_generation = runner.extension_view().await.generation();
+        runner
+            .prepare_source_generation(runner.begin_source_transaction().await, Vec::new(), None)
+            .await
+            .unwrap()
+            .commit_with(|_| {})
+            .await;
+        assert!(runner.registry_snapshot().await.extensions.is_empty());
+        assert!(runner.extension_view().await.generation() > blocked_generation);
         prepare(&runner, "restored", true, &starts, &hosts)
             .await
             .commit_with(|_| {})
