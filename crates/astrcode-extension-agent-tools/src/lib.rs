@@ -244,14 +244,7 @@ impl ToolHandler for AgentToolHandler {
                         "failed to recycle ephemeral child session"
                     );
                 }
-                Ok(ToolResult {
-                    content,
-                    is_error: false,
-                    error: None,
-                    metadata,
-                    duration_ms: None,
-                }
-                .into())
+                Ok(ToolResult::success(content).with_metadata(metadata).into())
             },
             HostSubmitTurnOutput::Backgrounded {
                 task_id,
@@ -259,20 +252,15 @@ impl ToolHandler for AgentToolHandler {
             } => {
                 metadata.insert("backgrounded".into(), serde_json::json!(true));
                 metadata.insert("task_id".into(), serde_json::json!(task_id));
-                Ok(ToolResult {
-                    content: format!(
-                        "task_id: {task_id}\nstatus: running\nchild_session_id: \
-                         {session_id}\nautomatic_notification: true\n\ndescription: \
-                         {}\n\nnext_step: Completion arrives automatically in a later turn as \
-                         `<background-agent-notification>` with `<output>` — do not poll or \
-                         re-run the task.",
-                        args.description.trim()
-                    ),
-                    is_error: false,
-                    error: None,
-                    metadata,
-                    duration_ms: None,
-                }
+                Ok(ToolResult::success(format!(
+                    "task_id: {task_id}\nstatus: running\nchild_session_id: \
+                     {session_id}\nautomatic_notification: true\n\ndescription: {}\n\nnext_step: \
+                     Completion arrives automatically in a later turn as \
+                     `<background-agent-notification>` with `<output>` — do not poll or re-run \
+                     the task.",
+                    args.description.trim()
+                ))
+                .with_metadata(metadata)
                 .into())
             },
         }

@@ -9,7 +9,10 @@ use std::{collections::HashMap, sync::OnceLock};
 use astrcode_context::prompt_engine::{
     ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
 };
-use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata};
+use astrcode_core::{
+    event::system_prompt_fingerprint,
+    tool::{ToolDefinition, ToolPromptMetadata},
+};
 use astrcode_extension_sdk::{
     extension::{
         ExtensionError,
@@ -143,18 +146,6 @@ pub(crate) async fn build_system_prompt_snapshot(
     let system_prompt = PromptEngine.assemble(&prompt_input);
     let fingerprint = system_prompt_fingerprint(&system_prompt);
     Ok((system_prompt, fingerprint))
-}
-
-/// 手写 FNV-1a（64 位）而非 `std::collections::hash_map::DefaultHasher`：指纹会被
-/// 持久化为 `SystemPromptConfigured` 事件并在后续进程/构建中比较，必须跨进程、
-/// 跨构建稳定；`DefaultHasher` 每次进程启动都随机化 seed，结果不可复现。
-fn system_prompt_fingerprint(system_prompt: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &byte in system_prompt.as_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 fn is_gh_cli_available() -> bool {

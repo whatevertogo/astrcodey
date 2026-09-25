@@ -3,12 +3,13 @@
 //! Channel-specific transport, config, and runtime state live in this crate.
 //! The host grants only the input-delivery and network capabilities needed by the channel.
 
+mod polling;
+mod telegram;
+
 use std::{
-    collections::{HashMap, hash_map::RandomState},
-    hash::BuildHasher,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 #[cfg(test)]
@@ -26,15 +27,17 @@ use astrcode_extension_sdk::{
     },
 };
 use parking_lot::Mutex as ParkingMutex;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use polling::poll_telegram;
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use tokio_util::sync::CancellationToken;
+use telegram::{HttpTelegramApi, InboundMessage, TelegramApi, TelegramBotCommand};
+#[cfg(test)]
+use telegram::{TelegramError, TelegramUpdate, inbound_message};
 
 const EXTENSION_ID: &str = "astrcode-channels";
-const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const TELEGRAM_SESSIONS_FILE: &str = "telegram-sessions.json";
-const CONFIG_SLEEP_SECS: u64 = 5;
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(TelegramChannelsExtension::new())
@@ -366,313 +369,6 @@ fn load_telegram_sessions(path: Option<&Path>) -> Result<TelegramSessionsState, 
 
 fn telegram_bot_fingerprint(bot_token: &str) -> String {
     format!("{:x}", Sha256::digest(bot_token.as_bytes()))
-}
-
-#[derive(Default)]
-struct TelegramPollState {
-    token_hasher: RandomState,
-    token_fingerprint: Option<u64>,
-    offset: Option<i64>,
-    commands_registered: bool,
-}
-
-impl TelegramPollState {
-    fn activate(&mut self, bot_token: &str) {
-        let fingerprint = self.token_hasher.hash_one(bot_token);
-        if self.token_fingerprint != Some(fingerprint) {
-            self.token_fingerprint = Some(fingerprint);
-            self.offset = None;
-            self.commands_registered = false;
-        }
-    }
-
-    fn observe(&mut self, update_id: i64) {
-        self.offset = Some(self.offset.unwrap_or(update_id).max(update_id + 1));
-    }
-}
-
-async fn wait_to_retry(shutdown: &CancellationToken) -> bool {
-    tokio::select! {
-        () = shutdown.cancelled() => false,
-        () = tokio::time::sleep(Duration::from_secs(CONFIG_SLEEP_SECS)) => true,
-    }
-}
-
-async fn poll_telegram(runtime: Arc<TelegramRuntime>, shutdown: CancellationToken) {
-    let mut state = TelegramPollState::default();
-    loop {
-        if shutdown.is_cancelled() {
-            break;
-        }
-
-        let cfg = runtime.current_config().telegram;
-        let bot_token = match cfg.active_bot_token() {
-            Ok(Some(token)) => token,
-            inactive => {
-                state.commands_registered = false;
-                if let Err(error) = inactive {
-                    tracing::warn!(
-                        extension_id = EXTENSION_ID,
-                        error = %error,
-                        "telegram bot token is not available"
-                    );
-                }
-                if !wait_to_retry(&shutdown).await {
-                    break;
-                }
-                continue;
-            },
-        };
-
-        state.activate(&bot_token);
-        if cfg.streaming {
-            tracing::warn!(
-                extension_id = EXTENSION_ID,
-                "telegram streaming=true is accepted but not active yet; replies are sent after \
-                 the AstrCode turn completes"
-            );
-        }
-        if cfg.register_commands && !state.commands_registered {
-            match runtime
-                .telegram
-                .set_commands(&bot_token, telegram_commands(), cfg.request_timeout_secs)
-                .await
-            {
-                Ok(()) => state.commands_registered = true,
-                Err(error) => tracing::warn!(
-                    extension_id = EXTENSION_ID,
-                    error = %error,
-                    "telegram setMyCommands failed"
-                ),
-            }
-        } else if !cfg.register_commands {
-            state.commands_registered = false;
-        }
-
-        let updates = tokio::select! {
-            () = shutdown.cancelled() => break,
-            result = runtime.telegram.get_updates(
-                &bot_token,
-                state.offset,
-                cfg.poll_timeout_secs,
-                cfg.request_timeout_secs,
-            ) => result,
-        };
-
-        match updates {
-            Ok(updates) => {
-                for update in updates {
-                    state.observe(update.update_id);
-                    if let Some(inbound) = inbound_message(update)
-                        && let Err(error) = runtime.handle_inbound(&cfg, inbound).await
-                    {
-                        tracing::warn!(
-                            extension_id = EXTENSION_ID,
-                            error = %error,
-                            "telegram inbound message failed"
-                        );
-                    }
-                }
-            },
-            Err(error) => {
-                tracing::warn!(
-                    extension_id = EXTENSION_ID,
-                    error = %error,
-                    "telegram getUpdates failed"
-                );
-                if !wait_to_retry(&shutdown).await {
-                    break;
-                }
-            },
-        }
-    }
-}
-
-#[async_trait::async_trait]
-trait TelegramApi: Send + Sync {
-    async fn get_updates(
-        &self,
-        bot_token: &str,
-        offset: Option<i64>,
-        timeout_secs: u64,
-        request_timeout_secs: u64,
-    ) -> Result<Vec<TelegramUpdate>, TelegramError>;
-
-    async fn send_message(
-        &self,
-        bot_token: &str,
-        chat_id: &str,
-        text: &str,
-        request_timeout_secs: u64,
-    ) -> Result<(), TelegramError>;
-
-    async fn set_commands(
-        &self,
-        bot_token: &str,
-        commands: Vec<TelegramBotCommand>,
-        request_timeout_secs: u64,
-    ) -> Result<(), TelegramError>;
-}
-
-struct HttpTelegramApi {
-    client: reqwest::Client,
-}
-
-impl HttpTelegramApi {
-    fn new() -> Self {
-        let client = reqwest::Client::new();
-        Self { client }
-    }
-
-    fn method_url(bot_token: &str, method: &str) -> String {
-        format!("{TELEGRAM_API_BASE}/bot{bot_token}/{method}")
-    }
-
-    async fn post<T: DeserializeOwned>(
-        &self,
-        bot_token: &str,
-        method: &str,
-        body: &impl Serialize,
-        request_timeout_secs: u64,
-    ) -> Result<T, TelegramError> {
-        self.client
-            .post(Self::method_url(bot_token, method))
-            .timeout(Duration::from_secs(request_timeout_secs.max(1)))
-            .json(body)
-            .send()
-            .await?
-            .json::<TelegramResponse<T>>()
-            .await?
-            .into_result()
-    }
-}
-
-#[async_trait::async_trait]
-impl TelegramApi for HttpTelegramApi {
-    async fn get_updates(
-        &self,
-        bot_token: &str,
-        offset: Option<i64>,
-        timeout_secs: u64,
-        request_timeout_secs: u64,
-    ) -> Result<Vec<TelegramUpdate>, TelegramError> {
-        let mut body = json!({
-            "timeout": timeout_secs,
-            "allowed_updates": ["message"],
-        });
-        if let Some(offset) = offset {
-            body["offset"] = json!(offset);
-        }
-        self.post(bot_token, "getUpdates", &body, request_timeout_secs)
-            .await
-    }
-
-    async fn send_message(
-        &self,
-        bot_token: &str,
-        chat_id: &str,
-        text: &str,
-        request_timeout_secs: u64,
-    ) -> Result<(), TelegramError> {
-        let _: serde_json::Value = self
-            .post(
-                bot_token,
-                "sendMessage",
-                &json!({
-                "chat_id": chat_id,
-                "text": text,
-                }),
-                request_timeout_secs,
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn set_commands(
-        &self,
-        bot_token: &str,
-        commands: Vec<TelegramBotCommand>,
-        request_timeout_secs: u64,
-    ) -> Result<(), TelegramError> {
-        let _: bool = self
-            .post(
-                bot_token,
-                "setMyCommands",
-                &json!({ "commands": commands }),
-                request_timeout_secs,
-            )
-            .await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum TelegramError {
-    #[error(transparent)]
-    Http(#[from] reqwest::Error),
-    #[error("{0}")]
-    Api(String),
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramResponse<T> {
-    ok: bool,
-    result: Option<T>,
-    description: Option<String>,
-}
-
-impl<T> TelegramResponse<T> {
-    fn into_result(self) -> Result<T, TelegramError> {
-        if self.ok {
-            self.result
-                .ok_or_else(|| TelegramError::Api("telegram response missing result".into()))
-        } else {
-            Err(TelegramError::Api(
-                self.description
-                    .unwrap_or_else(|| "telegram api error".into()),
-            ))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    message: Option<TelegramMessage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TelegramMessage {
-    chat: TelegramChat,
-    text: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TelegramChat {
-    id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct TelegramBotCommand {
-    command: &'static str,
-    description: &'static str,
-}
-
-struct InboundMessage {
-    chat_id: String,
-    text: String,
-}
-
-fn inbound_message(update: TelegramUpdate) -> Option<InboundMessage> {
-    let message = update.message?;
-    let text = message.text?.trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(InboundMessage {
-        chat_id: message.chat.id.to_string(),
-        text,
-    })
 }
 
 fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
@@ -1111,26 +807,6 @@ mod tests {
     fn telegram_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    #[test]
-    fn poll_state_resets_cursor_only_when_bot_changes() {
-        let mut state = TelegramPollState::default();
-
-        state.activate("first");
-        let first_fingerprint = state.token_fingerprint;
-        state.observe(4);
-        state.observe(2);
-        state.commands_registered = true;
-        state.activate("first");
-        assert_eq!(state.token_fingerprint, first_fingerprint);
-        assert_eq!(state.offset, Some(5));
-        assert!(state.commands_registered);
-
-        state.activate("second");
-        assert_ne!(state.token_fingerprint, first_fingerprint);
-        assert_eq!(state.offset, None);
-        assert!(!state.commands_registered);
     }
 
     #[tokio::test]

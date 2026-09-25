@@ -8,6 +8,14 @@ use astrcode_protocol::events::{
     UiRequestKind,
 };
 
+mod child_events;
+mod tool_summary;
+
+use child_events::{apply_child_session_event, is_tracked_child};
+use tool_summary::{
+    MAIN_SUMMARY_FORMAT, tool_call_summary, tool_completion_summary, truncate_first_line,
+};
+
 use super::App;
 use crate::tui::{
     command::slash::SlashCommandSpec,
@@ -546,12 +554,6 @@ fn close_tool_call_state(app: &mut App, call_id: &str) {
         .retain(|_, mapped_call_id| mapped_call_id != call_id);
 }
 
-fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
-    app.child_session_map
-        .get(child_session_id)
-        .is_some_and(|call_id| app.child_agents.contains_key(call_id))
-}
-
 fn apply_custom_event(app: &mut App, custom_event: &CustomEventData) {
     let name = &custom_event.event_type;
     let fallback = format!(
@@ -569,174 +571,6 @@ fn apply_custom_event(app: &mut App, custom_event: &CustomEventData) {
     app.scrollback_queue
         .push(ScrollbackEntry::Message(message.clone()));
     app.messages.push(message);
-}
-
-/// 处理来自子 session 的事件，将工具调用进度路由到对应的 ChildAgentTracker。
-fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
-    match &event.payload {
-        EventPayload::Live(LiveEventPayload::ToolCallStarted { tool_name, .. }) => {
-            if let Some(tracker) = app.child_agents.get_mut(call_id) {
-                tracker.on_tool_started(tool_name);
-                app.status_text = format!("● Task → {tool_name}");
-            }
-        },
-        EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
-            tool_name, result, ..
-        }) => {
-            if let Some(tracker) = app.child_agents.get_mut(call_id) {
-                let summary = tool_completion_summary(tool_name, result, &CHILD_SUMMARY_FORMAT);
-                tracker.on_tool_completed(
-                    tool_name,
-                    &summary,
-                    result.is_error,
-                    &mut app.scrollback_queue,
-                );
-                app.status_text = format!("● Agent: {tool_name} done");
-            }
-        },
-        EventPayload::Durable(DurableEventPayload::ToolCallFailed {
-            tool_name, error, ..
-        }) => {
-            if let Some(tracker) = app.child_agents.get_mut(call_id) {
-                tracker.on_tool_completed(
-                    tool_name,
-                    &truncate_first_line(error, 60),
-                    true,
-                    &mut app.scrollback_queue,
-                );
-                app.status_text = format!("● Agent: {tool_name} failed");
-            }
-        },
-        EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
-            tool_name, reason, ..
-        }) => {
-            if let Some(tracker) = app.child_agents.get_mut(call_id) {
-                tracker.on_tool_completed(
-                    tool_name,
-                    &format!("cancelled: {}", truncate_first_line(reason, 50)),
-                    true,
-                    &mut app.scrollback_queue,
-                );
-                app.status_text = format!("● Agent: {tool_name} cancelled");
-            }
-        },
-        EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
-        | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. })
-            if app.child_agents.contains_key(call_id) =>
-        {
-            app.scrollback_queue.push(ScrollbackEntry::StreamText {
-                role: MessageRole::Tool,
-                text: format!("  ! {}", truncate_first_line(message, 80)),
-            });
-        },
-        _ => {},
-    }
-}
-
-/// tool_completion_summary 的格式化参数，区分主会话与子 agent 两种展示风格。
-struct ToolSummaryFormat {
-    /// 摘要前缀（主会话 "● "，子 agent 无）
-    prefix: &'static str,
-    /// shell 单行输出的截断长度
-    shell_preview_max: usize,
-    /// 默认分支单行输出的截断长度
-    fallback_preview_max: usize,
-    /// shell 无输出时的文案
-    shell_empty: &'static str,
-    /// 无实质内容时的完成文案
-    done: &'static str,
-    /// read 分支的动词前缀
-    read_verb: &'static str,
-    /// glob 分支的动词前缀
-    glob_verb: &'static str,
-    /// shell 多行输出计数是否加括号
-    shell_lines_parens: bool,
-}
-
-const MAIN_SUMMARY_FORMAT: ToolSummaryFormat = ToolSummaryFormat {
-    prefix: "● ",
-    shell_preview_max: 80,
-    fallback_preview_max: 60,
-    shell_empty: "Ran (no output)",
-    done: "Done",
-    read_verb: "Read ",
-    glob_verb: "Found ",
-    shell_lines_parens: true,
-};
-
-const CHILD_SUMMARY_FORMAT: ToolSummaryFormat = ToolSummaryFormat {
-    prefix: "",
-    shell_preview_max: 50,
-    fallback_preview_max: 50,
-    shell_empty: "done",
-    done: "done",
-    read_verb: "",
-    glob_verb: "",
-    shell_lines_parens: false,
-};
-
-/// 工具完成的单行摘要；主会话调用点已分流 is_error，错误分支仅子 agent 路径触发。
-fn tool_completion_summary(
-    tool_name: &str,
-    result: &astrcode_core::tool::ToolResult,
-    fmt: &ToolSummaryFormat,
-) -> String {
-    let content = result.content.trim();
-    if result.is_error {
-        return truncate_first_line(result.error.as_deref().unwrap_or(content), 60);
-    }
-    match tool_name {
-        "shell" | "shell_poll" => {
-            let line_count = content.lines().count();
-            if line_count <= 1 && !content.is_empty() {
-                format!(
-                    "{}{}",
-                    fmt.prefix,
-                    truncate_first_line(content, fmt.shell_preview_max)
-                )
-            } else if line_count > 1 {
-                if fmt.shell_lines_parens {
-                    format!("{}({line_count} lines of output)", fmt.prefix)
-                } else {
-                    format!("{line_count} lines of output")
-                }
-            } else {
-                format!("{}{}", fmt.prefix, fmt.shell_empty)
-            }
-        },
-        "read" => {
-            if content.is_empty() && fmt.read_verb.is_empty() {
-                format!("{}{}", fmt.prefix, fmt.done)
-            } else {
-                format!(
-                    "{}{}{} line(s)",
-                    fmt.prefix,
-                    fmt.read_verb,
-                    content.lines().count().max(1)
-                )
-            }
-        },
-        "write" | "edit" | "patch" => format!("{}{}", fmt.prefix, fmt.done),
-        "glob" => {
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{}{}{count} file(s)", fmt.prefix, fmt.glob_verb)
-        },
-        "grep" => {
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{}{count} match(es)", fmt.prefix)
-        },
-        _ => {
-            if content.is_empty() {
-                format!("{}{}", fmt.prefix, fmt.done)
-            } else {
-                format!(
-                    "{}{}",
-                    fmt.prefix,
-                    truncate_first_line(content, fmt.fallback_preview_max)
-                )
-            }
-        },
-    }
 }
 
 fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnapshot) {
@@ -866,68 +700,11 @@ fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-fn truncate_first_line(text: &str, max_chars: usize) -> String {
-    let first_line = text.lines().next().unwrap_or(text);
-    if first_line.chars().count() <= max_chars {
-        return first_line.to_owned();
-    }
-
-    let mut truncated = first_line.chars().take(max_chars).collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
 fn ready_status(reason: &str) -> String {
     if reason == "stop" {
         "Ready".into()
     } else {
         format!("Ready · {reason}")
-    }
-}
-
-/// Codex-style one-line tool call summary for the status bar.
-fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
-    let action = tool_display_name(tool_name);
-    match tool_name {
-        "shell" => {
-            let command = arguments
-                .and_then(|arguments| arguments["command"].as_str())
-                .unwrap_or("...");
-            format!("Running  $ {}", truncate_first_line(command, 60))
-        },
-        "shell_poll" => {
-            let shell_id = arguments
-                .and_then(|arguments| arguments["shellId"].as_str())
-                .unwrap_or("...");
-            format!("Polling {shell_id}")
-        },
-        "read" => {
-            let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
-            format!("Reading {path}")
-        },
-        "write" | "edit" => {
-            let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
-            format!("{action} {path}")
-        },
-        "glob" => {
-            let pattern = arguments
-                .and_then(|a| a["pattern"].as_str())
-                .unwrap_or("...");
-            format!("Finding {pattern}")
-        },
-        "grep" => {
-            let query = arguments
-                .and_then(|a| a["pattern"].as_str().or(a["query"].as_str()))
-                .unwrap_or("...");
-            format!("Searching {query}")
-        },
-        "agent" => {
-            let desc = arguments
-                .and_then(|a| a["description"].as_str())
-                .unwrap_or("subtask");
-            format!("Task: {desc}")
-        },
-        _ => format!("{action}..."),
     }
 }
 

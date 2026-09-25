@@ -164,6 +164,7 @@ mod tests {
     fn scope(working_dir: &str) -> ToolCatalogScope {
         ToolCatalogScope {
             working_dir: working_dir.into(),
+            mode: astrcode_extension_sdk::runtime_ports::ToolCatalogMode::WithDiscovery,
         }
     }
 

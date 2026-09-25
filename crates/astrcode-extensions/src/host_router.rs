@@ -45,7 +45,7 @@ use astrcode_extension_sdk::{
     },
     host::{
         HostOperation,
-        internal::{HostOperationGroup, OutboundNetworkService},
+        internal::{HostOperationGroup, HostOperationSpec, OutboundNetworkService},
     },
     wire::{ErrorPayload, HostContextRequirement, WireErrorCode},
 };
@@ -426,12 +426,7 @@ impl HostRouter {
         input: Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        ensure_invoke_active(ctx)?;
-        ensure_not_planning(ctx)?;
-        let spec = capability::lookup(cap)?;
-        capability::authorize(spec, &ctx.declared_capabilities)?;
-        ensure_required_context(spec.operation, ctx)?;
-        enforce_resource_lease(spec.operation, &input, ctx)?;
+        let spec = validate_invoke(cap, &input, ctx)?;
 
         // Boxing at the group boundary keeps the public invoke future independent of the
         // combined stack size of every backend dispatcher.
@@ -468,12 +463,7 @@ impl HostRouter {
         input: Value,
         context: &InvokeContext,
     ) -> Result<astrcode_s5r_runtime::ModelEventStream, ErrorPayload> {
-        ensure_invoke_active(context)?;
-        ensure_not_planning(context)?;
-        let spec = capability::lookup(capability)?;
-        capability::authorize(spec, &context.declared_capabilities)?;
-        ensure_required_context(spec.operation, context)?;
-        enforce_resource_lease(spec.operation, &input, context)?;
+        let spec = validate_invoke(capability, &input, context)?;
         if !spec.supports_stream {
             return Err(ErrorPayload::new(
                 WireErrorCode::StreamNotSupported,
@@ -497,6 +487,20 @@ impl HostRouter {
             )),
         }
     }
+}
+
+fn validate_invoke(
+    capability: &str,
+    input: &Value,
+    context: &InvokeContext,
+) -> Result<&'static HostOperationSpec, ErrorPayload> {
+    ensure_invoke_active(context)?;
+    ensure_not_planning(context)?;
+    let spec = capability::lookup(capability)?;
+    capability::authorize(spec, &context.declared_capabilities)?;
+    ensure_required_context(spec.operation, context)?;
+    enforce_resource_lease(spec.operation, input, context)?;
+    Ok(spec)
 }
 
 fn ensure_not_planning(ctx: &InvokeContext) -> Result<(), ErrorPayload> {

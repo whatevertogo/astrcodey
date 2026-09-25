@@ -14,8 +14,8 @@ use astrcode_extension_sdk::{
         *,
     },
     runtime_ports::{
-        ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogProvider, ToolCatalogScope,
-        ToolCatalogSnapshot,
+        ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogMode, ToolCatalogProvider,
+        ToolCatalogScope, ToolCatalogSnapshot,
     },
     tool::{ToolDefinition, ToolPlan, ToolResult},
 };
@@ -31,6 +31,7 @@ impl ExtensionView {
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         let scope = ToolCatalogScope {
             working_dir: working_dir.to_owned(),
+            mode: ToolCatalogMode::WithDiscovery,
         };
         self.tool_catalog_snapshot_for_scope(&scope).await
     }
@@ -69,6 +70,9 @@ impl ExtensionView {
                 &entry.generation,
                 self,
             )));
+        }
+        if scope.mode == ToolCatalogMode::RegisteredOnly {
+            return ToolCatalogSnapshot::complete(self.generation(), tools);
         }
         for entry in &index.tool_discoveries {
             let ext_id = entry.generation.extension_id.as_ref();

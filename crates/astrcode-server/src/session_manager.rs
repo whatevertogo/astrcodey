@@ -1,3 +1,6 @@
+mod creation;
+mod fork;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -6,17 +9,15 @@ use std::{
 };
 
 use astrcode_core::{
-    config::EffectiveConfig,
-    event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
-    llm::TranscriptMessage,
-    tool::{CreateRootSessionRequest, SessionToolSelection},
+    event::{DurableEventPayload, Event, StoredEvent},
+    tool::SessionToolSelection,
     types::{Cursor, SessionId, TurnId},
 };
 use astrcode_extension_sdk::extension::LifecycleEvent;
 use astrcode_extensions::runner::{CustomEventSession, ExtensionRunner};
 use astrcode_session::{
-    Session, SessionCreateParams, SessionCreationFailed, SessionError, SessionEventObserver,
-    SessionEventSink, SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
+    Session, SessionCreationFailed, SessionError, SessionEventObserver, SessionEventSink,
+    SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
 };
 use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
 use astrcode_storage::{SessionStore, StorageError};
@@ -28,18 +29,6 @@ use crate::{
     server_event_bus::ServerEventBus, session_resource_cleanup::SessionResourceCleanup,
     task_utils::OwnedTaskSet,
 };
-
-struct ForkCreationInput {
-    source_id: SessionId,
-    session_id: SessionId,
-    working_dir: String,
-    model_id: String,
-    initial_system_prompt: PersistedSystemPrompt,
-    source_cursor: Cursor,
-    first_user_message: Option<String>,
-    messages: Vec<TranscriptMessage>,
-    source_extension: Option<String>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionManagerError {
@@ -68,36 +57,6 @@ impl SessionManagerError {
     pub(crate) fn is_not_found(&self) -> bool {
         matches!(self, Self::Storage(StorageError::NotFound(_)))
     }
-}
-
-/// 校验扩展提供的 root 模型偏好。
-///
-/// `"inherit"`/空串视为未指定(与子会话路径 `spawn_child` 的过滤一致);
-/// 其余值必须命中运行时实际可切换的模型集合。运行时只有主/小两个
-/// provider 实例,`llm_for_model_id` 对任何其他值都静默回退主 provider——
-/// 后台无人值守的 root 会把 typo 变成静默错模型,因此在创建边界显式拒绝。
-fn validated_root_model_preference(
-    preference: Option<String>,
-    effective: &EffectiveConfig,
-) -> Result<Option<String>, SessionManagerError> {
-    let Some(model_id) = preference.filter(|id| !id.is_empty() && id != "inherit") else {
-        return Ok(None);
-    };
-    let candidates = [
-        effective.llm.model_id.as_str(),
-        effective.small_llm.model_id.as_str(),
-    ];
-    if candidates.contains(&model_id.as_str()) {
-        return Ok(Some(model_id));
-    }
-    Err(SessionManagerError::InvalidRequest(format!(
-        "unknown model_preference {model_id:?}; available models: {}",
-        candidates
-            .into_iter()
-            .filter(|id| !id.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
 }
 
 /// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
@@ -236,160 +195,6 @@ impl SessionManager {
         let effective = session.configure_tools(selection).await?;
         self.sync_durable_events(session.id()).await;
         Ok(effective)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn create(&self, working_dir: &str) -> Result<Session, SessionManagerError> {
-        self.create_with_tool_selection(working_dir, None).await
-    }
-
-    pub(crate) async fn create_with_tool_selection(
-        &self,
-        working_dir: &str,
-        tool_selection: Option<&SessionToolSelection>,
-    ) -> Result<Session, SessionManagerError> {
-        self.create_root_with_options(working_dir, tool_selection, None, None, None)
-            .await
-    }
-
-    /// 创建扩展持有的顶层会话(宿主入口:`SessionOperations::create_root_session`)。
-    pub(crate) async fn create_for_extension(
-        &self,
-        request: CreateRootSessionRequest,
-    ) -> Result<Session, SessionManagerError> {
-        let model_preference = validated_root_model_preference(
-            request.model_preference,
-            &self.runtime_services.read_effective(),
-        )?;
-        self.create_root_with_options(
-            &request.working_dir,
-            request.tool_selection.as_ref(),
-            request.source_extension,
-            model_preference,
-            request.system_prompt,
-        )
-        .await
-    }
-
-    async fn create_root_with_options(
-        &self,
-        working_dir: &str,
-        tool_selection: Option<&SessionToolSelection>,
-        source_extension: Option<String>,
-        model_preference: Option<String>,
-        extra_system_prompt: Option<String>,
-    ) -> Result<Session, SessionManagerError> {
-        let manager = self.clone();
-        let working_dir = working_dir.to_owned();
-        let tool_selection = tool_selection.cloned();
-        let task = self.spawn_creation_task(async move {
-            let sid = astrcode_core::types::new_session_id();
-            match AssertUnwindSafe(manager.create_root_transaction(
-                sid.clone(),
-                working_dir,
-                tool_selection,
-                source_extension,
-                model_preference,
-                extra_system_prompt,
-            ))
-            .catch_unwind()
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    manager
-                        .compensate_panicked_creation(&sid, "root session")
-                        .await;
-                    Err(SessionManagerError::CreationTask(
-                        "root session creation transaction panicked".into(),
-                    ))
-                },
-            }
-        })?;
-        task.await.map_err(|error| {
-            SessionManagerError::CreationTask(format!(
-                "root session creation transaction stopped: {error}"
-            ))
-        })?
-    }
-
-    async fn create_root_transaction(
-        &self,
-        sid: SessionId,
-        working_dir: String,
-        tool_selection: Option<SessionToolSelection>,
-        source_extension: Option<String>,
-        model_preference: Option<String>,
-        extra_system_prompt: Option<String>,
-    ) -> Result<Session, SessionManagerError> {
-        let runtime = self.runtime_for(&sid);
-        let creation = runtime.begin_creation();
-        let publication = self
-            .event_sink
-            .defer_publication(sid.clone())
-            .map_err(SessionError::from)?;
-        let session = match Session::create_with_params(SessionCreateParams {
-            working_dir,
-            model_id: model_preference
-                .unwrap_or_else(|| self.runtime_services.read_effective().llm.model_id.clone()),
-            parent_session_id: None,
-            tool_selection,
-            source_extension,
-            extra_system_prompt,
-            initial_system_prompt: None,
-            runtime,
-            runtime_services: Arc::clone(&self.runtime_services),
-        })
-        .await
-        {
-            Ok(session) => session,
-            Err(error) => {
-                if matches!(&error, SessionError::EventPublish(_)) {
-                    if let Err(compensation_error) = self.discard_failed_creation(&sid).await {
-                        tracing::warn!(
-                            session_id = %sid,
-                            error = %error,
-                            compensation_error = %compensation_error,
-                            "failed to fully compensate root session creation"
-                        );
-                    }
-                } else {
-                    self.runtime_services.session_resources().cleanup(&sid);
-                }
-                return Err(error.into());
-            },
-        };
-
-        if let Err(error) = session
-            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
-            .await
-        {
-            if let Err(compensation_error) = self.discard_failed_lifecycle_start(&session).await {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %error,
-                    compensation_error = %compensation_error,
-                    "failed to fully compensate root session creation"
-                );
-            }
-            return Err(error.into());
-        }
-
-        if let Err(error) = self.sync_durable_events_required(&sid).await {
-            if let Err(compensation_error) = self.discard_failed_lifecycle_start(&session).await {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %error,
-                    compensation_error = %compensation_error,
-                    "failed to fully compensate root session creation"
-                );
-            }
-            return Err(error);
-        }
-
-        creation.commit();
-        publication.commit();
-        Ok(session)
     }
 
     pub(crate) async fn open(&self, session_id: SessionId) -> Result<Session, SessionManagerError> {
@@ -722,226 +527,6 @@ impl SessionManager {
             .map_err(SessionManagerError::from)
     }
 
-    /// Fork 一个已有会话，创建新 session 并复制 fork 点之前的消息前缀。
-    ///
-    /// fork 保证新 session 发送给 LLM 的 system prompt + 消息前缀与源 session 完全一致，
-    /// 从而让 provider 侧的 KV 缓存（prompt cache）自动命中。
-    ///
-    /// - `source_id`: 源会话 ID
-    /// - `at_cursor`: 可选 fork 点 cursor（event seq 的十进制字符串），为 None 则从末尾 fork
-    ///
-    /// 返回新 session 及其初始事件。
-    pub(crate) async fn fork(
-        &self,
-        source_id: &SessionId,
-        at_cursor: Option<&Cursor>,
-        source_extension: Option<&str>,
-    ) -> Result<Session, SessionManagerError> {
-        let source_model = self.event_store.session_read_model(source_id).await?;
-
-        let fork_cursor = at_cursor.cloned().unwrap_or_else(|| source_model.cursor());
-
-        let (transcript_messages, first_user_message) = if at_cursor.is_some() {
-            let events = self.event_store.replay_events(source_id).await?;
-            let truncated_seq: u64 = fork_cursor
-                .parse()
-                .map_err(|_| SessionManagerError::InvalidCursor(fork_cursor.clone()))?;
-            let truncated_events: Vec<_> = events
-                .into_iter()
-                .filter(|event| event.seq <= truncated_seq)
-                .collect();
-            let truncated_model =
-                astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
-            let first_user_message = truncated_model.first_user_message().map(str::to_owned);
-            (truncated_model.model_context.messages, first_user_message)
-        } else {
-            (
-                source_model.model_context.messages.clone(),
-                source_model.first_user_message().map(str::to_owned),
-            )
-        };
-
-        let input = ForkCreationInput {
-            source_id: source_id.clone(),
-            session_id: astrcode_core::types::new_session_id(),
-            working_dir: source_model.identity.working_dir.clone(),
-            model_id: source_model.identity.model_id.clone(),
-            initial_system_prompt: PersistedSystemPrompt {
-                text: source_model.system_prompt.text.clone(),
-                fingerprint: source_model.system_prompt.fingerprint.clone(),
-                extra_system_prompt: source_model.system_prompt.extra.clone(),
-                source: astrcode_core::event::SystemPromptSource::Inherited,
-            },
-            source_cursor: fork_cursor,
-            first_user_message,
-            messages: transcript_messages
-                .into_iter()
-                .map(|entry| TranscriptMessage {
-                    message: Arc::unwrap_or_clone(entry.message),
-                    origin: entry.origin,
-                })
-                .collect(),
-            source_extension: source_extension.map(str::to_owned),
-        };
-        let new_sid = input.session_id.clone();
-        let manager = self.clone();
-        let task = self.spawn_creation_task(async move {
-            match AssertUnwindSafe(manager.create_fork_transaction(input))
-                .catch_unwind()
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    manager
-                        .compensate_panicked_creation(&new_sid, "fork session")
-                        .await;
-                    Err(SessionManagerError::CreationTask(
-                        "fork session creation transaction panicked".into(),
-                    ))
-                },
-            }
-        })?;
-        task.await.map_err(|error| {
-            SessionManagerError::CreationTask(format!(
-                "fork session creation transaction stopped: {error}"
-            ))
-        })?
-    }
-
-    async fn create_fork_transaction(
-        &self,
-        input: ForkCreationInput,
-    ) -> Result<Session, SessionManagerError> {
-        let ForkCreationInput {
-            source_id,
-            session_id: new_sid,
-            working_dir,
-            model_id,
-            initial_system_prompt,
-            source_cursor,
-            first_user_message,
-            messages,
-            source_extension,
-        } = input;
-        let runtime = self.runtime_for(&new_sid);
-        let creation = runtime.begin_creation();
-        let publication = self
-            .event_sink
-            .defer_publication(new_sid.clone())
-            .map_err(SessionError::from)?;
-        let session = match Session::create_with_params(SessionCreateParams {
-            working_dir,
-            model_id,
-            parent_session_id: None,
-            tool_selection: None,
-            source_extension,
-            extra_system_prompt: None,
-            initial_system_prompt: Some(initial_system_prompt),
-            runtime,
-            runtime_services: Arc::clone(&self.runtime_services),
-        })
-        .await
-        {
-            Ok(session) => session,
-            Err(error) => {
-                if matches!(&error, SessionError::EventPublish(_)) {
-                    if let Err(compensation_error) = self.discard_failed_creation(&new_sid).await {
-                        tracing::warn!(
-                            source_session_id = %source_id,
-                            fork_session_id = %new_sid,
-                            error = %error,
-                            compensation_error = %compensation_error,
-                            "failed to fully compensate fork session creation"
-                        );
-                    }
-                } else {
-                    self.runtime_services.session_resources().cleanup(&new_sid);
-                }
-                return Err(error.into());
-            },
-        };
-
-        if let Err(error) = session
-            .emit_durable(
-                None,
-                DurableEventPayload::SessionForked {
-                    source_session_id: source_id.clone(),
-                    source_cursor,
-                    first_user_message,
-                    messages,
-                },
-            )
-            .await
-        {
-            self.compensate_failed_fork_creation(
-                &source_id,
-                &session,
-                &error,
-                FailedForkCreationStage::Persisted,
-            )
-            .await;
-            return Err(error.into());
-        }
-
-        if let Err(error) = session
-            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
-            .await
-        {
-            self.compensate_failed_fork_creation(
-                &source_id,
-                &session,
-                &error,
-                FailedForkCreationStage::LifecycleStartFailed,
-            )
-            .await;
-            return Err(error.into());
-        }
-
-        if let Err(error) = self.sync_durable_events_required(&new_sid).await {
-            if let Err(compensation_error) = self.discard_failed_lifecycle_start(&session).await {
-                tracing::warn!(
-                    source_session_id = %source_id,
-                    fork_session_id = %new_sid,
-                    error = %error,
-                    compensation_error = %compensation_error,
-                    "failed to fully compensate fork session creation"
-                );
-            }
-            return Err(error);
-        }
-
-        creation.commit();
-        publication.commit();
-        Ok(session)
-    }
-
-    async fn compensate_failed_fork_creation(
-        &self,
-        source_session_id: &SessionId,
-        fork: &Session,
-        cause: &SessionError,
-        stage: FailedForkCreationStage,
-    ) {
-        let compensation_result = match stage {
-            FailedForkCreationStage::Persisted => self
-                .discard_failed_creation(fork.id())
-                .await
-                .map_err(|error| format!("discard fork session: {error}")),
-            FailedForkCreationStage::LifecycleStartFailed => {
-                self.discard_failed_lifecycle_start(fork).await
-            },
-        };
-        if let Err(compensation_error) = compensation_result {
-            tracing::warn!(
-                source_session_id = %source_session_id,
-                fork_session_id = %fork.id(),
-                error = %cause,
-                compensation_error = %compensation_error,
-                "failed to fully compensate fork session creation"
-            );
-        }
-    }
-
     async fn compensate_panicked_creation(&self, session_id: &SessionId, kind: &str) {
         let compensation = AssertUnwindSafe(async {
             let runtime = self.runtime_for(session_id);
@@ -1064,12 +649,6 @@ enum CloseSessionAction {
     Recycle,
 }
 
-#[derive(Clone, Copy)]
-enum FailedForkCreationStage {
-    Persisted,
-    LifecycleStartFailed,
-}
-
 #[derive(Default)]
 struct SessionTransitions {
     pending: Mutex<HashMap<SessionId, Arc<PendingSessionTransition>>>,
@@ -1173,7 +752,9 @@ mod tests {
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
     use astrcode_extensions::testing::extension_runner_with_extensions;
-    use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
+    use astrcode_session::{
+        SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams,
+    };
     use astrcode_session_projection::{
         AgentSessionLinkView, AgentSessionStatus, SessionReadModel, SessionSummary,
     };

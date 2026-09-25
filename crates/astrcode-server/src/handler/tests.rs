@@ -27,7 +27,8 @@ use astrcode_extension_sdk::{
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletions, CommandContext,
         ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
-        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandKind,
+        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandKind, ToolDiscovery,
+        ToolDiscoveryContext, ToolDiscoveryHandler,
     },
 };
 use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
@@ -1257,9 +1258,36 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     assert_eq!(model.system_prompt.text, "ordered prompt");
 }
 
+#[derive(Clone)]
+struct CountingToolDiscovery(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl Extension for CountingToolDiscovery {
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("counting-discovery")
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool_discovery(Arc::new(self.clone()));
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDiscoveryHandler for CountingToolDiscovery {
+    async fn discover(&self, _ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new().into())
+    }
+}
+
 #[tokio::test]
-async fn create_session_persists_initial_system_prompt() {
-    let runtime = test_runtime();
+async fn create_session_persists_prompt_and_defers_discovery_until_first_turn() {
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let runtime = test_runtime_with_extensions(
+        Arc::new(CapturingLlm::default()),
+        vec![Arc::new(CountingToolDiscovery(Arc::clone(&discoveries)))],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -1289,6 +1317,18 @@ async fn create_session_persists_initial_system_prompt() {
         .unwrap();
     assert!(state.system_prompt.text.contains("[Identity]"));
     assert!(state.model_context.messages.is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+
+    let (_, completion) = handler
+        .submit_prompt_with_completion(sid, "hello".into())
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), completion)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, TurnCompletion::Completed { .. }));
+    assert_eq!(discoveries.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

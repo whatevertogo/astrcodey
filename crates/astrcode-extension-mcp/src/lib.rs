@@ -5,11 +5,8 @@
 //! pool and initializes servers for the startup workspace with the extension.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    collections::{BTreeMap, HashMap, hash_map::Entry},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -27,15 +24,15 @@ use astrcode_extension_sdk::{
         ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
-use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     config::{McpConfig, McpServerConfig},
     names::build_tool_name,
     pool::McpProcessPool,
     protocol::{McpTool, render_call_content},
-    search::{SearchCandidate, ToolSearchArgs, search_mcp_tools},
+    search::{ToolSearchArgs, search_mcp_tools},
 };
 
 mod config;
@@ -49,7 +46,6 @@ const EXTENSION_ID: &str = "astrcode-mcp";
 const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
 const MCP_DEFERRED_GROUP: &str = "mcp";
 const POOL_TIMEOUT: Duration = Duration::from_secs(20);
-const MCP_INITIAL_WARM_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ─── Extension entry point ────────────────────────────────────────────────
 
@@ -146,33 +142,9 @@ impl LifecycleHandler for McpWorkspaceLifecycleHandler {
 ///
 /// Cache is keyed by working_dir. Startup/session hooks prefill entries; tool
 /// discovery synchronously fills only a cache miss.
-struct WarmGate {
-    done: AtomicBool,
-    notify: Arc<Notify>,
-}
-
-impl WarmGate {
-    fn new() -> Self {
-        Self {
-            done: AtomicBool::new(false),
-            notify: Arc::new(Notify::new()),
-        }
-    }
-
-    fn mark_done(&self) {
-        self.done.store(true, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    fn is_done(&self) -> bool {
-        self.done.load(Ordering::Acquire)
-    }
-}
-
 struct McpShared {
     cache: Mutex<HashMap<String, Arc<McpCacheEntry>>>,
     refresh_locks: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    warm_gates: AsyncMutex<HashMap<String, Arc<WarmGate>>>,
     pool: McpProcessPool,
 }
 
@@ -182,7 +154,7 @@ struct McpCacheEntry {
     /// normalized tool name -> (server config, original tool name)
     tool_lookup: HashMap<String, (McpServerConfig, String)>,
     /// search candidates for tool_search_tool
-    candidates: Vec<SearchCandidate>,
+    candidates: Vec<ToolDefinition>,
     diagnostics: Vec<String>,
 }
 
@@ -191,56 +163,7 @@ impl McpShared {
         Self {
             cache: Mutex::new(HashMap::new()),
             refresh_locks: AsyncMutex::new(HashMap::new()),
-            warm_gates: AsyncMutex::new(HashMap::new()),
             pool,
-        }
-    }
-
-    async fn warm_gate(&self, working_dir: &str) -> Arc<WarmGate> {
-        let mut gates = self.warm_gates.lock().await;
-        gates
-            .entry(working_dir.to_string())
-            .or_insert_with(|| Arc::new(WarmGate::new()))
-            .clone()
-    }
-
-    async fn get_warm_gate(&self, working_dir: &str) -> Option<Arc<WarmGate>> {
-        self.warm_gates.lock().await.get(working_dir).cloned()
-    }
-
-    async fn mark_warm_complete(&self, working_dir: &str) {
-        self.warm_gate(working_dir).await.mark_done();
-    }
-
-    /// 等待扩展启动时的后台预热完成（或超时），避免首轮 tool discovery 拿到空表。
-    async fn await_initial_warm(&self, working_dir: &str) {
-        if self.get_entry(working_dir).is_some() {
-            return;
-        }
-        let Some(gate) = self.get_warm_gate(working_dir).await else {
-            return;
-        };
-        if gate.is_done() {
-            return;
-        }
-        let notified = gate.notify.clone();
-        let wait = async {
-            loop {
-                if gate.is_done() || self.get_entry(working_dir).is_some() {
-                    break;
-                }
-                notified.notified().await;
-            }
-        };
-        if tokio::time::timeout(MCP_INITIAL_WARM_TIMEOUT, wait)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                working_dir,
-                timeout_secs = MCP_INITIAL_WARM_TIMEOUT.as_secs(),
-                "MCP initial warm timed out; tool discovery may proceed with partial cache"
-            );
         }
     }
 
@@ -262,7 +185,6 @@ impl McpShared {
     async fn clear(&self) {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.refresh_locks.lock().await.clear();
-        self.warm_gates.lock().await.clear();
     }
 
     async fn refresh_global(&self) {
@@ -281,7 +203,6 @@ impl McpShared {
         // 当前磁盘读取成本可接受；若 tool discovery 频繁触达此路径，再加 mtime 缓存。
         let config = load_config();
         if self.entry_is_current(working_dir, config.fingerprint) {
-            self.mark_warm_complete(working_dir).await;
             return;
         }
         let refresh_lock = {
@@ -303,17 +224,10 @@ impl McpShared {
     }
 
     async fn refresh(&self, working_dir: &str, config: McpConfig) {
-        let results = self.pool.pre_warm(&config.servers).await;
-        for (name, result) in &results {
-            if let Err(e) = result {
-                tracing::warn!("MCP server '{name}' pre-warm failed: {e}");
-            }
-        }
         let discovered = discover_from_pool(&self.pool, &config).await;
         let active_servers = self.active_servers_after_refresh(working_dir, &discovered.servers);
         self.pool.retain_servers(&active_servers).await;
-        self.store(working_dir, discovered.build_cache_entry());
-        self.mark_warm_complete(working_dir).await;
+        self.store(working_dir, discovered);
     }
 
     fn active_servers_after_refresh(
@@ -342,9 +256,6 @@ struct McpToolDiscovery {
 impl ToolDiscoveryHandler for McpToolDiscovery {
     async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
         let working_dir = ctx.working_dir().to_string_lossy();
-        self.shared.await_initial_warm(&working_dir).await;
-        // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
-        // 已有缓存时会按配置 fingerprint 快速判断是否仍然有效。
         self.shared.refresh_workspace(&working_dir).await;
         Ok(match self.shared.get_entry(&working_dir) {
             Some(entry) => self.build_discovered_tools(&entry),
@@ -357,7 +268,7 @@ impl ToolDiscoveryHandler for McpToolDiscovery {
 impl McpToolDiscovery {
     fn build_discovered_tools(&self, entry: &McpCacheEntry) -> Vec<DiscoveredTool> {
         warn_diagnostics(&entry.diagnostics);
-        if entry.tool_lookup.is_empty() && entry.candidates.is_empty() {
+        if entry.candidates.is_empty() {
             return Vec::new();
         }
 
@@ -374,11 +285,8 @@ impl McpToolDiscovery {
         ];
         for candidate in &entry.candidates {
             result.push(
-                DiscoveredTool::new(
-                    candidate.definition.clone(),
-                    handler.clone() as Arc<dyn ToolHandler>,
-                )
-                .prompt_metadata(mcp_concrete_tool_metadata()),
+                DiscoveredTool::new(candidate.clone(), handler.clone() as Arc<dyn ToolHandler>)
+                    .prompt_metadata(mcp_concrete_tool_metadata()),
             );
         }
         result
@@ -403,9 +311,7 @@ impl ToolHandler for McpToolHandler {
         let tool_name = ctx.tool_name();
         let working_dir = ctx.working_dir().to_string_lossy().into_owned();
         if tool_name == TOOL_SEARCH_TOOL_NAME {
-            return Ok(self
-                .handle_tool_search(ctx.arguments()?, &working_dir)
-                .await);
+            return Ok(self.handle_tool_search(ctx.arguments()?, &working_dir));
         }
 
         let entry = self.shared.get_entry(&working_dir);
@@ -421,51 +327,42 @@ impl ToolHandler for McpToolHandler {
             .await
         {
             Ok(result) => Ok(call_result(&server.name, original_tool, result).into()),
-            Err(error) => Ok(error_result(
-                format!("failed to call MCP tool '{original_tool}': {error}"),
-                tool_metadata([
-                    ("server", json!(server.name)),
-                    ("tool", json!(original_tool)),
-                ]),
-            )
+            Err(error) => Ok(ToolResult::error(format!(
+                "failed to call MCP tool '{original_tool}': {error}"
+            ))
+            .with_metadata(tool_metadata([
+                ("server", json!(server.name)),
+                ("tool", json!(original_tool)),
+            ]))
             .into()),
         }
     }
 }
 
 impl McpToolHandler {
-    async fn handle_tool_search(
-        &self,
-        args: ToolSearchArgs,
-        working_dir: &str,
-    ) -> ToolExecutionResult {
+    fn handle_tool_search(&self, args: ToolSearchArgs, working_dir: &str) -> ToolExecutionResult {
         if args.query.trim().is_empty() {
-            return error_result(
-                "invalid tool_search_tool input: query must not be empty".into(),
-                BTreeMap::new(),
-            )
-            .into();
+            return ToolResult::error("invalid tool_search_tool input: query must not be empty")
+                .into();
         }
 
-        let (candidates, diagnostics) = if let Some(entry) = self.shared.get_entry(working_dir) {
-            (entry.candidates.clone(), entry.diagnostics.clone())
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-        warn_diagnostics(&diagnostics);
-        let output = search_mcp_tools(&candidates, args);
+        let entry = self.shared.get_entry(working_dir);
+        let (candidates, diagnostics) = entry.as_ref().map_or((&[][..], &[][..]), |entry| {
+            (entry.candidates.as_slice(), entry.diagnostics.as_slice())
+        });
+        warn_diagnostics(diagnostics);
+        let output = search_mcp_tools(candidates, args);
         let tool_names = output
             .matches
             .iter()
-            .map(|candidate| candidate.definition.name.clone())
+            .map(|candidate| candidate.name.clone())
             .collect();
         let mut metadata = BTreeMap::new();
         if !diagnostics.is_empty() {
             metadata.insert("diagnostics".into(), json!(diagnostics));
         }
         ToolExecutionResult::completed_with_discovered_tools(
-            text_result(search::render_search_output(&output), false, None, metadata),
+            ToolResult::text(search::render_search_output(&output), false, metadata),
             tool_names,
         )
     }
@@ -513,55 +410,24 @@ fn mcp_concrete_tool_metadata() -> ToolPromptMetadata {
 
 // ─── Pool-based discovery ───────────────────────────────────────────────
 
-struct DiscoveredMcpTools {
-    tools: Vec<SearchCandidate>,
-    servers: Vec<McpServerConfig>,
-    diagnostics: Vec<String>,
-    config_fingerprint: u64,
-}
-
-impl DiscoveredMcpTools {
-    fn build_cache_entry(self) -> McpCacheEntry {
-        let server_map: HashMap<&str, &McpServerConfig> =
-            self.servers.iter().map(|s| (s.name.as_str(), s)).collect();
-        let mut tool_lookup = HashMap::new();
-        for candidate in &self.tools {
-            if let Some(server) = server_map.get(candidate.server.as_str()) {
-                tool_lookup.insert(
-                    candidate.definition.name.clone(),
-                    ((*server).clone(), candidate.tool.clone()),
-                );
-            }
-        }
-        McpCacheEntry {
-            config_fingerprint: self.config_fingerprint,
-            servers: self.servers,
-            tool_lookup,
-            candidates: self.tools,
-            diagnostics: self.diagnostics,
-        }
-    }
-}
-
-async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> DiscoveredMcpTools {
+async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> McpCacheEntry {
     let mut diagnostics = config.diagnostics.clone();
-    let servers = config.servers.clone();
 
-    let results: Vec<(String, Result<Vec<McpTool>, _>)> =
-        futures_util::future::join_all(servers.iter().map(|server| async {
-            let name = server.name.clone();
-            let result = pool.list_tools(server).await;
-            (name, result)
-        }))
-        .await;
-
-    let mut emitted = BTreeSet::new();
+    let results = futures_util::future::join_all(
+        config
+            .servers
+            .iter()
+            .map(|server| async move { (server, pool.list_tools(server).await) }),
+    )
+    .await;
+    let mut tool_lookup = HashMap::new();
     let mut candidates = Vec::new();
-    for (server_name, list_result) in results {
+    for (server, list_result) in results {
+        let server_name = &server.name;
         match list_result {
             Ok(tools) => {
                 for tool in tools {
-                    let Some(definition) = tool_definition(&server_name, &tool) else {
+                    let Some(definition) = tool_definition(server_name, &tool) else {
                         let diagnostic = format!(
                             "skip MCP tool with empty normalized name: server={}, tool={}",
                             server_name, tool.name
@@ -570,12 +436,9 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> Discov
                         diagnostics.push(diagnostic);
                         continue;
                     };
-                    if emitted.insert(definition.name.clone()) {
-                        candidates.push(SearchCandidate {
-                            definition,
-                            server: server_name.clone(),
-                            tool: tool.name,
-                        });
+                    if let Entry::Vacant(entry) = tool_lookup.entry(definition.name.clone()) {
+                        entry.insert((server.clone(), tool.name));
+                        candidates.push(definition);
                     } else {
                         let diagnostic = format!(
                             "skip duplicate MCP tool name after normalization: {}",
@@ -594,9 +457,10 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> Discov
         }
     }
 
-    DiscoveredMcpTools {
-        tools: candidates,
-        servers,
+    McpCacheEntry {
+        candidates,
+        servers: config.servers.clone(),
+        tool_lookup,
         diagnostics,
         config_fingerprint: config.fingerprint,
     }
@@ -673,28 +537,7 @@ fn call_result(server: &str, tool: &str, result: crate::protocol::CallToolResult
     if let Some(meta) = result.meta {
         metadata.insert("mcpMeta".into(), meta);
     }
-    let error = result.is_error.then(|| content.clone());
-    text_result(content, result.is_error, error, metadata)
-}
-
-fn error_result(content: String, metadata: BTreeMap<String, Value>) -> ToolResult {
-    let error = Some(content.clone());
-    text_result(content, true, error, metadata)
-}
-
-fn text_result(
-    content: String,
-    is_error: bool,
-    error: Option<String>,
-    metadata: BTreeMap<String, Value>,
-) -> ToolResult {
-    ToolResult {
-        content,
-        is_error,
-        error,
-        metadata,
-        duration_ms: None,
-    }
+    ToolResult::text(content, result.is_error, metadata)
 }
 
 fn warn_diagnostics(diagnostics: &[String]) {
@@ -708,7 +551,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn clear_drops_cache_refresh_locks_and_warm_gates() {
+    async fn clear_drops_cache_and_refresh_locks() {
         let shared = McpShared::new(McpProcessPool::new(Duration::from_secs(1)));
         let working_dir = "/workspace";
 
@@ -727,17 +570,11 @@ mod tests {
             .lock()
             .await
             .insert(working_dir.into(), Arc::new(AsyncMutex::new(())));
-        shared
-            .warm_gates
-            .lock()
-            .await
-            .insert(working_dir.into(), Arc::new(WarmGate::new()));
 
         shared.clear().await;
 
         assert!(shared.get_entry(working_dir).is_none());
         assert!(shared.refresh_locks.lock().await.is_empty());
-        assert!(shared.warm_gates.lock().await.is_empty());
     }
 
     #[test]
