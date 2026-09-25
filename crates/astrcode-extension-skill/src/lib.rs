@@ -347,13 +347,8 @@ fn handle_skill_tool(
             normalize_skill_request(&args.skill),
             available
         );
-        return ToolResult {
-            content: msg.clone(),
-            is_error: true,
-            error: Some(msg),
-            metadata: tool_metadata([("availableSkills", json!(available))]),
-            duration_ms: None,
-        };
+        return ToolResult::error(msg)
+            .with_metadata(tool_metadata([("availableSkills", json!(available))]));
     };
 
     ToolResult::text(

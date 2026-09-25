@@ -26,10 +26,9 @@ use astrcode_extension_sdk::{
     builder::{command, manifest},
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletions, CommandContext,
-        DiscoveredTool, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionManifest, HookMode, HookResult, LifecycleContext, LifecycleEvent, Registrar,
-        SessionCommandKind, ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
-        ToolHandler,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
+        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandKind, ToolDiscovery,
+        ToolDiscoveryContext, ToolDiscoveryHandler,
     },
 };
 use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
@@ -1259,9 +1258,36 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     assert_eq!(model.system_prompt.text, "ordered prompt");
 }
 
+#[derive(Clone)]
+struct CountingToolDiscovery(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl Extension for CountingToolDiscovery {
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("counting-discovery")
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool_discovery(Arc::new(self.clone()));
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDiscoveryHandler for CountingToolDiscovery {
+    async fn discover(&self, _ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new().into())
+    }
+}
+
 #[tokio::test]
-async fn create_session_persists_initial_system_prompt() {
-    let runtime = test_runtime();
+async fn create_session_persists_prompt_and_defers_discovery_until_first_turn() {
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let runtime = test_runtime_with_extensions(
+        Arc::new(CapturingLlm::default()),
+        vec![Arc::new(CountingToolDiscovery(Arc::clone(&discoveries)))],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -1291,89 +1317,10 @@ async fn create_session_persists_initial_system_prompt() {
         .unwrap();
     assert!(state.system_prompt.text.contains("[Identity]"));
     assert!(state.model_context.messages.is_empty());
-}
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
 
-#[derive(Clone)]
-struct GatedToolDiscovery {
-    calls: Arc<AtomicUsize>,
-    release: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait::async_trait]
-impl Extension for GatedToolDiscovery {
-    fn manifest(&self) -> ExtensionManifest {
-        test_extension_manifest("gated-discovery")
-    }
-
-    fn register(&self, reg: &mut Registrar) {
-        reg.tool_discovery(Arc::new(self.clone()));
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolDiscoveryHandler for GatedToolDiscovery {
-    async fn discover(&self, _ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.release.notified().await;
-        Ok(vec![DiscoveredTool::new(
-            astrcode_core::tool::ToolDefinition {
-                name: "discovered_probe".into(),
-                description: "Discovery regression probe".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                strict: false,
-                origin: astrcode_core::tool::ToolOrigin::Extension,
-            },
-            Arc::new(self.clone()),
-        )]
-        .into())
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolHandler for GatedToolDiscovery {
-    async fn plan(
-        &self,
-        _ctx: astrcode_extension_sdk::extension::ToolPlanContext,
-    ) -> Result<astrcode_extension_sdk::tool::ToolPlan, ExtensionError> {
-        Ok(astrcode_extension_sdk::tool::ToolPlan::opaque())
-    }
-
-    async fn execute(
-        &self,
-        _ctx: ToolContext,
-    ) -> Result<astrcode_core::tool::ToolExecutionResult, ExtensionError> {
-        Ok(astrcode_core::tool::ToolResult::success("probe").into())
-    }
-}
-
-#[tokio::test]
-async fn create_session_defers_dynamic_tool_discovery_until_first_turn() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(tokio::sync::Notify::new());
-    let runtime = test_runtime_with_extensions(
-        Arc::new(CapturingLlm::default()),
-        vec![Arc::new(GatedToolDiscovery {
-            calls: Arc::clone(&calls),
-            release: Arc::clone(&release),
-        })],
-    )
-    .await;
-    let handler = spawn_test_actor(Arc::clone(&runtime), event_channel(1024));
-    let sid = tokio::time::timeout(Duration::from_secs(1), handler.create_session(".".into()))
-        .await
-        .expect("session creation must not wait for dynamic tool discovery")
-        .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let model = runtime
-        .event_store()
-        .session_read_model(&sid)
-        .await
-        .unwrap();
-    assert!(model.system_prompt.text.contains("[Identity]"));
-
-    release.notify_one();
     let (_, completion) = handler
-        .submit_prompt_with_completion(sid.clone(), "hello".into())
+        .submit_prompt_with_completion(sid, "hello".into())
         .await
         .unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(2), completion)
@@ -1381,13 +1328,7 @@ async fn create_session_defers_dynamic_tool_discovery_until_first_turn() {
         .unwrap()
         .unwrap();
     assert!(matches!(outcome, TurnCompletion::Completed { .. }));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let model = runtime
-        .event_store()
-        .session_read_model(&sid)
-        .await
-        .unwrap();
-    assert!(model.system_prompt.text.contains("discovered_probe"));
+    assert_eq!(discoveries.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

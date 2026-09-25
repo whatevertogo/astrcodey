@@ -1,6 +1,6 @@
 //! Memory handlers — Save, Delete, List, PromptBuild, SessionStart。
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
     extension::{
@@ -84,10 +84,6 @@ pub(crate) fn memory_list_definition() -> ToolDefinition {
     }
 }
 
-fn ok_text(content: String) -> ToolResult {
-    ToolResult::text(content, false, BTreeMap::new())
-}
-
 fn tool_working_dir(ctx: &ToolContext) -> String {
     ctx.working_dir().to_string_lossy().into_owned()
 }
@@ -152,7 +148,7 @@ impl ToolHandler for MemorySaveHandler {
                 .workers
                 .upsert(working_dir, category, content, replaces)
                 .await?;
-            return Ok(ok_text(
+            return Ok(ToolResult::success(
                 if changed {
                     "Memory updated."
                 } else {
@@ -183,9 +179,9 @@ impl ToolHandler for MemorySaveHandler {
                 if self.config.read().auto_extract_after_save {
                     self.workers.request_pipeline(session_id, working_dir);
                 }
-                Ok(ok_text("Memory saved.".to_string()).into())
+                Ok(ToolResult::success("Memory saved.".to_string()).into())
             },
-            AppendResult::SimilarExists(similar) => Ok(ok_text(format!(
+            AppendResult::SimilarExists(similar) => Ok(ToolResult::success(format!(
                 "Similar memories exist:\n{}\n\nRetry with replace_match to update in place.",
                 similar
                     .iter()
@@ -226,7 +222,9 @@ impl ToolHandler for MemoryDeleteHandler {
         let args: DeleteArgs = ctx.arguments()?;
         let working_dir = tool_working_dir(&ctx);
         if args.match_pattern.trim().is_empty() {
-            return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
+            return Ok(
+                ToolResult::success("No pattern provided. Nothing deleted.".to_string()).into(),
+            );
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
@@ -243,9 +241,9 @@ impl ToolHandler for MemoryDeleteHandler {
         }
 
         if removed.is_empty() {
-            Ok(ok_text("No matching memories found to delete.".to_string()).into())
+            Ok(ToolResult::success("No matching memories found to delete.".to_string()).into())
         } else {
-            Ok(ok_text(format!(
+            Ok(ToolResult::success(format!(
                 "Deleted {} entries:\n{}",
                 removed.len(),
                 removed.join("\n")
@@ -287,9 +285,9 @@ impl ToolHandler for MemoryListHandler {
         let entries = list_memories(self.store_pool.clone(), working_dir, args).await?;
 
         if entries.is_empty() {
-            Ok(ok_text("No memories found.".to_string()).into())
+            Ok(ToolResult::success("No memories found.".to_string()).into())
         } else {
-            Ok(ok_text(format!(
+            Ok(ToolResult::success(format!(
                 "{} entries:\n{}",
                 entries.len(),
                 entries.join("\n")

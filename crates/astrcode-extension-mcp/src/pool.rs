@@ -756,8 +756,19 @@ mod tests {
                 .refresh_if_stale("/workspace", || config.clone())
                 .await;
             let entry = shared.get_entry("/workspace").unwrap();
-            assert_eq!(entry.candidates.is_empty(), fail_initialize);
+            assert_eq!(
+                entry.candidates.is_empty(),
+                fail_initialize,
+                "{:?}",
+                entry.diagnostics
+            );
             assert_eq!(entry.diagnostics.is_empty(), !fail_initialize);
+            if !fail_initialize {
+                assert_eq!(
+                    entry.tool_lookup.get("mcp__fake__echo"),
+                    Some(&(server.config.clone(), "echo".into()))
+                );
+            }
             assert_eq!(
                 fs::read_to_string(&server.marker).unwrap().lines().count(),
                 1
@@ -775,6 +786,22 @@ mod tests {
                 fs::read_to_string(&server.marker).unwrap().lines().count(),
                 if fail_initialize { 2 } else { 1 }
             );
+            if !fail_initialize {
+                let mut alias = server.config.clone();
+                alias.name = "FAKE".into();
+                config.servers.push(alias);
+                config.fingerprint = 3;
+                shared
+                    .refresh_if_stale("/workspace", || config.clone())
+                    .await;
+                let entry = shared.get_entry("/workspace").unwrap();
+                assert_eq!(entry.candidates.len(), 1);
+                assert_eq!(entry.diagnostics.len(), 1);
+                assert_eq!(
+                    entry.tool_lookup.get("mcp__fake__echo"),
+                    Some(&(server.config.clone(), "echo".into()))
+                );
+            }
             shared.pool.shutdown().await;
         }
     }

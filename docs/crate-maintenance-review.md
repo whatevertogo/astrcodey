@@ -31,7 +31,9 @@
 
 已删除 WarmGate、90 秒等待和预热专用方法。现有 `refresh_locks` 是 Single Flight（相同目录的一次加载由多个调用方共同等待）的入口，预热和发现共同执行 `list_tools`，由连接池负责建立连接。同一次刷新不再先预热失败、随后再次初始化。原有工具调用的重连判定、不同工作区配置和缓存指纹语义保持不变。
 
-回归测试覆盖成功与初始化失败、并发刷新、缓存命中和指纹变化：同一轮初始化一次，配置变化后允许再次尝试。
+进一步清理：删除 `DiscoveredMcpTools` 中间结果和 `SearchCandidate` 包装，发现时直接构建缓存；调用索引同时负责去重，不再建立重复集合与临时服务器映射。搜索直接借用缓存，去掉整表复制、临时查询集合和名称比较时的字符串分配。
+
+回归测试覆盖成功与初始化失败、并发刷新、缓存命中、指纹变化及归一化名称冲突，验证保留首个工具绑定。
 
 ### 2. astrcode-extensions：共享能力调用的前置校验
 
@@ -63,7 +65,7 @@ root、child、fork 在父链接发布、继承提示词、存储补偿上存在
 
 已将原始提示词指纹移入 `core::event::system_prompt_fingerprint`，复用已有 `fnv1a_update` 字节算法；原始文本与分段文本仍各自保留格式。固定值回归测试覆盖空串、普通文本和中文，验证旧指纹不变，也验证其不同于带分隔符的 `stable_hash_hex`。
 
-同样，`extensions/src/host_router/workspace.rs::write_file_atomic` 已转发到 core 的实现，不存在第二套原子写算法；最多是很低优先级的薄别名整理。storage 的 durable write（保证持久落盘的写入）还涉及目录同步等保证，不应与普通原子替换混为一谈。
+已删除 `workspace::write_file_atomic` 的转发包装，调用方直接复用已有字节写入原语；storage 的 durable write（保证持久落盘的写入）保持不变。MCP、memory、agent-tools、skill 的重复结果构造也已改为 SDK 现有 `ToolResult` 方法，保留错误文本和元数据。
 
 ### 6. astrcode-cli / astrcode-extension-channels / astrcode-eval：按行为拆模块
 
@@ -129,12 +131,12 @@ python3 scripts/check-deps.py
 
 - `cargo fmt --check`、`git diff --check`：通过。
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`：通过。
-- `cargo test --workspace --all-features`：1096 通过，0 失败，4 忽略（仓库原有标记）。
+- `cargo test --workspace --all-features`：1095 通过，0 失败，4 忽略（仓库原有标记）。
 - `python3 scripts/check-deps.py`：31 个 crate 通过。
 - 前端源码未修改；沿用上一轮构建资源，完整 workspace 检查包含桌面壳。
-- 新增必要回归：MCP 单次初始化和持久化指纹固定值。
+- 必要回归：MCP 初始化、去重绑定与持久化指纹；创建阶段检查合并到既有提示词测试，删除重复脚手架。
 - 整理后真实 HTTP 验收：MCP 初始化期间创建返回 200，耗时 42.5 ms；同一路径的初始化失败后，观测到 1 次初始化尝试。
-- 针对创建的回归覆盖：动态发现挂起时仍可创建；初始提示词仍持久化；首轮对话包含动态工具；初始工具缓存不覆盖完整发现结果。
+- 针对创建的回归覆盖：动态发现挂起时仍可创建；初始提示词仍持久化；首轮对话仍触发动态发现；初始工具缓存不覆盖完整发现结果。
 
 缓存仍按工作目录字符串隔离；目录别名的自动归一化不在本次整理中。HTTP 验收使用同一规范路径，避免将不同缓存作用域的初始化混算。
 
