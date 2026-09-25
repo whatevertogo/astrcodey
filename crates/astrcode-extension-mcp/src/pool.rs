@@ -174,20 +174,6 @@ impl McpProcessPool {
         }
     }
 
-    /// Spawn processes for all given servers, run initialize handshake, and
-    /// keep them alive. Skips servers that are already in the pool.
-    pub(crate) async fn pre_warm(
-        &self,
-        servers: &[McpServerConfig],
-    ) -> Vec<(String, Result<(), McpPoolError>)> {
-        futures_util::future::join_all(servers.iter().map(|server| async {
-            let name = server.name.clone();
-            let result = self.ensure_pooled(server).await;
-            (name, result)
-        }))
-        .await
-    }
-
     /// Execute `tools/list`, restoring a dead pooled process if needed.
     pub(crate) async fn list_tools(
         &self,
@@ -750,12 +736,55 @@ mod tests {
     use crate::config::McpTransport;
 
     #[tokio::test]
+    async fn concurrent_workspace_refreshes_share_one_initialization_attempt() {
+        for fail_initialize in [false, true] {
+            let server = fake_stdio_server_with_env(BTreeMap::from([(
+                "ASTRCODE_FAKE_MCP_EXIT_ON_INITIALIZE".into(),
+                if fail_initialize { "1" } else { "0" }.into(),
+            )]));
+            let shared = crate::McpShared::new(McpProcessPool::new(Duration::from_secs(5)));
+            let mut config = crate::config::McpConfig {
+                servers: vec![server.config.clone()],
+                diagnostics: Vec::new(),
+                fingerprint: 1,
+            };
+            tokio::join!(
+                shared.refresh_if_stale("/workspace", || config.clone()),
+                shared.refresh_if_stale("/workspace", || config.clone()),
+            );
+            shared
+                .refresh_if_stale("/workspace", || config.clone())
+                .await;
+            let entry = shared.get_entry("/workspace").unwrap();
+            assert_eq!(entry.candidates.is_empty(), fail_initialize);
+            assert_eq!(entry.diagnostics.is_empty(), !fail_initialize);
+            assert_eq!(
+                fs::read_to_string(&server.marker).unwrap().lines().count(),
+                1
+            );
+
+            config.fingerprint = 2;
+            shared
+                .refresh_if_stale("/workspace", || config.clone())
+                .await;
+            assert_eq!(
+                shared.get_entry("/workspace").unwrap().config_fingerprint,
+                2
+            );
+            assert_eq!(
+                fs::read_to_string(&server.marker).unwrap().lines().count(),
+                if fail_initialize { 2 } else { 1 }
+            );
+            shared.pool.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     async fn reuses_prewarmed_stdio_process_and_recovers_after_exit() {
         let server = fake_stdio_server();
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
-        let warmed = pool.pre_warm(std::slice::from_ref(&server.config)).await;
-        assert!(warmed[0].1.is_ok());
+        pool.ensure_pooled(&server.config).await.unwrap();
         let tools = pool.list_tools(&server.config).await.unwrap();
         let result = pool
             .call_tool(&server.config, "echo", json!({"text": "hello"}))
@@ -818,11 +847,7 @@ mod tests {
         let config = http_server_config(&server);
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
-        assert!(
-            pool.pre_warm(std::slice::from_ref(&config)).await[0]
-                .1
-                .is_ok()
-        );
+        pool.ensure_pooled(&config).await.unwrap();
         assert!(pool.health().await.is_ok());
         assert_eq!(pool.list_tools(&config).await.unwrap()[0].name, "echo");
         assert_eq!(
@@ -861,11 +886,7 @@ mod tests {
         let config = http_server_config(&server);
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
-        assert!(
-            pool.pre_warm(std::slice::from_ref(&config)).await[0]
-                .1
-                .is_ok()
-        );
+        pool.ensure_pooled(&config).await.unwrap();
         assert_eq!(pool.list_tools(&config).await.unwrap()[0].name, "echo");
 
         let requests = server.requests().await;
@@ -897,11 +918,7 @@ mod tests {
         )]));
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
-        assert!(
-            pool.pre_warm(std::slice::from_ref(&server.config)).await[0]
-                .1
-                .is_ok()
-        );
+        pool.ensure_pooled(&server.config).await.unwrap();
         let error = pool
             .call_tool(&server.config, "echo", json!({"text": "hello"}))
             .await
@@ -1161,6 +1178,9 @@ fn main() {
                 OpenOptions::new().create(true).append(true).open(marker).unwrap(),
                 "initialized"
             ).unwrap();
+            if std::env::var("ASTRCODE_FAKE_MCP_EXIT_ON_INITIALIZE").ok().as_deref() == Some("1") {
+                process::exit(0);
+            }
             writeln!(
                 stdout,
                 "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"protocolVersion\":\"2025-06-18\"}}}}",

@@ -50,7 +50,9 @@ use astrcode_extension_sdk::{
         ExtensionHost, HostProcessHandleOutput, HostProcessListOutput, HostProcessStartRequest,
         HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
-    runtime_ports::{ToolCatalogCompleteness, ToolCatalogProvider},
+    runtime_ports::{
+        ToolCatalogCompleteness, ToolCatalogMode, ToolCatalogProvider, ToolCatalogScope,
+    },
     tool::{ToolDefinition, ToolExecutionPolicy, ToolOrigin, ToolPlan, ToolResult},
 };
 use astrcode_storage::{
@@ -2264,6 +2266,21 @@ async fn timed_out_discovery_returns_partial_catalog_with_static_tools() {
         .register(Arc::new(SlowToolDiscoveryExtension))
         .await
         .unwrap();
+
+    let view = runner.extension_view().await;
+    let scope = ToolCatalogScope {
+        working_dir: "D:/workspace".into(),
+        mode: ToolCatalogMode::RegisteredOnly,
+    };
+    let registered = view.tool_catalog(&scope).await.unwrap();
+    assert_eq!(registered.completeness, ToolCatalogCompleteness::Complete);
+    assert!(registered.diagnostics.is_empty());
+    assert!(
+        registered
+            .tools
+            .iter()
+            .any(|tool| tool.definition().name == "stateProbe")
+    );
 
     let snapshot = runner.tool_catalog_snapshot_typed("D:/workspace").await;
 

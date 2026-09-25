@@ -6,10 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -28,7 +25,7 @@ use astrcode_extension_sdk::{
     },
 };
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     config::{McpConfig, McpServerConfig},
@@ -49,7 +46,6 @@ const EXTENSION_ID: &str = "astrcode-mcp";
 const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
 const MCP_DEFERRED_GROUP: &str = "mcp";
 const POOL_TIMEOUT: Duration = Duration::from_secs(20);
-const MCP_INITIAL_WARM_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ─── Extension entry point ────────────────────────────────────────────────
 
@@ -146,33 +142,9 @@ impl LifecycleHandler for McpWorkspaceLifecycleHandler {
 ///
 /// Cache is keyed by working_dir. Startup/session hooks prefill entries; tool
 /// discovery synchronously fills only a cache miss.
-struct WarmGate {
-    done: AtomicBool,
-    notify: Arc<Notify>,
-}
-
-impl WarmGate {
-    fn new() -> Self {
-        Self {
-            done: AtomicBool::new(false),
-            notify: Arc::new(Notify::new()),
-        }
-    }
-
-    fn mark_done(&self) {
-        self.done.store(true, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    fn is_done(&self) -> bool {
-        self.done.load(Ordering::Acquire)
-    }
-}
-
 struct McpShared {
     cache: Mutex<HashMap<String, Arc<McpCacheEntry>>>,
     refresh_locks: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    warm_gates: AsyncMutex<HashMap<String, Arc<WarmGate>>>,
     pool: McpProcessPool,
 }
 
@@ -191,56 +163,7 @@ impl McpShared {
         Self {
             cache: Mutex::new(HashMap::new()),
             refresh_locks: AsyncMutex::new(HashMap::new()),
-            warm_gates: AsyncMutex::new(HashMap::new()),
             pool,
-        }
-    }
-
-    async fn warm_gate(&self, working_dir: &str) -> Arc<WarmGate> {
-        let mut gates = self.warm_gates.lock().await;
-        gates
-            .entry(working_dir.to_string())
-            .or_insert_with(|| Arc::new(WarmGate::new()))
-            .clone()
-    }
-
-    async fn get_warm_gate(&self, working_dir: &str) -> Option<Arc<WarmGate>> {
-        self.warm_gates.lock().await.get(working_dir).cloned()
-    }
-
-    async fn mark_warm_complete(&self, working_dir: &str) {
-        self.warm_gate(working_dir).await.mark_done();
-    }
-
-    /// 等待扩展启动时的后台预热完成（或超时），避免首轮 tool discovery 拿到空表。
-    async fn await_initial_warm(&self, working_dir: &str) {
-        if self.get_entry(working_dir).is_some() {
-            return;
-        }
-        let Some(gate) = self.get_warm_gate(working_dir).await else {
-            return;
-        };
-        if gate.is_done() {
-            return;
-        }
-        let notified = gate.notify.clone();
-        let wait = async {
-            loop {
-                if gate.is_done() || self.get_entry(working_dir).is_some() {
-                    break;
-                }
-                notified.notified().await;
-            }
-        };
-        if tokio::time::timeout(MCP_INITIAL_WARM_TIMEOUT, wait)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                working_dir,
-                timeout_secs = MCP_INITIAL_WARM_TIMEOUT.as_secs(),
-                "MCP initial warm timed out; tool discovery may proceed with partial cache"
-            );
         }
     }
 
@@ -262,7 +185,6 @@ impl McpShared {
     async fn clear(&self) {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.refresh_locks.lock().await.clear();
-        self.warm_gates.lock().await.clear();
     }
 
     async fn refresh_global(&self) {
@@ -281,7 +203,6 @@ impl McpShared {
         // 当前磁盘读取成本可接受；若 tool discovery 频繁触达此路径，再加 mtime 缓存。
         let config = load_config();
         if self.entry_is_current(working_dir, config.fingerprint) {
-            self.mark_warm_complete(working_dir).await;
             return;
         }
         let refresh_lock = {
@@ -303,17 +224,10 @@ impl McpShared {
     }
 
     async fn refresh(&self, working_dir: &str, config: McpConfig) {
-        let results = self.pool.pre_warm(&config.servers).await;
-        for (name, result) in &results {
-            if let Err(e) = result {
-                tracing::warn!("MCP server '{name}' pre-warm failed: {e}");
-            }
-        }
         let discovered = discover_from_pool(&self.pool, &config).await;
         let active_servers = self.active_servers_after_refresh(working_dir, &discovered.servers);
         self.pool.retain_servers(&active_servers).await;
         self.store(working_dir, discovered.build_cache_entry());
-        self.mark_warm_complete(working_dir).await;
     }
 
     fn active_servers_after_refresh(
@@ -342,9 +256,6 @@ struct McpToolDiscovery {
 impl ToolDiscoveryHandler for McpToolDiscovery {
     async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
         let working_dir = ctx.working_dir().to_string_lossy();
-        self.shared.await_initial_warm(&working_dir).await;
-        // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
-        // 已有缓存时会按配置 fingerprint 快速判断是否仍然有效。
         self.shared.refresh_workspace(&working_dir).await;
         Ok(match self.shared.get_entry(&working_dir) {
             Some(entry) => self.build_discovered_tools(&entry),
@@ -708,7 +619,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn clear_drops_cache_refresh_locks_and_warm_gates() {
+    async fn clear_drops_cache_and_refresh_locks() {
         let shared = McpShared::new(McpProcessPool::new(Duration::from_secs(1)));
         let working_dir = "/workspace";
 
@@ -727,17 +638,11 @@ mod tests {
             .lock()
             .await
             .insert(working_dir.into(), Arc::new(AsyncMutex::new(())));
-        shared
-            .warm_gates
-            .lock()
-            .await
-            .insert(working_dir.into(), Arc::new(WarmGate::new()));
 
         shared.clear().await;
 
         assert!(shared.get_entry(working_dir).is_none());
         assert!(shared.refresh_locks.lock().await.is_empty());
-        assert!(shared.warm_gates.lock().await.is_empty());
     }
 
     #[test]
