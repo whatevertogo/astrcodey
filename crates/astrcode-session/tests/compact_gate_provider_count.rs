@@ -23,8 +23,10 @@ mod common;
 
 struct CountingLlm {
     count_calls: AtomicUsize,
-    /// `count_input_tokens` 的返回值;`None` 走 trait 默认的 Unsupported。
+    request_calls: AtomicUsize,
+    /// `count_input_tokens` 的返回值;`None` 模拟不支持精确计数。
     provider_count: Option<u64>,
+    exhaust_second_request: bool,
 }
 
 #[async_trait::async_trait]
@@ -34,6 +36,15 @@ impl LlmProvider for CountingLlm {
         _request: LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        if self.exhaust_second_request && self.request_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            let _ = tx.send(LlmEvent::ThinkingDelta {
+                delta: "unfinished reasoning".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "length".into(),
+            });
+            return Ok(rx);
+        }
         let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
         // 携带 usage,避免 turn 在流末走 provider count 的 usage 兜底,
         // 让计数器只反映 compact 门控自身的调用。
@@ -58,9 +69,11 @@ impl LlmProvider for CountingLlm {
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         self.count_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ProviderInputTokenCount::provider_count(
-            self.provider_count.unwrap_or(0),
-        ))
+        self.provider_count
+            .map(ProviderInputTokenCount::provider_count)
+            .ok_or_else(|| LlmError::Unsupported {
+                message: "count_input_tokens unavailable".into(),
+            })
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -74,7 +87,9 @@ impl LlmProvider for CountingLlm {
 fn counting_llm(provider_count: Option<u64>) -> Arc<CountingLlm> {
     Arc::new(CountingLlm {
         count_calls: AtomicUsize::new(0),
+        request_calls: AtomicUsize::new(0),
         provider_count,
+        exhaust_second_request: false,
     })
 }
 
@@ -158,4 +173,36 @@ async fn near_threshold_context_pays_for_provider_count() {
         count_calls.count_calls.load(Ordering::SeqCst) >= 1,
         "crossing the gate floor must consult the provider count"
     );
+}
+
+#[tokio::test]
+async fn reasoning_only_length_retries_after_compaction() {
+    let llm = Arc::new(CountingLlm {
+        count_calls: AtomicUsize::new(0),
+        request_calls: AtomicUsize::new(0),
+        provider_count: None,
+        exhaust_second_request: true,
+    });
+    let (session, store, session_id) = common::spawn_session_with_llm_assembler(
+        llm,
+        ContextSettings {
+            compact_keep_recent_turns: Some(0),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    for prompt in ["first", "second"] {
+        let result = session
+            .submit(prompt.into(), new_turn_id(), None)
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        assert_eq!(result.output.unwrap().text, "ok");
+    }
+
+    let model = store.session_read_model(&session_id).await.unwrap();
+    assert_eq!(model.model_context.compactions.len(), 1);
 }
