@@ -20,6 +20,14 @@ pub fn stable_hash_hex(parts: &[&str]) -> String {
     format!("{hash:016x}")
 }
 
+/// 初始提示词的持久化指纹；与 `stable_hash_hex` 不同，不追加段分隔符。
+pub fn system_prompt_fingerprint(system_prompt: &str) -> String {
+    format!(
+        "{:016x}",
+        fnv1a_update(FNV1A64_OFFSET, system_prompt.as_bytes())
+    )
+}
+
 /// 覆盖 system prompt 文本与将被替换的 transcript 前缀（provider 视角消息）。
 ///
 /// 指纹持久化在 `TranscriptRewritten` 事件里，由提交时的 projection 重算比较。
@@ -57,6 +65,21 @@ fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_fingerprint_preserves_raw_byte_format() {
+        for (prompt, expected) in [
+            ("", "cbf29ce484222325"),
+            ("hello", "a430d84680aabd0b"),
+            ("你好\nworld", "7858d9cc2cce0321"),
+        ] {
+            assert_eq!(system_prompt_fingerprint(prompt), expected);
+            assert_ne!(
+                system_prompt_fingerprint(prompt),
+                stable_hash_hex(&[prompt])
+            );
+        }
+    }
 
     #[test]
     fn fingerprint_is_stable_and_content_sensitive() {

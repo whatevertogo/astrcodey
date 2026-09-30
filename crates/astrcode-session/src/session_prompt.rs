@@ -7,7 +7,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::internal::RuntimeHookCallContext,
-    runtime_ports::{ToolCatalogScope, TurnExtensionView},
+    runtime_ports::{ToolCatalogMode, ToolCatalogScope, TurnExtensionView},
 };
 use astrcode_session_projection::SessionReadModel;
 
@@ -72,6 +72,7 @@ impl Session {
     ) -> Result<ResolvedToolRegistrySnapshot, SessionError> {
         let scope = ToolCatalogScope {
             working_dir: working_dir.to_owned(),
+            mode: ToolCatalogMode::WithDiscovery,
         };
         self.resolve_tool_registry_snapshot_for_scope(
             runtime_view,
@@ -117,9 +118,11 @@ impl Session {
         resolved_extra: Option<&str>,
         is_subagent: bool,
         tool_selection: Option<&SessionToolSelection>,
+        catalog_mode: ToolCatalogMode,
     ) -> Result<(PreparedSystemPrompt, ResolvedToolRegistrySnapshot), SessionError> {
         let scope = ToolCatalogScope {
             working_dir: hook_call.working_dir().to_string_lossy().into_owned(),
+            mode: catalog_mode,
         };
         let mut stability = RuntimeStabilityBudget::new();
         loop {
@@ -183,6 +186,7 @@ impl Session {
                 resolved_extra.as_deref(),
                 parent_session_id.is_some(),
                 tool_selection,
+                ToolCatalogMode::RegisteredOnly,
             )
             .await?;
         Ok(astrcode_core::event::PersistedSystemPrompt {
@@ -209,6 +213,7 @@ impl Session {
                 resolved_extra.as_deref(),
                 is_subagent,
                 tool_selection.as_ref(),
+                ToolCatalogMode::WithDiscovery,
             )
             .await?;
         Ok(PreparedRuntimeSnapshot {

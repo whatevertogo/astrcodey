@@ -1163,7 +1163,7 @@ fn write_with_access(
     let previous_content = previous_bytes
         .filter(|bytes| *bytes <= HOST_WORKSPACE_MAX_FILE_BYTES as u64)
         .and_then(|_| std::fs::read_to_string(&path).ok());
-    write_file_atomic(&path, content.as_bytes()).map_err(io_error)?;
+    write_file_atomic_bytes(&path, content.as_bytes()).map_err(io_error)?;
     remember_observation(observations, &path)?;
     Ok(HostWorkspaceWriteOutput {
         path: relative_path.to_owned(),
@@ -1247,7 +1247,7 @@ fn edit_with_access(
         replacements += if operation.replace_all { matches } else { 1 };
     }
     enforce_content_limit(&edited)?;
-    write_file_atomic(&path, edited.as_bytes()).map_err(io_error)?;
+    write_file_atomic_bytes(&path, edited.as_bytes()).map_err(io_error)?;
     remember_observation(observations, &path)?;
     Ok(HostWorkspaceEditOutput {
         path: relative_path.to_owned(),
@@ -1693,10 +1693,6 @@ fn read_bounded_file(path: &Path, max_bytes: usize) -> std::io::Result<Option<Ve
     let mut bytes = Vec::new();
     file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
     Ok((bytes.len() <= max_bytes).then_some(bytes))
-}
-
-pub(super) fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    write_file_atomic_bytes(path, content)
 }
 
 #[cfg(unix)]

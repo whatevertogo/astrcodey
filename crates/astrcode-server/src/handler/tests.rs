@@ -15,20 +15,27 @@ use astrcode_core::{
         ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
         ProviderWireFormat,
     },
-    event::{DurableEvent, DurableEventPayload, EventPayload, LiveEventPayload, Phase},
+    event::{
+        DurableEvent, DurableEventPayload, EventPayload, LiveEventPayload, Phase,
+        SystemPromptSource,
+    },
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits,
         testing::ScriptedLlm,
     },
+    tool::{ToolDefinition, ToolOrigin},
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
     builder::{command, manifest},
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletions, CommandContext,
-        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
-        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandKind,
+        DiscoveredTool, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionManifest, HookMode, HookResult, LifecycleContext, LifecycleEvent, Registrar,
+        SessionCommandKind, ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
+        ToolHandler, ToolPlanContext,
     },
+    tool::{ToolExecutionResult, ToolPlan, ToolResult},
 };
 use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -1257,9 +1264,57 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     assert_eq!(model.system_prompt.text, "ordered prompt");
 }
 
+#[derive(Clone)]
+struct CountingToolDiscovery(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl Extension for CountingToolDiscovery {
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("counting-discovery")
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool_discovery(Arc::new(self.clone()));
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDiscoveryHandler for CountingToolDiscovery {
+    async fn discover(&self, _ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![DiscoveredTool::new(
+            ToolDefinition {
+                name: "discovered_probe_tool".into(),
+                description: "Discovered test tool".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: false,
+                origin: ToolOrigin::Extension,
+            },
+            Arc::new(self.clone()),
+        )]
+        .into())
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CountingToolDiscovery {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::opaque())
+    }
+
+    async fn execute(&self, _ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        Ok(ToolResult::text("probe".into(), false, Default::default()).into())
+    }
+}
+
 #[tokio::test]
-async fn create_session_persists_initial_system_prompt() {
-    let runtime = test_runtime();
+async fn create_session_persists_prompt_and_defers_discovery_until_first_turn() {
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let runtime = test_runtime_with_extensions(
+        Arc::new(CapturingLlm::default()),
+        vec![Arc::new(CountingToolDiscovery(Arc::clone(&discoveries)))],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -1289,6 +1344,73 @@ async fn create_session_persists_initial_system_prompt() {
         .unwrap();
     assert!(state.system_prompt.text.contains("[Identity]"));
     assert!(state.model_context.messages.is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+
+    let (_, completion) = handler
+        .submit_prompt_with_completion(sid, "hello".into())
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), completion)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, TurnCompletion::Completed { .. }));
+    assert_eq!(discoveries.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn untouched_fork_refreshes_discovered_tools_on_first_turn() {
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let llm = CapturingLlm::default();
+    let captured_messages = Arc::clone(&llm.messages);
+    let runtime = test_runtime_with_extensions(
+        Arc::new(llm),
+        vec![Arc::new(CountingToolDiscovery(Arc::clone(&discoveries)))],
+    )
+    .await;
+    let handler = spawn_test_actor(Arc::clone(&runtime), event_channel(1024));
+    let source_id = handler.create_session(".".into()).await.unwrap();
+    let fork = runtime
+        .session_manager()
+        .fork(&source_id, None, None)
+        .await
+        .unwrap();
+    let fork_id = fork.id().clone();
+    let initial = runtime
+        .event_store()
+        .session_read_model(&fork_id)
+        .await
+        .unwrap();
+    assert_eq!(initial.system_prompt.source, SystemPromptSource::Native);
+    assert!(!initial.system_prompt.text.contains("discovered_probe_tool"));
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+
+    let (_, completion) = handler
+        .submit_prompt_with_completion(fork_id.clone(), "hello".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        completion.await.unwrap(),
+        TurnCompletion::Completed { .. }
+    ));
+    let refreshed = runtime
+        .event_store()
+        .session_read_model(&fork_id)
+        .await
+        .unwrap();
+    assert!(
+        refreshed
+            .system_prompt
+            .text
+            .contains("discovered_probe_tool")
+    );
+    assert_eq!(discoveries.load(Ordering::SeqCst), 1);
+    assert!(captured_messages.lock().unwrap().iter().any(|message| {
+        message.role == LlmRole::System
+            && message_to_dto(message)
+                .content
+                .contains("discovered_probe_tool")
+    }));
 }
 
 #[tokio::test]

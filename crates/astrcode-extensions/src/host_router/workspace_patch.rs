@@ -8,12 +8,13 @@ use astrcode_extension_sdk::{
         HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspacePatchChange,
         HostWorkspacePatchChangeKind, is_patch_metadata, normalize_unified_diff_path,
     },
+    hostpaths::write_file_atomic_bytes,
     wire::ErrorPayload,
 };
 
 use super::workspace::{
     ensure_observation_current, reject_sensitive_path, reject_symlink_target, remember_observation,
-    resolve_existing_path, resolve_write_target, write_file_atomic,
+    resolve_existing_path, resolve_write_target,
 };
 
 #[derive(Debug)]
@@ -271,7 +272,7 @@ fn apply_file_patch(
         request_implies_trailing_newline(patch)
     };
     let content = render_document(&lines, document.line_ending, trailing_newline);
-    if let Err(error) = write_file_atomic(&path, content.as_bytes()) {
+    if let Err(error) = write_file_atomic_bytes(&path, content.as_bytes()) {
         return failed(kind, label, &format!("write failed: {error}"));
     }
     if let Err(error) = remember_observation(observations, &path) {

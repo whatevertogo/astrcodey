@@ -11,22 +11,15 @@ pub(crate) struct ToolSearchArgs {
     pub(crate) max_results: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SearchCandidate {
-    pub(crate) definition: ToolDefinition,
-    pub(crate) server: String,
-    pub(crate) tool: String,
-}
-
 #[derive(Debug)]
 pub(crate) struct ToolSearchOutput {
     pub(crate) query: String,
     pub(crate) total_mcp_tools: usize,
-    pub(crate) matches: Vec<SearchCandidate>,
+    pub(crate) matches: Vec<ToolDefinition>,
 }
 
 pub(crate) fn search_mcp_tools(
-    candidates: &[SearchCandidate],
+    candidates: &[ToolDefinition],
     args: ToolSearchArgs,
 ) -> ToolSearchOutput {
     let query = args.query.trim().to_string();
@@ -70,23 +63,22 @@ pub(crate) fn render_search_output(output: &ToolSearchOutput) -> String {
 }
 
 fn select_tools(
-    candidates: &[SearchCandidate],
+    candidates: &[ToolDefinition],
     selected: &str,
     max_results: usize,
-) -> Vec<SearchCandidate> {
-    let requested = selected
+) -> Vec<ToolDefinition> {
+    let mut matches = Vec::new();
+    for name in selected
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>();
-    let mut matches = Vec::new();
-    for name in requested {
+    {
         let Some(candidate) = find_by_name(candidates, name) else {
             continue;
         };
         if !matches
             .iter()
-            .any(|existing: &SearchCandidate| existing.definition.name == candidate.definition.name)
+            .any(|existing: &ToolDefinition| existing.name == candidate.name)
         {
             matches.push(candidate.clone());
         }
@@ -98,10 +90,10 @@ fn select_tools(
 }
 
 fn keyword_search(
-    candidates: &[SearchCandidate],
+    candidates: &[ToolDefinition],
     query: &str,
     max_results: usize,
-) -> Vec<SearchCandidate> {
+) -> Vec<ToolDefinition> {
     let query_lower = query.to_ascii_lowercase();
     if let Some(candidate) = find_by_name(candidates, &query_lower) {
         return vec![candidate.clone()];
@@ -111,7 +103,6 @@ fn keyword_search(
             .iter()
             .filter(|candidate| {
                 candidate
-                    .definition
                     .name
                     .to_ascii_lowercase()
                     .starts_with(&query_lower)
@@ -124,40 +115,27 @@ fn keyword_search(
         }
     }
 
-    let terms = query_lower
+    let (required_terms, optional_terms): (Vec<_>, Vec<_>) = query_lower
         .split_whitespace()
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
-    let (required_terms, optional_terms): (Vec<_>, Vec<_>) = terms
-        .into_iter()
         .partition(|term| term.starts_with('+') && term.len() > 1);
     let required_terms = required_terms
         .into_iter()
         .map(|term| &term[1..])
         .collect::<Vec<_>>();
-    let scoring_terms = if required_terms.is_empty() {
-        optional_terms
-    } else {
-        required_terms
-            .iter()
-            .copied()
-            .chain(optional_terms)
-            .collect()
-    };
-
     let mut scored = candidates
         .iter()
         .filter_map(|candidate| {
-            let parsed = ParsedToolName::parse(&candidate.definition.name);
-            let description = candidate.description_text();
+            let parsed = ParsedToolName::parse(&candidate.name);
+            let description = candidate.description.to_ascii_lowercase();
             if !required_terms
                 .iter()
                 .all(|term| candidate_matches_term(&parsed, &description, term))
             {
                 return None;
             }
-            let score = scoring_terms
+            let score = required_terms
                 .iter()
+                .chain(&optional_terms)
                 .map(|term| score_candidate_term(&parsed, &description, term))
                 .sum::<usize>();
             (score > 0).then_some((candidate, score))
@@ -165,12 +143,9 @@ fn keyword_search(
         .collect::<Vec<_>>();
     scored.sort_by(
         |(left_candidate, left_score), (right_candidate, right_score)| {
-            right_score.cmp(left_score).then_with(|| {
-                left_candidate
-                    .definition
-                    .name
-                    .cmp(&right_candidate.definition.name)
-            })
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_candidate.name.cmp(&right_candidate.name))
         },
     );
     scored
@@ -180,11 +155,10 @@ fn keyword_search(
         .collect()
 }
 
-fn find_by_name<'a>(candidates: &'a [SearchCandidate], name: &str) -> Option<&'a SearchCandidate> {
-    let name = name.to_ascii_lowercase();
+fn find_by_name<'a>(candidates: &'a [ToolDefinition], name: &str) -> Option<&'a ToolDefinition> {
     candidates
         .iter()
-        .find(|candidate| candidate.definition.name.to_ascii_lowercase() == name)
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
 }
 
 fn candidate_matches_term(parsed: &ParsedToolName, description: &str, term: &str) -> bool {
@@ -215,23 +189,17 @@ fn description_contains_word(description: &str, term: &str) -> bool {
         .any(|word| word == term)
 }
 
-fn function_json(candidate: &SearchCandidate) -> String {
+fn function_json(candidate: &ToolDefinition) -> String {
     json!({
-        "name": candidate.definition.name,
-        "description": candidate.definition.description,
-        "parameters": candidate.definition.parameters,
+        "name": candidate.name,
+        "description": candidate.description,
+        "parameters": candidate.parameters,
     })
     .to_string()
 }
 
 fn default_max_results() -> usize {
     DEFAULT_MAX_RESULTS
-}
-
-impl SearchCandidate {
-    fn description_text(&self) -> String {
-        self.definition.description.to_ascii_lowercase()
-    }
 }
 
 struct ParsedToolName {
@@ -270,10 +238,7 @@ mod tests {
         );
 
         assert_eq!(output.matches.len(), 1);
-        assert_eq!(
-            output.matches[0].definition.name,
-            "mcp__github__create_issue"
-        );
+        assert_eq!(output.matches[0].name, "mcp__github__create_issue");
     }
 
     #[test]
@@ -291,7 +256,7 @@ mod tests {
         let names = output
             .matches
             .iter()
-            .map(|candidate| candidate.definition.name.as_str())
+            .map(|candidate| candidate.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["mcp__github__create_issue"]);
     }
@@ -308,24 +273,20 @@ mod tests {
         assert!(rendered.contains("\"name\":\"mcp__github__create_issue\""));
     }
 
-    fn candidates() -> Vec<SearchCandidate> {
+    fn candidates() -> Vec<ToolDefinition> {
         vec![
             candidate("mcp__github__create_issue", "GitHub", "Create Issue"),
             candidate("mcp__slack__send_message", "Slack", "Send Message"),
         ]
     }
 
-    fn candidate(name: &str, server: &str, tool: &str) -> SearchCandidate {
-        SearchCandidate {
-            definition: ToolDefinition {
-                name: name.into(),
-                description: format!("MCP tool from server '{server}': {tool}"),
-                parameters: json!({"type": "object"}),
-                strict: false,
-                origin: ToolOrigin::Bundled,
-            },
-            server: server.into(),
-            tool: tool.into(),
+    fn candidate(name: &str, server: &str, tool: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.into(),
+            description: format!("MCP tool from server '{server}': {tool}"),
+            parameters: json!({"type": "object"}),
+            strict: false,
+            origin: ToolOrigin::Bundled,
         }
     }
 }

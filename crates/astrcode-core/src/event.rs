@@ -11,7 +11,7 @@ pub use envelope::{
     DurableEvent, Event, EventEnvelope, EventPayload, LiveEvent, Phase, StoredEvent,
     ToolOutputStream,
 };
-pub use fingerprint::{stable_hash_hex, transcript_prefix_fingerprint};
+pub use fingerprint::{stable_hash_hex, system_prompt_fingerprint, transcript_prefix_fingerprint};
 pub use payload::{
     CompactionDetails, CustomEventAudience, CustomEventData, DurableEventPayload, LiveEventPayload,
     ParentSessionRef, SessionStarted, TranscriptRewriteReason,

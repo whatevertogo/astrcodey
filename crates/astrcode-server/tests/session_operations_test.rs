@@ -14,7 +14,7 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::{DurableEvent, DurableEventPayload, StoredEvent},
+    event::{DurableEvent, DurableEventPayload, StoredEvent, SystemPromptSource},
     llm::{LlmError, LlmEvent, LlmProvider, ModelLimits, testing::ScriptedLlm},
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionAccess,
@@ -784,6 +784,7 @@ async fn fork_session_attributes_the_new_root_to_the_requesting_extension() {
         fork_model.system_prompt.fingerprint,
         source_model.system_prompt.fingerprint
     );
+    assert_eq!(fork_model.system_prompt.source, SystemPromptSource::Native);
 }
 
 #[tokio::test]
@@ -831,6 +832,10 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
         head_model.model_context.messages.len(),
         source_model.model_context.messages.len()
     );
+    assert_eq!(
+        head_model.system_prompt.source,
+        SystemPromptSource::Inherited
+    );
 
     // cursor 指到首个事件之前:transcript 为空但会话仍合法创建。
     let truncated = ops
@@ -846,6 +851,10 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
         .await
         .expect("read truncated fork");
     assert!(truncated_model.model_context.messages.is_empty());
+    assert_eq!(
+        truncated_model.system_prompt.source,
+        SystemPromptSource::Native
+    );
 
     let bad_cursor = ops
         .fork_session(ForkSessionRequest {
