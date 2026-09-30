@@ -82,6 +82,7 @@ struct StepHooks<'a> {
 
 /// 连续相同 `input_tokens` 达到该步数时告警(frozen provider 视图检测)。
 const FROZEN_INPUT_TOKENS_STREAK_WARN: u32 = 3;
+const FINISH_REASON_LENGTH: &str = "length";
 
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
@@ -350,6 +351,26 @@ impl TurnLoop {
                 },
                 Err(error) => return Err(error),
             };
+
+        if let StreamOutcome::Complete {
+            text,
+            finish_reason,
+            message_id,
+            message_started,
+            ..
+        } = &outcome
+            && text.is_empty()
+            && finish_reason == FINISH_REASON_LENGTH
+        {
+            if *message_started {
+                publisher.live(LiveEventPayload::AssistantMessageReset {
+                    message_id: message_id.clone(),
+                });
+            }
+            return self
+                .recover_or_fail(extension_runner, state, publisher)
+                .await;
+        }
 
         let hooks = StepHooks {
             extension_runner,
