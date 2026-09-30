@@ -150,6 +150,7 @@ struct McpShared {
 
 struct McpCacheEntry {
     config_fingerprint: u64,
+    discovery_failed: bool,
     servers: Vec<McpServerConfig>,
     /// normalized tool name -> (server config, original tool name)
     tool_lookup: HashMap<String, (McpServerConfig, String)>,
@@ -202,7 +203,10 @@ impl McpShared {
     {
         // 当前磁盘读取成本可接受；若 tool discovery 频繁触达此路径，再加 mtime 缓存。
         let config = load_config();
-        if self.entry_is_current(working_dir, config.fingerprint) {
+        let previous = self.get_entry(working_dir);
+        if previous.as_ref().is_some_and(|entry| {
+            entry.config_fingerprint == config.fingerprint && !entry.discovery_failed
+        }) {
             return;
         }
         let refresh_lock = {
@@ -213,14 +217,16 @@ impl McpShared {
                 .clone()
         };
         let _refresh = refresh_lock.lock().await;
-        if !self.entry_is_current(working_dir, config.fingerprint) {
-            self.refresh(working_dir, config).await;
+        let current = self.get_entry(working_dir);
+        let refreshed_while_waiting =
+            previous.as_ref().map(Arc::as_ptr) != current.as_ref().map(Arc::as_ptr);
+        if current.as_ref().is_some_and(|entry| {
+            entry.config_fingerprint == config.fingerprint
+                && (!entry.discovery_failed || refreshed_while_waiting)
+        }) {
+            return;
         }
-    }
-
-    fn entry_is_current(&self, working_dir: &str, fingerprint: u64) -> bool {
-        self.get_entry(working_dir)
-            .is_some_and(|entry| entry.config_fingerprint == fingerprint)
+        self.refresh(working_dir, config).await;
     }
 
     async fn refresh(&self, working_dir: &str, config: McpConfig) {
@@ -412,6 +418,7 @@ fn mcp_concrete_tool_metadata() -> ToolPromptMetadata {
 
 async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> McpCacheEntry {
     let mut diagnostics = config.diagnostics.clone();
+    let mut discovery_failed = false;
 
     let results = futures_util::future::join_all(
         config
@@ -450,6 +457,7 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> McpCac
                 }
             },
             Err(error) => {
+                discovery_failed = true;
                 let diagnostic = format!("discover MCP tools from server {server_name}: {error}");
                 tracing::warn!("{diagnostic}");
                 diagnostics.push(diagnostic);
@@ -463,6 +471,7 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> McpCac
         tool_lookup,
         diagnostics,
         config_fingerprint: config.fingerprint,
+        discovery_failed,
     }
 }
 
@@ -559,6 +568,7 @@ mod tests {
             working_dir,
             McpCacheEntry {
                 config_fingerprint: 1,
+                discovery_failed: false,
                 servers: Vec::new(),
                 tool_lookup: HashMap::new(),
                 candidates: Vec::new(),

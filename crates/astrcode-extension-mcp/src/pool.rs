@@ -752,6 +752,11 @@ mod tests {
                 shared.refresh_if_stale("/workspace", || config.clone()),
                 shared.refresh_if_stale("/workspace", || config.clone()),
             );
+            assert_eq!(
+                fs::read_to_string(&server.marker).unwrap().lines().count(),
+                1,
+                "concurrent refreshes should share one failed or successful attempt"
+            );
             shared
                 .refresh_if_stale("/workspace", || config.clone())
                 .await;
@@ -771,7 +776,7 @@ mod tests {
             }
             assert_eq!(
                 fs::read_to_string(&server.marker).unwrap().lines().count(),
-                1
+                if fail_initialize { 2 } else { 1 }
             );
 
             config.fingerprint = 2;
@@ -784,7 +789,7 @@ mod tests {
             );
             assert_eq!(
                 fs::read_to_string(&server.marker).unwrap().lines().count(),
-                if fail_initialize { 2 } else { 1 }
+                if fail_initialize { 3 } else { 1 }
             );
             if !fail_initialize {
                 let mut alias = server.config.clone();
