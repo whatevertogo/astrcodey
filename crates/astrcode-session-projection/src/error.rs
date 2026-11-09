@@ -30,6 +30,8 @@ pub enum ProjectionError {
     NonContiguousSequence { expected: u64, actual: u64 },
     #[error("transcript rewrite source seq {source_seq} exceeds current seq {current_seq}")]
     InvalidTranscriptRewriteSource { source_seq: u64, current_seq: u64 },
+    #[error("fork input token anchor at seq {0} does not match its transcript or model window")]
+    InvalidForkInputTokenAnchor(u64),
     #[error(
         "transcript rewrite source fingerprint mismatch at seq {source_seq}: event expects \
          {expected}, current prefix hashes to {actual}"

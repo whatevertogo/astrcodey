@@ -19,6 +19,50 @@ use astrcode_core::{
 use super::{PreparedProjectionBatch, ProjectionError, SessionReadModelProjection, reduce, replay};
 use crate::{AgentSessionStatus, SessionArtifactView, SessionReadModel};
 
+#[test]
+fn fork_replay_accepts_legacy_events_and_validates_usage_anchor() {
+    let sid = SessionId::new("fork-usage");
+    let legacy = serde_json::json!({
+        "type": "session_forked",
+        "source_session_id": "source",
+        "source_cursor": "10",
+        "messages": [TranscriptMessage::plain(LlmMessage::user("inherited"))],
+    });
+    for (anchor, valid) in [
+        (None, true),
+        (Some((1, 200_000)), true),
+        (Some((2, 200_000)), false),
+        (Some((1, 0)), false),
+    ] {
+        let mut payload = legacy.clone();
+        if let Some((covered_message_count, model_context_window)) = anchor {
+            payload["input_token_anchor"] = serde_json::json!({
+                "context_tokens": 180_000,
+                "model_context_window": model_context_window,
+                "covered_message_count": covered_message_count,
+            });
+        }
+        let payload = serde_json::from_value(payload).unwrap();
+        let result = replay(sid.clone(), &[started(0, &sid), event(1, &sid, payload)]);
+        if valid {
+            let model = result.unwrap();
+            assert_eq!(
+                model.model_context.usage.map(|usage| (
+                    usage.context_tokens,
+                    usage.model_context_window,
+                    usage.covered_message_count,
+                )),
+                anchor.map(|(count, window)| (180_000, window, count)),
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(ProjectionError::InvalidForkInputTokenAnchor(1))
+            ));
+        }
+    }
+}
+
 fn event(seq: u64, session_id: &SessionId, payload: DurableEventPayload) -> StoredEvent {
     StoredEvent::new(seq, DurableEvent::session(session_id.clone(), payload))
 }
@@ -443,6 +487,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                 1,
                 &fork_id,
                 DurableEventPayload::SessionForked {
+                    input_token_anchor: None,
                     source_session_id: session_id,
                     source_cursor: "9".into(),
                     first_user_message: model.first_user_message().map(str::to_owned),
@@ -780,6 +825,7 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                 1,
                 &fork_id,
                 DurableEventPayload::SessionForked {
+                    input_token_anchor: None,
                     source_session_id: session_id.clone(),
                     source_cursor: "19".into(),
                     first_user_message: completed.first_user_message().map(str::to_owned),

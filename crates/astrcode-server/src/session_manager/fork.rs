@@ -3,7 +3,7 @@
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, PersistedSystemPrompt, SystemPromptSource},
+    event::{ContextTokenAnchor, DurableEventPayload, PersistedSystemPrompt, SystemPromptSource},
     llm::TranscriptMessage,
     types::{Cursor, SessionId},
 };
@@ -22,6 +22,7 @@ struct ForkCreationInput {
     source_cursor: Cursor,
     first_user_message: Option<String>,
     messages: Vec<TranscriptMessage>,
+    input_token_anchor: Option<ContextTokenAnchor>,
     source_extension: Option<String>,
 }
 
@@ -51,7 +52,7 @@ impl SessionManager {
 
         let fork_cursor = at_cursor.cloned().unwrap_or_else(|| source_model.cursor());
 
-        let (transcript_messages, first_user_message) = if at_cursor.is_some() {
+        let (transcript_messages, first_user_message, input_token_anchor) = if at_cursor.is_some() {
             let events = self.event_store.replay_events(source_id).await?;
             let truncated_seq: u64 = fork_cursor
                 .parse()
@@ -63,11 +64,24 @@ impl SessionManager {
             let truncated_model =
                 astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
             let first_user_message = truncated_model.first_user_message().map(str::to_owned);
-            (truncated_model.model_context.messages, first_user_message)
+            let input_token_anchor = if truncated_model.identity.model_id
+                == source_model.identity.model_id
+                && truncated_model.system_prompt.text == source_model.system_prompt.text
+            {
+                truncated_model.model_context.usage
+            } else {
+                None
+            };
+            (
+                truncated_model.model_context.messages,
+                first_user_message,
+                input_token_anchor,
+            )
         } else {
             (
                 source_model.model_context.messages.clone(),
                 source_model.first_user_message().map(str::to_owned),
+                source_model.model_context.usage.clone(),
             )
         };
 
@@ -88,6 +102,7 @@ impl SessionManager {
             },
             source_cursor: fork_cursor,
             first_user_message,
+            input_token_anchor,
             messages: transcript_messages
                 .into_iter()
                 .map(|entry| TranscriptMessage {
@@ -135,6 +150,7 @@ impl SessionManager {
             source_cursor,
             first_user_message,
             messages,
+            input_token_anchor,
             source_extension,
         } = input;
         let runtime = self.runtime_for(&new_sid);
@@ -183,6 +199,7 @@ impl SessionManager {
                     source_cursor,
                     first_user_message,
                     messages,
+                    input_token_anchor,
                 },
             )
             .await

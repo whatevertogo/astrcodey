@@ -10,6 +10,7 @@ use std::sync::{
 
 use astrcode_context::ContextSettings;
 use astrcode_core::{
+    event::{DurableEvent, DurableEventPayload},
     llm::{
         LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRequest, LlmTokenUsage,
         LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
@@ -205,4 +206,54 @@ async fn reasoning_only_length_retries_after_compaction() {
 
     let model = store.session_read_model(&session_id).await.unwrap();
     assert_eq!(model.model_context.compactions.len(), 1);
+}
+
+#[tokio::test]
+async fn auto_compact_keeps_usage_anchor_when_provider_count_is_unavailable() {
+    let llm = counting_llm(None);
+    let (session, store, sid) = common::spawn_session_with_llm_assembler(
+        llm,
+        ContextSettings {
+            auto_compact_enabled: true,
+            predictive_compact_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    session
+        .submit("old request".into(), new_turn_id(), None)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    store
+        .append_events(vec![DurableEvent::session(
+            sid.clone(),
+            DurableEventPayload::TokenUsageRecorded {
+                usage: LlmTokenUsage {
+                    input_tokens: Some(180_000),
+                    output_tokens: Some(2),
+                    source: Some(LlmTokenUsageSource::ProviderUsage),
+                    ..Default::default()
+                },
+                model_context_window: 200_000,
+            },
+        )])
+        .await
+        .unwrap();
+
+    let result = session
+        .submit("continue".into(), new_turn_id(), None)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(result.output.is_ok(), "{:?}", result.output);
+    let model = store.session_read_model(&sid).await.unwrap();
+    assert!(matches!(
+        model.model_context.compactions.as_slice(),
+        [compact] if compact.strategy == astrcode_core::compaction::CompactStrategy::Auto
+    ));
 }

@@ -202,6 +202,7 @@ mod tests {
                 }),
             },
             DurableEventPayload::SessionForked {
+                input_token_anchor: None,
                 source_session_id: session_id.clone(),
                 source_cursor: "0".into(),
                 first_user_message: None,

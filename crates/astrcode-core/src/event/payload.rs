@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{PersistedSystemPrompt, SystemPromptSource, envelope::ToolOutputStream};
+use super::{
+    ContextTokenAnchor, PersistedSystemPrompt, SystemPromptSource, envelope::ToolOutputStream,
+};
 use crate::{
     compaction::CompactStrategy,
     llm::{LlmTokenUsage, TranscriptMessage},
@@ -227,6 +229,8 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         first_user_message: Option<String>,
         messages: Vec<TranscriptMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_token_anchor: Option<ContextTokenAnchor>,
     },
     ErrorOccurred {
         code: i32,

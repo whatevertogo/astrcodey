@@ -807,6 +807,20 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
     ))
     .await
     .expect("submit source turn");
+    store
+        .append_events(vec![DurableEvent::session(
+            SessionId::new(source.session_id.clone()),
+            DurableEventPayload::TokenUsageRecorded {
+                usage: astrcode_core::llm::LlmTokenUsage {
+                    input_tokens: Some(180_000),
+                    output_tokens: Some(100),
+                    ..Default::default()
+                },
+                model_context_window: 200_000,
+            },
+        )])
+        .await
+        .expect("record source usage");
     let source_model = store
         .session_read_model(&SessionId::new(source.session_id.clone()))
         .await
@@ -837,6 +851,72 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
         SystemPromptSource::Inherited
     );
 
+    assert!(source_model.model_context.usage.is_some());
+    assert_eq!(
+        head_model.model_context.usage,
+        source_model.model_context.usage
+    );
+
+    let fork_events = store
+        .replay_events(&head_model.identity.session_id)
+        .await
+        .unwrap();
+    let decoded =
+        serde_json::from_slice::<Vec<StoredEvent>>(&serde_json::to_vec(&fork_events).unwrap())
+            .unwrap();
+    assert_eq!(
+        replay(head_model.identity.session_id.clone(), &decoded)
+            .unwrap()
+            .model_context
+            .usage,
+        source_model.model_context.usage
+    );
+
+    store
+        .append_events(vec![DurableEvent::session(
+            SessionId::new(source.session_id.clone()),
+            DurableEventPayload::TokenUsageRecorded {
+                usage: astrcode_core::llm::LlmTokenUsage {
+                    input_tokens: Some(190_000),
+                    ..Default::default()
+                },
+                model_context_window: 200_000,
+            },
+        )])
+        .await
+        .unwrap();
+    let historical = ops
+        .fork_session(ForkSessionRequest {
+            source_session_id: source.session_id.clone(),
+            at_cursor: Some(source_model.cursor()),
+            source_extension: None,
+        })
+        .await
+        .unwrap();
+    let historical_model = store
+        .session_read_model(&SessionId::new(historical.session_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        historical_model.model_context.usage,
+        source_model.model_context.usage
+    );
+
+    ops.submit_turn(SubmitTurnRequest::for_session(
+        head_model.identity.session_id.as_str(),
+        "continue after fork",
+    ))
+    .await
+    .expect("submit fork turn");
+    let continued = store
+        .session_read_model(&head_model.identity.session_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        continued.model_context.compactions.as_slice(),
+        [compact] if compact.strategy == astrcode_core::compaction::CompactStrategy::Auto
+    ));
+
     // cursor 指到首个事件之前:transcript 为空但会话仍合法创建。
     let truncated = ops
         .fork_session(ForkSessionRequest {
@@ -851,6 +931,7 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
         .await
         .expect("read truncated fork");
     assert!(truncated_model.model_context.messages.is_empty());
+    assert!(truncated_model.model_context.usage.is_none());
     assert_eq!(
         truncated_model.system_prompt.source,
         SystemPromptSource::Native
