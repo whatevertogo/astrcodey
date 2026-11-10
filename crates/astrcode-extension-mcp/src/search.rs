@@ -190,12 +190,14 @@ fn description_contains_word(description: &str, term: &str) -> bool {
 }
 
 fn function_json(candidate: &ToolDefinition) -> String {
-    json!({
+    let mut function = json!({
         "name": candidate.name,
         "description": candidate.description,
         "parameters": candidate.parameters,
-    })
-    .to_string()
+    });
+    // 工具描述进入模型提示词，保持不同构建的 JSON 文本一致。
+    function.sort_all_objects();
+    function.to_string()
 }
 
 fn default_max_results() -> usize {

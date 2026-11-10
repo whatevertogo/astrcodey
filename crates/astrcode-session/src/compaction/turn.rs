@@ -67,10 +67,9 @@ pub(crate) async fn plan_auto_compaction(
         host.context_assembler.settings().compact_threshold_percent,
     );
     let gate_floor = (threshold_tokens as f64 * PROVIDER_COUNT_GATE_RATIO) as usize;
-    let provider_input_tokens = if snapshot
-        .estimate_own_input_tokens(tools_tokens, model_limits.max_input_tokens)
-        >= gate_floor
-    {
+    let estimated_input_tokens =
+        snapshot.estimate_own_input_tokens(tools_tokens, model_limits.max_input_tokens);
+    let provider_input_tokens = if estimated_input_tokens >= gate_floor {
         let request_messages = snapshot.request_messages(snapshot.messages.clone());
         try_provider_input_tokens(
             host.session,
@@ -89,7 +88,7 @@ pub(crate) async fn plan_auto_compaction(
             messages: &snapshot.messages,
             system_prompt: Some(&snapshot.system_prompt),
             model_limits,
-            provider_input_tokens,
+            provider_input_tokens: Some(provider_input_tokens.unwrap_or(estimated_input_tokens)),
         });
     if !threshold_met {
         return None;

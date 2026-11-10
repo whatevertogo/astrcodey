@@ -277,7 +277,7 @@ async fn run_host_llm_chat(
             LlmEvent::Done { .. } => break,
             LlmEvent::Error { message } => {
                 let mut payload = ErrorPayload::new(WireErrorCode::LlmStreamError, message);
-                payload.details = Some(serde_json::json!({ "kind": "stream_error" }));
+                payload.details = Some(Box::new(serde_json::json!({ "kind": "stream_error" })));
                 return Err(payload);
             },
             _ => {},
@@ -295,7 +295,7 @@ async fn run_host_llm_chat(
 fn llm_error_payload(error: LlmError) -> ErrorPayload {
     let details = serde_json::to_value(&error).ok();
     let mut payload = super::wire_payload(error);
-    payload.details = details;
+    payload.details = details.map(Box::new);
     payload
 }
 

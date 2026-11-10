@@ -3,9 +3,12 @@
 use std::ops::Deref;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
-use super::payload::{CustomEventData, DurableEventPayload, LiveEventPayload};
+use super::{
+    ContextTokenAnchor,
+    payload::{CustomEventData, DurableEventPayload, LiveEventPayload},
+};
 use crate::types::*;
 
 /// 会话的执行阶段。
@@ -67,11 +70,66 @@ pub type LiveEvent = EventEnvelope<LiveEventPayload>;
 /// 已提交到 event log 的 durable 事件。
 ///
 /// `seq` 在类型上必定存在，projection 不需要再处理未落盘事件或默认序号。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredEvent {
     pub seq: u64,
-    #[serde(flatten)]
     pub event: DurableEvent,
+}
+
+impl Serialize for StoredEvent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct StoredEventRef<'a> {
+            seq: u64,
+            #[serde(flatten)]
+            event: &'a DurableEvent,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input_token_anchor: Option<&'a ContextTokenAnchor>,
+        }
+        let input_token_anchor = match &self.event.payload {
+            DurableEventPayload::SessionForked {
+                input_token_anchor, ..
+            } => input_token_anchor.as_ref(),
+            _ => None,
+        };
+        StoredEventRef {
+            seq: self.seq,
+            event: &self.event,
+            input_token_anchor,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct StoredEventWire {
+            seq: u64,
+            #[serde(flatten)]
+            event: DurableEvent,
+            #[serde(default)]
+            input_token_anchor: Option<ContextTokenAnchor>,
+        }
+        let mut wire = StoredEventWire::deserialize(deserializer)?;
+        match &mut wire.event.payload {
+            DurableEventPayload::SessionForked {
+                input_token_anchor, ..
+            } => {
+                *input_token_anchor = wire.input_token_anchor;
+            },
+            _ if wire.input_token_anchor.is_some() => {
+                return Err(D::Error::custom(
+                    "input_token_anchor requires a session_forked event",
+                ));
+            },
+            _ => {},
+        }
+        Ok(Self {
+            seq: wire.seq,
+            event: wire.event,
+        })
+    }
 }
 
 impl StoredEvent {

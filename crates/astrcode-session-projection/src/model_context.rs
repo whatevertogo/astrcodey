@@ -60,13 +60,7 @@ pub struct UnansweredToolCall {
     pub tool_name: String,
 }
 
-/// Provider 用量覆盖的 model-context 前缀。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContextUsageView {
-    pub context_tokens: usize,
-    pub model_context_window: usize,
-    pub covered_message_count: usize,
-}
+pub use astrcode_core::event::ContextTokenAnchor as ContextUsageView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSystemPrompt {
@@ -158,8 +152,12 @@ pub(crate) fn apply_event(
 
     match &event.payload {
         DurableEventPayload::ModelIdChanged { .. }
-        | DurableEventPayload::SessionToolsConfigured { .. }
-        | DurableEventPayload::SessionForked { .. } => context.usage = None,
+        | DurableEventPayload::SessionToolsConfigured { .. } => context.usage = None,
+        DurableEventPayload::SessionForked {
+            input_token_anchor, ..
+        } => {
+            context.usage = input_token_anchor.clone();
+        },
         DurableEventPayload::SystemPromptConfigured {
             fingerprint,
             extra_system_prompt,

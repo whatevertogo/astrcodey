@@ -516,7 +516,7 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             metadata.insert("hint".into(), serde_json::json!(hint));
         }
         if let Some(details) = &error.details {
-            metadata.insert("errorDetails".into(), details.clone());
+            metadata.insert("errorDetails".into(), details.as_ref().clone());
         }
     }
 
@@ -560,7 +560,7 @@ mod tests {
                         message: "worker failed".into(),
                         hint: None,
                         retryable: false,
-                        details: Some(serde_json::json!({ "revision": 3 })),
+                        details: Some(Box::new(serde_json::json!({ "revision": 3 }))),
                     }
                     .into(),
                 ),

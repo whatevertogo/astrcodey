@@ -1,6 +1,6 @@
 //! Event mapping: astrcode `EventPayload` → ACP `SessionUpdate`.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent, ToolCall,
     ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
