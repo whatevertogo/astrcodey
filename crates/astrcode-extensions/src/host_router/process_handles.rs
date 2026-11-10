@@ -534,7 +534,7 @@ async fn run_pipe_process(
     stderr: tokio::process::ChildStderr,
     stdin: Arc<AsyncMutex<Option<tokio::process::ChildStdin>>>,
     cancellation: CancellationToken,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) {
     let readers = async {
         tokio::join!(
@@ -543,7 +543,7 @@ async fn run_pipe_process(
         );
     };
     tokio::pin!(readers);
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
 
     enum FirstCompletion {
         Child(Option<i32>),
@@ -606,7 +606,7 @@ async fn run_pipe_process(
 async fn requested_termination(
     entry: Arc<ProcessEntry>,
     cancellation: CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
 ) -> ProcessTermination {
     tokio::select! {
         () = cancellation.cancelled() => entry
@@ -614,7 +614,12 @@ async fn requested_termination(
             .lock()
             .unwrap_or(ProcessTermination::Killed),
         () = call_owner_cancelled(&entry) => ProcessTermination::Cancelled,
-        () = tokio::time::sleep_until(deadline) => ProcessTermination::TimedOut,
+        () = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        } => ProcessTermination::TimedOut,
     }
 }
 
@@ -650,14 +655,19 @@ async fn pump_output(mut stream: impl AsyncRead + Unpin, entry: Arc<ProcessEntry
     }
 }
 
-fn validate_start_request(request: &HostProcessStartRequest) -> Result<Duration, ErrorPayload> {
+fn validate_start_request(
+    request: &HostProcessStartRequest,
+) -> Result<Option<Duration>, ErrorPayload> {
     if request.command.trim().is_empty() {
         return Err(ErrorPayload::new(
             WireErrorCode::InvalidInput,
             "command must not be empty",
         ));
     }
-    validated_timeout(request.timeout_ms)
+    request
+        .timeout_ms
+        .map(|timeout| validated_timeout(Some(timeout)))
+        .transpose()
 }
 
 fn remove_matching(
@@ -724,6 +734,20 @@ mod tests {
 
         output.append(&character[2..]);
         assert_eq!(output.take(true), ("你".into(), 0));
+    }
+
+    #[test]
+    fn handle_deadlines_are_optional_but_explicit_values_are_validated() {
+        let mut request = HostProcessStartRequest::new("command");
+        assert_eq!(validate_start_request(&request).unwrap(), None);
+        for (milliseconds, valid) in [(0, false), (1, true), (600_000, true), (600_001, false)] {
+            request.timeout_ms = Some(milliseconds);
+            let timeout = validate_start_request(&request);
+            assert_eq!(timeout.is_ok(), valid);
+            if valid {
+                assert_eq!(timeout.unwrap(), Some(Duration::from_millis(milliseconds)));
+            }
+        }
     }
 
     #[tokio::test]

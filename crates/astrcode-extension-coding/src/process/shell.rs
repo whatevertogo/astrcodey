@@ -10,8 +10,8 @@ use std::{
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{
-        HostProcessLifetime, HostProcessReadOutput, HostProcessReadRequest,
-        HostProcessStartRequest, HostProcessState, HostProcessTargetRequest,
+        HostProcessLifetime, HostProcessReadRequest, HostProcessStartRequest, HostProcessState,
+        HostProcessTargetRequest,
     },
     shell::{ShellFamily, ShellInfo, resolve_shell},
     tool::{ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
@@ -20,8 +20,9 @@ use serde::Deserialize;
 
 use crate::invalid_input;
 
-const AUTO_BACKGROUND_AFTER_MS: u64 = 30_000;
-const MAX_FOREGROUND_OUTPUT_BYTES: usize = 1024 * 1024;
+const DEFAULT_YIELD_TIME_MS: u64 = 10_000;
+const MAX_YIELD_TIME_MS: u64 = 30_000;
+const MAX_RESPONSE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct BoundedOutput {
@@ -38,19 +39,6 @@ struct ProcessPresentation {
     state: HostProcessState,
 }
 
-impl From<HostProcessReadOutput> for ProcessPresentation {
-    fn from(output: HostProcessReadOutput) -> Self {
-        Self {
-            id: output.id,
-            content: output.combined,
-            stdout_bytes: output.stdout.len(),
-            stderr_bytes: output.stderr.len(),
-            dropped_bytes: output.dropped_bytes,
-            state: output.state,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct PipelineSemantics {
     enforced: bool,
@@ -59,11 +47,11 @@ struct PipelineSemantics {
 impl BoundedOutput {
     fn push(&mut self, chunk: &str) {
         self.content.push_str(chunk);
-        if self.content.len() <= MAX_FOREGROUND_OUTPUT_BYTES {
+        if self.content.len() <= MAX_RESPONSE_OUTPUT_BYTES {
             return;
         }
 
-        let mut discard = self.content.len() - MAX_FOREGROUND_OUTPUT_BYTES;
+        let mut discard = self.content.len() - MAX_RESPONSE_OUTPUT_BYTES;
         while !self.content.is_char_boundary(discard) {
             discard += 1;
         }
@@ -86,6 +74,8 @@ struct ShellStartArgs {
     stdin: Option<String>,
     #[serde(default)]
     run_in_background: bool,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,10 +126,11 @@ impl ToolHandler for ShellHandler {
         let mut request = HostProcessStartRequest::new(shell.path.clone());
         request.args = shell_args(shell.family, &command);
         request.cwd = args.cwd.clone();
+        let configured_timeout = self.default_timeout_secs.load(Ordering::Acquire);
         let timeout_secs = args
             .timeout
-            .unwrap_or_else(|| self.default_timeout_secs.load(Ordering::Acquire));
-        request.timeout_ms = Some(timeout_secs * 1_000);
+            .or((configured_timeout != 0).then_some(configured_timeout));
+        request.timeout_ms = timeout_secs.map(|timeout| timeout * 1_000);
         request.lifetime = HostProcessLifetime::Call;
         let handle = process.start(request).await?;
         if let Some(input) = &args.stdin {
@@ -147,89 +138,27 @@ impl ToolHandler for ShellHandler {
         }
         process.close_stdin(handle.id.clone()).await?;
 
-        if args.run_in_background {
+        let wait_ms = if args.run_in_background {
+            0
+        } else {
+            args.yield_time_ms.unwrap_or(DEFAULT_YIELD_TIME_MS)
+        };
+        let output = collect_output(&context, &handle.id, wait_ms).await?;
+        if output.state.is_running() {
             process
-                .promote(HostProcessTargetRequest {
-                    id: handle.id.clone(),
-                })
+                .promote(HostProcessTargetRequest { id: handle.id })
                 .await?;
-            let mut result =
-                background_result(handle.id, args.intent.clone(), String::new(), 0, 0, 0);
-            add_invocation_metadata(
-                &mut result,
-                &args,
-                &shell,
-                &display_cwd,
-                timeout_secs,
-                pipeline_semantics,
-            );
-            return Ok(result.into());
         }
-
-        let deadline = Instant::now() + std::time::Duration::from_millis(AUTO_BACKGROUND_AFTER_MS);
-        let mut combined = BoundedOutput::default();
-        let mut stdout_bytes = 0usize;
-        let mut stderr_bytes = 0usize;
-        let mut dropped_bytes = 0usize;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                process
-                    .promote(HostProcessTargetRequest {
-                        id: handle.id.clone(),
-                    })
-                    .await?;
-                let mut result = background_result(
-                    handle.id,
-                    args.intent.clone(),
-                    combined.content,
-                    stdout_bytes,
-                    stderr_bytes,
-                    dropped_bytes.saturating_add(combined.dropped_bytes),
-                );
-                add_invocation_metadata(
-                    &mut result,
-                    &args,
-                    &shell,
-                    &display_cwd,
-                    timeout_secs,
-                    pipeline_semantics,
-                );
-                return Ok(result.into());
-            }
-            let output = process
-                .read(HostProcessReadRequest {
-                    id: handle.id.clone(),
-                    wait_ms: Some(remaining.as_millis().min(1_000) as u64),
-                })
-                .await?;
-            stdout_bytes = stdout_bytes.saturating_add(output.stdout.len());
-            stderr_bytes = stderr_bytes.saturating_add(output.stderr.len());
-            dropped_bytes = dropped_bytes.saturating_add(output.dropped_bytes);
-            combined.push(&output.combined);
-            if !output.state.is_running() {
-                let mut result = render_completed(
-                    ProcessPresentation {
-                        id: output.id,
-                        content: combined.content,
-                        stdout_bytes,
-                        stderr_bytes,
-                        dropped_bytes: dropped_bytes.saturating_add(combined.dropped_bytes),
-                        state: output.state,
-                    },
-                    args.intent.clone(),
-                );
-                add_invocation_metadata(
-                    &mut result,
-                    &args,
-                    &shell,
-                    &display_cwd,
-                    timeout_secs,
-                    pipeline_semantics,
-                );
-                return Ok(result.into());
-            }
-        }
+        let mut result = render_process_result(output, args.intent.clone());
+        add_invocation_metadata(
+            &mut result,
+            &args,
+            &shell,
+            &display_cwd,
+            timeout_secs,
+            pipeline_semantics,
+        );
+        Ok(result.into())
     }
 }
 
@@ -246,15 +175,49 @@ impl ToolHandler for ShellPollHandler {
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let args: ShellPollArgs = context.arguments()?;
         validate_poll(&args)?;
-        let output = context
-            .host()
-            .process()?
+        let output = collect_output(
+            &context,
+            args.shell_id.trim(),
+            args.block_until_ms.unwrap_or(DEFAULT_YIELD_TIME_MS),
+        )
+        .await?;
+        Ok(render_process_result(output, args.intent).into())
+    }
+}
+
+async fn collect_output(
+    context: &ToolContext,
+    id: &str,
+    wait_ms: u64,
+) -> Result<ProcessPresentation, ExtensionError> {
+    let process = context.host().process()?;
+    let deadline = Instant::now() + std::time::Duration::from_millis(wait_ms);
+    let mut combined = BoundedOutput::default();
+    let mut stdout_bytes = 0usize;
+    let mut stderr_bytes = 0usize;
+    let mut dropped_bytes = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let output = process
             .read(HostProcessReadRequest {
-                id: args.shell_id.trim().to_owned(),
-                wait_ms: Some(args.block_until_ms.unwrap_or(0)),
+                id: id.to_owned(),
+                wait_ms: Some(remaining.as_millis().min(1_000) as u64),
             })
             .await?;
-        Ok(render_process_result(output, args.intent).into())
+        stdout_bytes = stdout_bytes.saturating_add(output.stdout.len());
+        stderr_bytes = stderr_bytes.saturating_add(output.stderr.len());
+        dropped_bytes = dropped_bytes.saturating_add(output.dropped_bytes);
+        combined.push(&output.combined);
+        if !output.state.is_running() || Instant::now() >= deadline {
+            return Ok(ProcessPresentation {
+                id: output.id,
+                content: combined.content,
+                stdout_bytes,
+                stderr_bytes,
+                dropped_bytes: dropped_bytes.saturating_add(combined.dropped_bytes),
+                state: output.state,
+            });
+        }
     }
 }
 
@@ -272,6 +235,15 @@ fn validate_start(args: &ShellStartArgs) -> Result<(), ExtensionError> {
         return Err(invalid_input(
             "timeout must be between 1 and 600 seconds",
             "set timeout to a valid number of seconds",
+        ));
+    }
+    if args
+        .yield_time_ms
+        .is_some_and(|wait| wait > MAX_YIELD_TIME_MS)
+    {
+        return Err(invalid_input(
+            "yieldTimeMs must not exceed 30000",
+            "set yieldTimeMs to a value between 0 and 30000; use timeout for an execution deadline",
         ));
     }
     Ok(())
@@ -430,7 +402,7 @@ fn add_invocation_metadata(
     args: &ShellStartArgs,
     shell: &ShellInfo,
     cwd: &str,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     pipeline: PipelineSemantics,
 ) {
     result
@@ -476,9 +448,8 @@ fn sudo_authentication_failed(output: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn render_process_result(output: HostProcessReadOutput, intent: Option<String>) -> ToolResult {
+fn render_process_result(output: ProcessPresentation, intent: Option<String>) -> ToolResult {
     if output.state.is_running() {
-        let output = ProcessPresentation::from(output);
         background_result(
             output.id,
             intent,
@@ -488,13 +459,13 @@ fn render_process_result(output: HostProcessReadOutput, intent: Option<String>) 
             output.dropped_bytes,
         )
     } else {
-        render_completed(output.into(), intent)
+        render_completed(output, intent)
     }
 }
 
 fn render_completed(output: ProcessPresentation, intent: Option<String>) -> ToolResult {
     let ProcessPresentation {
-        id,
+        id: _,
         content: combined,
         stdout_bytes,
         stderr_bytes,
@@ -512,7 +483,7 @@ fn render_completed(output: ProcessPresentation, intent: Option<String>) -> Tool
         HostProcessState::Exited { .. } => "failed",
     };
     let mut metadata = BTreeMap::from([
-        ("shellId".into(), serde_json::json!(id)),
+        ("shellId".into(), serde_json::Value::Null),
         (
             "executionStatus".into(),
             serde_json::json!(execution_status),
@@ -550,7 +521,9 @@ fn render_completed(output: ProcessPresentation, intent: Option<String>) -> Tool
     } else {
         combined
     };
-    let content = format!("{process_status}\nOutput:\n{output}");
+    let content = format!(
+        "{process_status}. This process has finished; do not poll it again.\nOutput:\n{output}"
+    );
     if execution_status == "succeeded" {
         ToolResult::success(content).with_metadata(metadata)
     } else {
@@ -567,9 +540,12 @@ fn background_result(
     dropped_bytes: usize,
 ) -> ToolResult {
     let content = if output.is_empty() {
-        format!("Process is running in background: {id}")
+        format!("Process is still running. Continue with shell_poll using shellId: {id}")
     } else {
-        format!("Process is running in background: {id}\nOutput so far:\n{output}")
+        format!(
+            "Process is still running. Continue with shell_poll using shellId: {id}\nOutput so \
+             far:\n{output}"
+        )
     };
     ToolResult::success(content).with_metadata(BTreeMap::from([
         ("shellId".into(), serde_json::json!(id)),
@@ -588,16 +564,21 @@ pub(super) fn definition() -> ToolDefinition {
         name: "shell".into(),
         description: format!(
             concat!(
-                "Executes a {shell} command and returns output. Working directory persists, shell \
-                 state does not.\n\n",
+                "Executes a {shell} command and returns output. Each call starts a fresh shell; \
+                 set cwd explicitly.\n\n",
                 "When NOT to use:\n- File search or reading files → `grep`/`glob`/`read`\n",
                 "- Interactive commands that require a TTY are not supported\n\n",
-                "Tips:\n- Set runInBackground for commands expected to exceed ~30s.\n",
-                "- Foreground commands still running after ~30s are promoted to a session-owned \
-                 background process.\n",
-                "- Use `shell_poll` with the returned shellId for incremental output.\n",
-                "- Timeout is 1-600s and uses the configured default when omitted. Set cwd \
-                 instead of using cd.\n",
+                "Tips:\n- yieldTimeMs controls how long this call waits (default 10000ms, max \
+                 30000ms).\n",
+                "- A running command returns shellId; continue it with `shell_poll`. Do not rerun \
+                 it.\n",
+                "- runInBackground returns immediately. It does not set an execution timeout.\n",
+                "- timeout is an optional 1-600s execution deadline, independent of yieldTimeMs \
+                 and polling. Without timeout or configured shellTimeoutSecs, the process runs \
+                 until exit or session cleanup.\n",
+                "- Set cwd instead of using cd. Shell state does not persist between calls.\n",
+                "- Terminal results have no usable shellId; stop polling after exit, timeout or \
+                 cancellation.\n",
                 "- Non-zero exit codes are errors."
             ),
             shell = shell.name,
@@ -612,7 +593,11 @@ pub(super) fn definition() -> ToolDefinition {
                 "cwd": { "type": "string" },
                 "timeout": { "type": "integer", "minimum": 1, "maximum": 600 },
                 "stdin": { "type": "string" },
-                "runInBackground": { "type": "boolean" }
+                "runInBackground": { "type": "boolean" },
+                "yieldTimeMs": {
+                    "type": "integer", "minimum": 0, "maximum": 30000,
+                    "description": "Wait budget for this response only; does not terminate the command."
+                }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -637,7 +622,7 @@ pub(super) fn poll_definition() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 600000,
-                    "description": "Wait this many milliseconds for output, default 0. This is not the shell command timeout."
+                    "description": "Collect output until exit or this wait budget expires, default 10000ms. Does not change the command execution deadline."
                 }
             },
             "required": ["shellId"],
@@ -692,18 +677,25 @@ mod tests {
             block_until_ms: None,
         };
         assert!(validate_poll(&empty_poll).is_err());
+        for (wait, valid) in [(0, true), (30_000, true), (30_001, false)] {
+            let start: ShellStartArgs = serde_json::from_value(serde_json::json!({
+                "command": "true", "yieldTimeMs": wait,
+            }))
+            .unwrap();
+            assert_eq!(validate_start(&start).is_ok(), valid);
+        }
     }
 
     #[test]
     fn bounded_output_keeps_a_valid_utf8_tail_and_counts_discarded_bytes() {
         let mut output = BoundedOutput::default();
-        output.push(&"x".repeat(MAX_FOREGROUND_OUTPUT_BYTES - 1));
+        output.push(&"x".repeat(MAX_RESPONSE_OUTPUT_BYTES - 1));
         output.push("界界");
 
-        assert!(output.content.len() <= MAX_FOREGROUND_OUTPUT_BYTES);
+        assert!(output.content.len() <= MAX_RESPONSE_OUTPUT_BYTES);
         assert_eq!(
             output.dropped_bytes + output.content.len(),
-            MAX_FOREGROUND_OUTPUT_BYTES + 5
+            MAX_RESPONSE_OUTPUT_BYTES + 5
         );
         assert!(output.content.ends_with("界界"));
     }
@@ -765,6 +757,8 @@ mod tests {
         assert!(!succeeded.is_error);
         assert_eq!(succeeded.error, None);
         assert_eq!(succeeded.metadata["executionStatus"], "succeeded");
+        assert!(succeeded.metadata["shellId"].is_null());
+        assert!(succeeded.content.contains("do not poll"));
         assert!(failed.is_error);
         assert_eq!(failed.error.as_deref(), Some(failed.content.as_str()));
         assert_eq!(failed.metadata["executionStatus"], "failed");

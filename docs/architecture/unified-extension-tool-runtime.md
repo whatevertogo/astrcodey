@@ -774,6 +774,7 @@ Host 提供：
 
 - `spawn`：运行一个 call-owned pipes process 并收集有界输出；
 - `start`：启动 call-owned 或 session-owned pipes process 并返回 opaque handle；
+  省略 `timeout_ms` 时无总时限，显式值仍校验为 1–600000ms；`spawn` 保留 30000ms 默认值；
 - `read`：增量读取 stdout/stderr；
 - `input(write)`：向 stdin 写入；
 - `input(close)`：关闭 stdin，让等待 EOF 的进程可以结束；
@@ -814,8 +815,8 @@ token。扩展并不知道当前 provider 的 tokenizer，也不应各自实现�
 平台采用两层通用约束：
 
 1. Host process 对每个 handle 的未读 stdout、stderr 和 combined 分别保留最多 1 MiB，读取后
-   消费缓冲；溢出时保留最新尾部并返回 `droppedBytes`。Coding Extension 的前台聚合也只保留
-   1 MiB combined 尾部，避免高吞吐进程在 30 秒自动转后台之前重新引入无界内存。
+   消费缓冲；溢出时保留最新尾部并返回 `droppedBytes`。Coding Extension 的每次等待聚合也只保留
+   1 MiB combined 尾部，避免高吞吐进程在每次等待窗口内重新引入无界内存。
 2. Session 在 PostToolUse 之后、durable commit 之前，对所有扩展一视同仁地执行 tool-result
    预算：单结果超过 30,000 bytes 自动写入 session-owned artifact；模型只收到短预览、opaque
    `artifactId` 和 `read_tool_result` 的分页指引。`artifactId` 是由调用归属确定性导出的哈希 ID，
@@ -978,8 +979,10 @@ workspace I/O、process 和 artifact 实现不能因为“这是第一方 Extens
 ### 11.3 Shell 超时
 
 shell 调用可通过 `timeout` 显式指定 1 到 600 秒；省略时读取 Coding Extension 自己的
-`shellTimeoutSecs` 配置，默认 120 秒。平台删除旧的 `runtime.shellTimeoutSecs`，server 和 session
-都不再了解 shell 配置。Coding Extension 在候选实例的 `validate_config` / `start` 边界读取并固定
+`shellTimeoutSecs` 配置；两者均未设置时不施加总时限。`yieldTimeMs` 只控制初次等待
+（默认 10000ms，范围 0–30000ms），`shell_poll.blockUntilMs` 只控制后续等待，均不终止进程。
+运行中的结果返回 `shellId`，终态结果将其置空并提示停止轮询。平台删除旧的
+`runtime.shellTimeoutSecs`，server 和 session 都不再了解 shell 配置。Coding Extension 在候选实例的 `validate_config` / `start` 边界读取并固定
 默认值；配置变化会构造新实例，校验或启动失败不会修改已发布实例。已经构造完成的单次 Host
 process request 固定当次 timeout，新代发布只影响后续 turn。
 

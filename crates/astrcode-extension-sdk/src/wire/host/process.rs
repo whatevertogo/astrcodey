@@ -84,6 +84,7 @@ pub struct HostProcessStartRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub lifetime: HostProcessLifetime,
+    /// Optional execution deadline. Omission keeps the process alive until exit or owner cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
