@@ -229,7 +229,8 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         first_user_message: Option<String>,
         messages: Vec<TranscriptMessage>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        // StoredEvent 将锚点放在记录头，旧版严格 payload 解码器仍可读取 fork。
+        #[serde(skip)]
         input_token_anchor: Option<ContextTokenAnchor>,
     },
     ErrorOccurred {

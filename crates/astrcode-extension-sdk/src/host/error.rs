@@ -10,7 +10,7 @@ pub struct HostError {
     pub message: String,
     pub hint: Option<String>,
     pub retryable: bool,
-    pub details: Option<Value>,
+    pub details: Option<Box<Value>>,
 }
 
 impl HostError {
@@ -35,7 +35,7 @@ impl HostError {
     }
 
     pub fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 
@@ -81,12 +81,22 @@ mod tests {
             message: "future failure".into(),
             hint: Some("upgrade the extension".into()),
             retryable: true,
-            details: Some(json!({ "revision": 3 })),
+            details: Some(Box::new(json!({ "revision": 3 }))),
         };
 
         let error = HostError::from(payload.clone());
         assert_eq!(error.code_enum(), None);
         let round_trip = ErrorPayload::from(error);
+        assert_eq!(
+            serde_json::to_value(&round_trip).unwrap(),
+            json!({
+                "code": "future_host_failure",
+                "message": "future failure",
+                "hint": "upgrade the extension",
+                "retryable": true,
+                "details": { "revision": 3 }
+            })
+        );
         assert_eq!(round_trip.code, payload.code);
         assert_eq!(round_trip.message, payload.message);
         assert_eq!(round_trip.hint, payload.hint);

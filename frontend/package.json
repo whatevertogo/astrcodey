@@ -44,6 +44,9 @@
     "tailwind-merge": "^3.5.0",
     "zustand": "^5"
   },
+  "overrides": {
+    "minimatch": "^11.0.6"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@rolldown/plugin-babel": "^0.2.3",

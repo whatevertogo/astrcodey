@@ -1,6 +1,8 @@
 //! Transcript 前缀指纹：rewrite 乐观并发校验用的跨进程稳定哈希。
 
-use crate::llm::LlmMessage;
+use std::borrow::Cow;
+
+use crate::llm::{LlmContent, LlmMessage};
 
 const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV1A64_PRIME: u64 = 0x100000001b3;
@@ -32,10 +34,10 @@ pub fn system_prompt_fingerprint(system_prompt: &str) -> String {
 ///
 /// 指纹持久化在 `TranscriptRewritten` 事件里，由提交时的 projection 重算比较。
 ///
-/// 跨版本不变式：消息段取自 `serde_json` 派生序列化，字段名与字段顺序直接决定
-/// 哈希输入。`LlmMessage` / `LlmContent` 的序列化形状变更（改名、重排、新增无
-/// `skip_serializing_if` 的字段）会静默改变指纹，使新旧进程对同一前缀算出不同
-/// 值；这类变更必须显式决策，不能当作普通重构。
+/// 跨版本不变式：工具参数的 JSON 对象按键排序，消息段取自派生序列化。
+/// `LlmMessage` / `LlmContent` 的字段名与字段顺序直接决定哈希输入。
+/// 改名、重排或新增非可省略字段会使新旧进程对同一前缀算出不同指纹，
+/// 这类变更必须显式决策，不能当作普通重构。
 ///
 /// 当前 `LlmContent` 只含 `String`/`bool`/`serde_json::Value`，序列化实际不会失败；
 /// 但该不变量未被类型系统编码——未来新增字段（如裸 `f64`）可能引入 JSON 无法编码
@@ -46,7 +48,22 @@ pub fn transcript_prefix_fingerprint<M: std::borrow::Borrow<LlmMessage>>(
 ) -> Result<String, serde_json::Error> {
     let serialized_messages: Vec<String> = messages
         .iter()
-        .map(|message| serde_json::to_string(message.borrow()))
+        .map(|message| {
+            let mut message = Cow::Borrowed(message.borrow());
+            if message
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmContent::ToolCall { .. }))
+            {
+                // 只排序动态参数；派生结构的字段序属于既有持久化指纹契约。
+                for content in &mut message.to_mut().content {
+                    if let LlmContent::ToolCall { arguments, .. } = content {
+                        arguments.sort_all_objects();
+                    }
+                }
+            }
+            serde_json::to_string(message.as_ref())
+        })
         .collect::<Result<_, _>>()?;
     let mut parts: Vec<&str> = Vec::with_capacity(serialized_messages.len() + 1);
     parts.push(system_prompt);
@@ -121,6 +138,23 @@ mod tests {
             transcript_prefix_fingerprint("system", &[message]).unwrap(),
             reference(&["system", &serialized])
         );
+    }
+
+    #[test]
+    fn tool_arguments_preserve_legacy_fingerprint_independent_of_key_order() {
+        for arguments in [
+            r#"{"z":2,"a":[{"d":4,"c":3}]}"#,
+            r#"{"a":[{"c":3,"d":4}],"z":2}"#,
+        ] {
+            let message: LlmMessage = serde_json::from_str(&format!(
+                r#"{{"role":"assistant","content":[{{"type":"tool_call","call_id":"call-1","name":"read","arguments":{arguments}}}]}}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                transcript_prefix_fingerprint("system", &[message]).unwrap(),
+                "4c57c1e3c023d2b4"
+            );
+        }
     }
 
     #[test]

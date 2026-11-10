@@ -33,6 +33,11 @@
 | 运行时资源 | event sink、审批 sender、file observation、工具缓存 | 否 | `SessionRuntimeState` |
 | 大结果/诊断输入 | tool artifact、compact snapshot | 独立文件 | storage |
 
+fork 的用量锚点（真实 token 用量及其覆盖的消息范围）保存于 `StoredEvent` 的可选记录头
+`input_token_anchor`，不进入严格解码的领域 payload。旧版 storage 可忽略记录头并继续
+读取 fork 消息；新版读取时将锚点恢复到 fork 事实，并在 projection 边界校验覆盖范围和
+模型窗口。发送给客户端的 `Event` 不携带该记录头。
+
 `Event` 联合类型只用于进程内 fan-out 和协议映射：
 
 ```text

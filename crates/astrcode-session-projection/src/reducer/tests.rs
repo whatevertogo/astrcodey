@@ -34,16 +34,17 @@ fn fork_replay_accepts_legacy_events_and_validates_usage_anchor() {
         (Some((2, 200_000)), false),
         (Some((1, 0)), false),
     ] {
-        let mut payload = legacy.clone();
+        let payload = serde_json::from_value(legacy.clone()).unwrap();
+        let mut record = serde_json::to_value(event(1, &sid, payload)).unwrap();
         if let Some((covered_message_count, model_context_window)) = anchor {
-            payload["input_token_anchor"] = serde_json::json!({
+            record["input_token_anchor"] = serde_json::json!({
                 "context_tokens": 180_000,
                 "model_context_window": model_context_window,
                 "covered_message_count": covered_message_count,
             });
         }
-        let payload = serde_json::from_value(payload).unwrap();
-        let result = replay(sid.clone(), &[started(0, &sid), event(1, &sid, payload)]);
+        let stored = serde_json::from_value(record).unwrap();
+        let result = replay(sid.clone(), &[started(0, &sid), stored]);
         if valid {
             let model = result.unwrap();
             assert_eq!(

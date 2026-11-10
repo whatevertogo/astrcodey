@@ -39,7 +39,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt", "compat"] }
 tower-http = { workspace = true }
 uuid = { workspace = true }
 agent-client-protocol = { workspace = true }

@@ -878,6 +878,7 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
             DurableEventPayload::TokenUsageRecorded {
                 usage: astrcode_core::llm::LlmTokenUsage {
                     input_tokens: Some(190_000),
+                    output_tokens: Some(100),
                     ..Default::default()
                 },
                 model_context_window: 200_000,
@@ -885,6 +886,23 @@ async fn fork_session_truncates_at_cursor_and_rejects_bad_input() {
         )])
         .await
         .unwrap();
+    let current_model = store
+        .session_read_model(&SessionId::new(source.session_id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        current_model
+            .model_context
+            .usage
+            .as_ref()
+            .unwrap()
+            .context_tokens,
+        190_100
+    );
+    assert_ne!(
+        current_model.model_context.usage,
+        source_model.model_context.usage
+    );
     let historical = ops
         .fork_session(ForkSessionRequest {
             source_session_id: source.session_id.clone(),

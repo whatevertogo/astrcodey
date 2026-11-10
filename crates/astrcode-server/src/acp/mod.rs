@@ -9,11 +9,15 @@ mod events;
 use std::{collections::HashSet, sync::Arc};
 
 use agent_client_protocol::{
-    Agent, ByteStreams, Client, ConnectionTo, Dispatch, Error, Responder,
-    schema::{
-        AgentCapabilities, AgentNotification, CancelNotification, InitializeRequest,
-        InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-        ProtocolVersion, SessionId as AcpSessionId, StopReason,
+    Agent, ByteStreams, Client, Error,
+    schema::ProtocolVersion,
+    v1::{
+        ConnectionTo, Dispatch, Responder,
+        schema::{
+            AgentCapabilities, AgentNotification, CancelNotification, InitializeRequest,
+            InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
+            PromptResponse, SessionId as AcpSessionId, StopReason,
+        },
     },
 };
 use astrcode_core::{event::Event, types::SessionId};
@@ -35,7 +39,7 @@ pub async fn run_acp_server(server_app: Arc<ServerApp>) -> agent_client_protocol
     let session_commands = server_app.session_commands().clone();
 
     let result = Agent
-        .builder()
+        .v1()
         .name("astrcode")
         .on_receive_request(
             {
@@ -46,7 +50,7 @@ pub async fn run_acp_server(server_app: Arc<ServerApp>) -> agent_client_protocol
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1)
                             .agent_capabilities(AgentCapabilities::new())
-                            .agent_info(agent_client_protocol::schema::Implementation::new(
+                            .agent_info(agent_client_protocol::v1::schema::Implementation::new(
                                 "astrcode",
                                 env!("CARGO_PKG_VERSION"),
                             )),
@@ -103,11 +107,11 @@ pub async fn run_acp_server(server_app: Arc<ServerApp>) -> agent_client_protocol
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_dispatch(
-            async move |message: Dispatch, cx: ConnectionTo<Client>| {
-                message.respond_with_error(
-                    agent_client_protocol::schema::Error::method_not_found(),
-                    cx,
-                )
+            async move |message: Dispatch, _cx: ConnectionTo<Client>| match message {
+                Dispatch::Request(_, responder) => {
+                    responder.respond_with_error(Error::method_not_found())
+                },
+                Dispatch::Notification(_) | Dispatch::Response(_, _) => Ok(()),
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
@@ -244,26 +248,28 @@ fn stop_reason_from_finish_reason(finish_reason: &str) -> StopReason {
     }
 }
 
-fn prompt_to_text(blocks: &[agent_client_protocol::schema::ContentBlock]) -> Result<String, Error> {
+fn prompt_to_text(
+    blocks: &[agent_client_protocol::v1::schema::ContentBlock],
+) -> Result<String, Error> {
     let mut parts = Vec::new();
 
     for block in blocks {
         match block {
-            agent_client_protocol::schema::ContentBlock::Text(tc) => {
+            agent_client_protocol::v1::schema::ContentBlock::Text(tc) => {
                 if !tc.text.is_empty() {
                     parts.push(tc.text.clone());
                 }
             },
-            agent_client_protocol::schema::ContentBlock::ResourceLink(link) => {
+            agent_client_protocol::v1::schema::ContentBlock::ResourceLink(link) => {
                 parts.push(resource_link_text(link));
             },
-            agent_client_protocol::schema::ContentBlock::Image(_) => {
+            agent_client_protocol::v1::schema::ContentBlock::Image(_) => {
                 return Err(unsupported_prompt_block("image"));
             },
-            agent_client_protocol::schema::ContentBlock::Audio(_) => {
+            agent_client_protocol::v1::schema::ContentBlock::Audio(_) => {
                 return Err(unsupported_prompt_block("audio"));
             },
-            agent_client_protocol::schema::ContentBlock::Resource(_) => {
+            agent_client_protocol::v1::schema::ContentBlock::Resource(_) => {
                 return Err(unsupported_prompt_block("embedded resource"));
             },
             _ => return Err(unsupported_prompt_block("unknown")),
@@ -277,7 +283,7 @@ fn prompt_to_text(blocks: &[agent_client_protocol::schema::ContentBlock]) -> Res
     Ok(parts.join("\n\n"))
 }
 
-fn resource_link_text(link: &agent_client_protocol::schema::ResourceLink) -> String {
+fn resource_link_text(link: &agent_client_protocol::v1::schema::ResourceLink) -> String {
     let label = link.title.as_deref().unwrap_or(&link.name);
     let mut text = format!("[Resource: {label}]\nURI: {}", link.uri);
 
@@ -323,7 +329,7 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agent_client_protocol::schema::{ContentBlock, ResourceLink, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, ResourceLink, TextContent};
     use astrcode_core::{
         event::{
             DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, StoredEvent,
@@ -371,9 +377,9 @@ mod tests {
     #[test]
     fn prompt_to_text_rejects_unsupported_blocks() {
         let err = prompt_to_text(&[ContentBlock::Resource(
-            agent_client_protocol::schema::EmbeddedResource::new(
-                agent_client_protocol::schema::EmbeddedResourceResource::TextResourceContents(
-                    agent_client_protocol::schema::TextResourceContents::new(
+            agent_client_protocol::v1::schema::EmbeddedResource::new(
+                agent_client_protocol::v1::schema::EmbeddedResourceResource::TextResourceContents(
+                    agent_client_protocol::v1::schema::TextResourceContents::new(
                         "contents",
                         "file:///workspace/notes.md",
                     ),
