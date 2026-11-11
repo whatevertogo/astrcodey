@@ -25,6 +25,10 @@ interface and Host-owned pipe processes.
 - Both initial execution and polling collect incremental output until exit or
   their wait deadline, rather than returning on each output notification.
   Output remains bounded and reports dropped bytes.
+- If collection is interrupted after consuming output, the error response keeps
+  that output. Overlapping polls for one handle return a retryable busy error;
+  the active poll owns its draining reads until it returns or is dropped.
+- Cancelled zero-wait reads and failed promotions reclaim their call-owned handle.
 - Only running results expose a usable `shellId`. Terminal results include the
   final exit/timeout/cancellation state and explicitly tell the model to stop
   polling. Reading a terminal result releases its handle, as before.

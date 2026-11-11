@@ -461,7 +461,7 @@ pub enum ConversationBlockDto {
         approval: Option<ToolApprovalDto>,
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        arguments_json: Option<serde_json::Value>,
+        arguments_json: Option<Box<serde_json::Value>>,
     },
     Error {
         id: String,

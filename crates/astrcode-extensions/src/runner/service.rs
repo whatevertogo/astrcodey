@@ -262,7 +262,7 @@ mod tests {
                     message: "failed".into(),
                     hint: Some("hint".into()),
                     retryable: true,
-                    details: Some(json!({"marker": self.marker})),
+                    details: Some(Box::new(json!({"marker": self.marker}))),
                 });
             }
             if input == json!("recursive") {

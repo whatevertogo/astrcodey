@@ -69,7 +69,7 @@ pub(in crate::http) fn streaming_tool_call_block(
         status: ToolCallStatusDto::Streaming,
         metadata: None,
         approval: None,
-        arguments_json: arguments.cloned(),
+        arguments_json: arguments.cloned().map(Box::new),
     }
 }
 
@@ -198,7 +198,7 @@ fn tool_call_terminal_block(
         status,
         metadata,
         approval: None,
-        arguments_json: arguments_json.cloned(),
+        arguments_json: arguments_json.cloned().map(Box::new),
     }
 }
 

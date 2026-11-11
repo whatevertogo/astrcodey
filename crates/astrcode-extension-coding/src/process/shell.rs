@@ -1,7 +1,7 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -10,11 +10,12 @@ use std::{
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{
-        HostProcessLifetime, HostProcessReadRequest, HostProcessStartRequest, HostProcessState,
-        HostProcessTargetRequest,
+        HostError, HostProcessLifetime, HostProcessReadRequest, HostProcessStartRequest,
+        HostProcessState, HostProcessTargetRequest,
     },
     shell::{ShellFamily, ShellInfo, resolve_shell},
     tool::{ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan, ToolResult},
+    wire::WireErrorCode,
 };
 use serde::Deserialize;
 
@@ -92,7 +93,48 @@ pub(super) struct ShellHandler {
     default_timeout_secs: Arc<AtomicU64>,
 }
 
-pub(super) struct ShellPollHandler;
+#[derive(Default)]
+pub(super) struct ShellPollHandler {
+    active: Mutex<BTreeSet<String>>,
+}
+
+struct ActivePoll<'a> {
+    active: &'a Mutex<BTreeSet<String>>,
+    id: &'a str,
+}
+
+impl Drop for ActivePoll<'_> {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(self.id);
+    }
+}
+
+impl ShellPollHandler {
+    fn claim<'a>(&'a self, id: &'a str) -> Result<ActivePoll<'a>, ExtensionError> {
+        // A poll drains shared output and may retire the handle on its final read.
+        if !self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_owned())
+        {
+            return Err(HostError::new(
+                WireErrorCode::PeerBusy,
+                "another shell_poll is already reading this process",
+            )
+            .with_hint("wait for the active poll to finish before polling this shellId again")
+            .retryable(true)
+            .into());
+        }
+        Ok(ActivePoll {
+            active: &self.active,
+            id,
+        })
+    }
+}
 
 impl ShellHandler {
     pub(super) fn new(default_timeout_secs: Arc<AtomicU64>) -> Self {
@@ -175,6 +217,7 @@ impl ToolHandler for ShellPollHandler {
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let args: ShellPollArgs = context.arguments()?;
         validate_poll(&args)?;
+        let _active = self.claim(args.shell_id.trim())?;
         let output = collect_output(
             &context,
             args.shell_id.trim(),
@@ -203,7 +246,16 @@ async fn collect_output(
                 id: id.to_owned(),
                 wait_ms: Some(remaining.as_millis().min(1_000) as u64),
             })
-            .await?;
+            .await
+            .map_err(|mut error| {
+                if !combined.content.is_empty() {
+                    error
+                        .message
+                        .push_str("\nOutput collected before interruption:\n");
+                    error.message.push_str(&combined.content);
+                }
+                error
+            })?;
         stdout_bytes = stdout_bytes.saturating_add(output.stdout.len());
         stderr_bytes = stderr_bytes.saturating_add(output.stderr.len());
         dropped_bytes = dropped_bytes.saturating_add(output.dropped_bytes);
@@ -692,7 +744,11 @@ mod tests {
         output.push(&"x".repeat(MAX_RESPONSE_OUTPUT_BYTES - 1));
         output.push("界界");
 
-        assert!(output.content.len() <= MAX_RESPONSE_OUTPUT_BYTES);
+        assert_eq!(output.content.len(), MAX_RESPONSE_OUTPUT_BYTES);
+        assert_eq!(
+            output.content,
+            format!("{}界界", "x".repeat(MAX_RESPONSE_OUTPUT_BYTES - 6))
+        );
         assert_eq!(
             output.dropped_bytes + output.content.len(),
             MAX_RESPONSE_OUTPUT_BYTES + 5

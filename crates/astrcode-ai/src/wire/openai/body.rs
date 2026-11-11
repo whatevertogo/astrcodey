@@ -233,7 +233,12 @@ fn apply_prompt_cache_fields(
 fn prompt_cache_key(model_id: &str, system_text: &str, body: &serde_json::Value) -> String {
     let tools_text = body
         .get("tools")
-        .map(|tools| serde_json::to_string(tools).unwrap_or_default())
+        .map(|tools| {
+            let mut tools = tools.clone();
+            // 缓存键沿用按对象键排序的 JSON，不能受依赖启用 preserve_order 影响。
+            tools.sort_all_objects();
+            tools.to_string()
+        })
         .unwrap_or_else(|| "[]".to_string());
     format!(
         "astrcode-{}",

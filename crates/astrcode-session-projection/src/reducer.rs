@@ -300,6 +300,15 @@ fn validate_next_event_details(
             current_seq,
         });
     }
+    if let DurableEventPayload::SessionForked {
+        messages,
+        input_token_anchor: Some(anchor),
+        ..
+    } = &event.payload
+        && (anchor.covered_message_count > messages.len() || anchor.model_context_window == 0)
+    {
+        return Err(ProjectionError::InvalidForkInputTokenAnchor(seq));
+    }
     let expected_seq = current_seq
         .checked_add(1)
         .ok_or(ProjectionError::SequenceOverflow)?;
