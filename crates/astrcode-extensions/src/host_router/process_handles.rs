@@ -347,6 +347,16 @@ impl ProcessHandleStore {
             ));
         }
         let entry = self.owned_entry(&request.id, session_id, extension_instance_id)?;
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            if entry.is_call_owned() {
+                self.remove_entry_if_same(&request.id, &entry);
+                entry.cancel(ProcessTermination::Cancelled);
+            }
+            return Err(ErrorPayload::new(
+                WireErrorCode::Cancelled,
+                "process read cancelled",
+            ));
+        }
         if wait_ms > 0 {
             let notified = entry.output_changed.notified();
             if !entry.has_unread_output_or_stopped() {
@@ -423,8 +433,13 @@ impl ProcessHandleStore {
         session_id: &str,
         extension_instance_id: ExtensionInstanceId,
     ) -> Result<(), ErrorPayload> {
-        self.owned_entry(&request.id, session_id, extension_instance_id)?
-            .promote()
+        let entry = self.owned_entry(&request.id, session_id, extension_instance_id)?;
+        if let Err(error) = entry.promote() {
+            self.remove_entry_if_same(&request.id, &entry);
+            entry.cancel(ProcessTermination::Cancelled);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn kill(
@@ -534,7 +549,7 @@ async fn run_pipe_process(
     stderr: tokio::process::ChildStderr,
     stdin: Arc<AsyncMutex<Option<tokio::process::ChildStdin>>>,
     cancellation: CancellationToken,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) {
     let readers = async {
         tokio::join!(
@@ -543,7 +558,7 @@ async fn run_pipe_process(
         );
     };
     tokio::pin!(readers);
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
 
     enum FirstCompletion {
         Child(Option<i32>),
@@ -606,7 +621,7 @@ async fn run_pipe_process(
 async fn requested_termination(
     entry: Arc<ProcessEntry>,
     cancellation: CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
 ) -> ProcessTermination {
     tokio::select! {
         () = cancellation.cancelled() => entry
@@ -614,7 +629,12 @@ async fn requested_termination(
             .lock()
             .unwrap_or(ProcessTermination::Killed),
         () = call_owner_cancelled(&entry) => ProcessTermination::Cancelled,
-        () = tokio::time::sleep_until(deadline) => ProcessTermination::TimedOut,
+        () = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        } => ProcessTermination::TimedOut,
     }
 }
 
@@ -650,14 +670,19 @@ async fn pump_output(mut stream: impl AsyncRead + Unpin, entry: Arc<ProcessEntry
     }
 }
 
-fn validate_start_request(request: &HostProcessStartRequest) -> Result<Duration, ErrorPayload> {
+fn validate_start_request(
+    request: &HostProcessStartRequest,
+) -> Result<Option<Duration>, ErrorPayload> {
     if request.command.trim().is_empty() {
         return Err(ErrorPayload::new(
             WireErrorCode::InvalidInput,
             "command must not be empty",
         ));
     }
-    validated_timeout(request.timeout_ms)
+    request
+        .timeout_ms
+        .map(|timeout| validated_timeout(Some(timeout)))
+        .transpose()
 }
 
 fn remove_matching(
@@ -726,6 +751,20 @@ mod tests {
         assert_eq!(output.take(true), ("你".into(), 0));
     }
 
+    #[test]
+    fn handle_deadlines_are_optional_but_explicit_values_are_validated() {
+        let mut request = HostProcessStartRequest::new("command");
+        assert_eq!(validate_start_request(&request).unwrap(), None);
+        for (milliseconds, valid) in [(0, false), (1, true), (600_000, true), (600_001, false)] {
+            request.timeout_ms = Some(milliseconds);
+            let timeout = validate_start_request(&request);
+            assert_eq!(timeout.is_ok(), valid);
+            if valid {
+                assert_eq!(timeout.unwrap(), Some(Duration::from_millis(milliseconds)));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn call_owned_process_requires_invocation_cancellation() {
         let store = ProcessHandleStore::default();
@@ -737,6 +776,66 @@ mod tests {
             .await
             .expect_err("call-owned process requires cancellation ownership");
         assert_eq!(error.code_enum(), Some(WireErrorCode::ContextUnavailable));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_startup_releases_handles_before_zero_wait_read_or_promotion() {
+        let workspace = tempdir().unwrap();
+        let store = ProcessHandleStore::default();
+        let owner = ExtensionInstanceId::new();
+        for promote in [false, true] {
+            let cancellation = CancellationToken::new();
+            let mut request = HostProcessStartRequest::new("/bin/sh");
+            request.args = vec!["-c".into(), "sleep 10".into()];
+            request.lifetime = HostProcessLifetime::Call;
+            let handle = store
+                .start(
+                    request,
+                    workspace.path().to_str(),
+                    "session",
+                    owner,
+                    Some(&cancellation),
+                )
+                .await
+                .unwrap();
+            let entry = store.owned_entry(&handle.id, "session", owner).unwrap();
+            cancellation.cancel();
+            let error = if promote {
+                store
+                    .promote(HostProcessTargetRequest { id: handle.id }, "session", owner)
+                    .unwrap_err()
+            } else {
+                store
+                    .read(
+                        HostProcessReadRequest {
+                            id: handle.id,
+                            wait_ms: Some(0),
+                        },
+                        "session",
+                        owner,
+                        Some(&cancellation),
+                    )
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
+            assert!(store.list("session", owner).processes.is_empty());
+            let task = entry.controller.task.lock().take().unwrap();
+            tokio::time::timeout(Duration::from_secs(4), task)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(entry);
+            assert_eq!(
+                store.session_handle_permits.lock()["session"].available_permits(),
+                MAX_SESSION_PROCESS_HANDLES
+            );
+            assert_eq!(
+                store.session_process_permits.lock()["session"].available_permits(),
+                MAX_SESSION_PROCESSES
+            );
+        }
     }
 
     #[cfg(unix)]

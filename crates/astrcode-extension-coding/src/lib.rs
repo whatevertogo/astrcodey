@@ -21,7 +21,6 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 
 const EXTENSION_ID: &str = "astrcode-coding";
-const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
 
 /// Shared `InvalidInput` error constructor so tool modules keep one consistent hint shape.
@@ -39,35 +38,31 @@ pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
 }
 
 struct CodingExtension {
+    // Zero means no configured execution deadline; explicit values are validated on input.
     default_shell_timeout_secs: Arc<AtomicU64>,
 }
 
 impl Default for CodingExtension {
     fn default() -> Self {
         Self {
-            default_shell_timeout_secs: Arc::new(AtomicU64::new(DEFAULT_SHELL_TIMEOUT_SECS)),
+            default_shell_timeout_secs: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct CodingConfig {
-    shell_timeout_secs: u64,
-}
-
-impl Default for CodingConfig {
-    fn default() -> Self {
-        Self {
-            shell_timeout_secs: DEFAULT_SHELL_TIMEOUT_SECS,
-        }
-    }
+    shell_timeout_secs: Option<u64>,
 }
 
 impl CodingExtension {
     fn parse_config(config: &ExtensionConfig) -> Result<CodingConfig, ExtensionError> {
         let config = config.deserialize_or_default::<CodingConfig>()?;
-        if !(1..=MAX_SHELL_TIMEOUT_SECS).contains(&config.shell_timeout_secs) {
+        if config
+            .shell_timeout_secs
+            .is_some_and(|timeout| !(1..=MAX_SHELL_TIMEOUT_SECS).contains(&timeout))
+        {
             return Err(ExtensionError::invalid_input(
                 format!("shellTimeoutSecs must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"),
                 Some(format!(
@@ -81,7 +76,7 @@ impl CodingExtension {
     fn apply_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
         let config = Self::parse_config(config)?;
         self.default_shell_timeout_secs
-            .store(config.shell_timeout_secs, Ordering::Release);
+            .store(config.shell_timeout_secs.unwrap_or(0), Ordering::Release);
         Ok(())
     }
 }
@@ -183,6 +178,10 @@ mod tests {
     #[test]
     fn coding_config_validation_is_pure_and_application_updates_the_timeout() {
         let extension = CodingExtension::default();
+        assert_eq!(
+            extension.default_shell_timeout_secs.load(Ordering::Acquire),
+            0
+        );
         extension
             .apply_config(&extension_config(
                 EXTENSION_ID,
@@ -205,6 +204,13 @@ mod tests {
             extension.default_shell_timeout_secs.load(Ordering::Acquire),
             180,
             "validation must not mutate the live timeout"
+        );
+        extension
+            .apply_config(&extension_config(EXTENSION_ID, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(
+            extension.default_shell_timeout_secs.load(Ordering::Acquire),
+            0
         );
     }
 }

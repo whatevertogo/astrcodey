@@ -105,7 +105,7 @@ fn enable_only_coding(config: &mut Config) {
     );
 }
 
-async fn shell_timeout_secs(runner: &ExtensionRunner, working_dir: &Path) -> u64 {
+async fn shell_timeout_secs(runner: &ExtensionRunner, working_dir: &Path) -> Option<u64> {
     let working_dir = working_dir.to_string_lossy().into_owned();
     let tool = runner
         .tool_catalog_snapshot_typed(&working_dir)
@@ -136,9 +136,7 @@ async fn shell_timeout_secs(runner: &ExtensionRunner, working_dir: &Path) -> u64
         .execute(arguments, &execution)
         .await
         .expect("shell must execute");
-    result.metadata["timeoutSecs"]
-        .as_u64()
-        .expect("shell must report its effective timeout")
+    result.metadata["timeoutSecs"].as_u64()
 }
 
 #[tokio::test]
@@ -180,7 +178,7 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
             .is_empty()
     );
     assert!(!config_path.exists());
-    assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, 120);
+    assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, None);
 
     let mut invalid_reload = test_config();
     set_coding_timeout(&mut invalid_reload, 0);
@@ -191,7 +189,7 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
         Err(ConfigUpdateError::ExtensionValidation(_))
     ));
     assert!(manager.raw_config_snapshot().extensions.is_none());
-    assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, 120);
+    assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, None);
 
     let valid: Result<(), ConfigUpdateError<()>> = manager
         .update_and_save(|candidate| {
@@ -209,7 +207,10 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
             json!({ "shellTimeoutSecs": 180 }),
         )]))
     );
-    assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, 180);
+    assert_eq!(
+        shell_timeout_secs(&runner, temp_dir.path()).await,
+        Some(180)
+    );
     assert_eq!(
         runtime_services
             .read_effective()

@@ -278,7 +278,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `shellTimeoutSecs` | `120` | `shell` 未显式提供 `timeout` 时使用；范围 1–600 秒，热更新只影响后续调用 |
+| `shellTimeoutSecs` | 未设置（无总时限） | `shell` 未显式提供 `timeout` 时使用；显式配置范围 1–600 秒，热更新只影响后续调用 |
 
 ```toml
 [extensions.astrcode-coding]

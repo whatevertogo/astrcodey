@@ -254,8 +254,9 @@ web-tools 共享宿主的全局并发上限，当前协议不提供 extension �
 `workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。
 前者拒绝越界、symlink 和密钥类路径；进程能力只提供 Host-supervised stdin/stdout/stderr pipes，
 Unix 由 process group、Windows 由 Job Object 管理进程树，不提供 PTY 或 resize，也不是操作系统
-sandbox；后者允许访问宿主网络可达的 HTTP(S) 地址。这些能力均有并发、总超时和 I/O 大小限制，
-并响应会话取消。
+sandbox；后者允许访问宿主网络可达的 HTTP(S) 地址。这些能力有并发和 I/O 大小限制，
+并响应所属调用或会话的生命周期清理。`process.spawn` 和网络请求保留默认总超时；
+`process.start` 省略 `timeout_ms` 时无总时限，需要固定运行上限的扩展应显式传入。
 
 S5R 同时支持 `public_http` 和按扩展 id 隔离的 `authenticated_http`（兼容保留名称，当前
 HTTP 运输不校验 bearer token）；两者都不能
