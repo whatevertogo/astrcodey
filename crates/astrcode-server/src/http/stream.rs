@@ -24,7 +24,6 @@ use astrcode_protocol::{
 use astrcode_session_projection::AgentSessionStatus;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -38,8 +37,9 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::{
-    HttpState, error_response,
+    HttpState,
     projection::{live::event_to_deltas, replay::event_to_replay_deltas},
+    session_read_error_response,
 };
 
 type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
@@ -94,13 +94,7 @@ pub(in crate::http) async fn session_stream(
         .await
     {
         Ok(has_messages) => has_messages,
-        Err(_) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session not found",
-            );
-        },
+        Err(error) => return session_read_error_response(error),
     };
     let agent_sessions = match http_state
         .app
@@ -110,14 +104,7 @@ pub(in crate::http) async fn session_stream(
         .await
     {
         Ok(agent_sessions) => agent_sessions,
-        Err(error) => {
-            tracing::warn!(session_id = %session_id, "failed to read agent sessions for SSE stream: {error}");
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session not found",
-            );
-        },
+        Err(error) => return session_read_error_response(error),
     };
     let child_sessions: HashMap<SessionId, SessionId> = agent_sessions
         .iter()

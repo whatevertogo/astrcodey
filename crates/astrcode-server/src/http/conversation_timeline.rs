@@ -154,6 +154,13 @@ impl ConversationTimelineReader for EventLogConversationTimeline {
             return Err(ConversationTimelineError::MissingToolDeclaration);
         }
 
+        // The page excludes the cursor event, which may itself settle an older call.
+        if let Some(after_seq) =
+            before.and_then(|cursor| cursor.position.event_seq().checked_sub(1))
+        {
+            self.join_tool_settlements_after(session_id, after_seq, &mut entries, budget.max_items)
+                .await?;
+        }
         let (mut items, first_retained_position, dropped_items) = bounded_suffix(entries, budget)?;
         let turn_start = items
             .iter()
@@ -222,46 +229,8 @@ impl EventLogConversationTimeline {
                 block,
             })
             .collect::<Vec<_>>();
-        let mut pending = entries
-            .iter()
-            .filter_map(|entry| match &entry.block {
-                ConversationBlockDto::ToolCall {
-                    id,
-                    status: ToolCallStatusDto::Pending,
-                    ..
-                } => Some(id.clone()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let mut settlements = HashMap::new();
-        let mut after = event_seq.to_string();
-        // Fork 内部游标仍需合并 fork 之后为未回答调用补写的结果。
-        while !pending.is_empty() {
-            let events = self
-                .events
-                .replay_from_limited(session_id, &after, EVENT_CHUNK)
-                .await?;
-            for event in &events {
-                if let DurableEventPayload::ToolCallSettled {
-                    call_id,
-                    outcome,
-                    result,
-                } = &event.payload
-                    && pending.remove(call_id.as_str())
-                {
-                    settlements.insert(call_id.clone(), (*outcome, result.clone()));
-                }
-            }
-            if events.len() < EVENT_CHUNK {
-                break;
-            }
-            if let Some(last) = events.last() {
-                after = last.seq.to_string();
-            }
-        }
-        for entry in &mut entries {
-            apply_tool_settlement(&mut entry.block, &mut settlements);
-        }
+        self.join_tool_settlements_after(session_id, event_seq, &mut entries, budget.max_items)
+            .await?;
         let (items, first_position, dropped_items) = bounded_suffix(entries, budget)?;
         Ok(ConversationTimelinePage {
             items: items.into_iter().map(|entry| entry.block).collect(),
@@ -271,6 +240,50 @@ impl EventLogConversationTimeline {
                 .map(TimelineCursor::from_position),
             has_older: dropped_items,
         })
+    }
+
+    async fn join_tool_settlements_after(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        entries: &mut [TimelineEntry],
+        max_items: usize,
+    ) -> Result<(), ConversationTimelineError> {
+        let first_candidate = entries.len().saturating_sub(max_items);
+        let entries = &mut entries[first_candidate..];
+        let pending = entries
+            .iter()
+            .filter_map(|entry| match &entry.block {
+                ConversationBlockDto::ToolCall {
+                    id,
+                    status: ToolCallStatusDto::Pending,
+                    ..
+                } => Some(ToolCallId::from(id.as_str())),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut settlements = self
+            .events
+            .tool_settlements_after(session_id, after_seq, pending)
+            .await?
+            .into_iter()
+            .filter_map(|event| match event.event.payload {
+                DurableEventPayload::ToolCallSettled {
+                    call_id,
+                    outcome,
+                    result,
+                } => Some((call_id, (outcome, result))),
+                _ => None,
+            })
+            .collect();
+        for entry in entries {
+            apply_tool_settlement(&mut entry.block, &mut settlements);
+        }
+        Ok(())
     }
 }
 
@@ -332,12 +345,7 @@ fn project_events(
         };
         apply_tool_settlement(&mut block, settlements);
         let id = block_id(&block);
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|entry| block_id(&entry.block) == id)
-        {
-            existing.block = block;
-        } else {
+        if !entries.iter().any(|entry| block_id(&entry.block) == id) {
             entries.push(TimelineEntry {
                 position: TimelinePosition::Event(stored.seq),
                 block,
@@ -469,7 +477,10 @@ fn decode_cursor(cursor: &str) -> Result<TimelinePosition, ConversationTimelineE
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::event::{DurableEvent, DurableEventPayload};
+    use astrcode_core::{
+        compaction::CompactStrategy,
+        event::{CompactionDetails, DurableEvent, DurableEventPayload, TranscriptRewriteReason},
+    };
     use astrcode_protocol::http::ConversationBlockStatusDto;
     use astrcode_storage::{SessionEventJournal, in_memory::InMemoryEventStore};
 
@@ -624,6 +635,123 @@ mod tests {
         assert!(
             matches!(page.items.as_slice(), [ConversationBlockDto::ToolCall { text, status: ToolCallStatusDto::Interrupted, .. }] if text == "fork repaired")
         );
+    }
+
+    #[tokio::test]
+    async fn older_pages_join_tool_settlements_before_applying_budgets() {
+        let session_id = SessionId::new("tool-history-pages");
+        let store = Arc::new(InMemoryEventStore::new());
+        store
+            .create_session(crate::test_support::session_started_event_for_test(
+                session_id.clone(),
+                ".",
+                "test",
+            ))
+            .await
+            .unwrap();
+        let call_ids = ["first", "second", "third"];
+        let mut events = call_ids
+            .iter()
+            .map(|id| {
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::ToolCallRequested {
+                        call_id: (*id).into(),
+                        provider_call_id: (*id).into(),
+                        tool_name: "read".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        events.extend((0..EVENT_CHUNK).map(|_| {
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::ModelIdChanged {
+                    model_id: "test".into(),
+                },
+            )
+        }));
+        events.extend(call_ids.iter().map(|id| {
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::ToolCallSettled {
+                    call_id: (*id).into(),
+                    outcome: ToolCallOutcome::Completed,
+                    result: ToolResult::success(id.repeat(200)),
+                },
+            )
+        }));
+        store.append_events(events).await.unwrap();
+
+        let timeline = EventLogConversationTimeline::new(store);
+        for budget in [
+            PageBudget {
+                max_items: 1,
+                max_bytes: MAX_PAGE_BYTES,
+            },
+            PageBudget {
+                max_items: 10,
+                max_bytes: 1_500,
+            },
+        ] {
+            let mut before = None;
+            for expected in call_ids.iter().rev() {
+                let page = timeline
+                    .page_before(&session_id, before.as_ref(), budget)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        page.items.as_slice(),
+                        [ConversationBlockDto::ToolCall { id, status: ToolCallStatusDto::Complete, text, .. }]
+                            if id == expected && text == &expected.repeat(200)
+                    ),
+                    "expected only settled {expected}"
+                );
+                assert_eq!(page.has_older, *expected != "first");
+                before = page.older_cursor;
+                assert_eq!(before.is_some(), page.has_older);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_projection_keeps_newest_compaction_at_its_position() {
+        let compaction = |seq, summary: &str| {
+            StoredEvent::new(
+                seq,
+                DurableEvent::session(
+                    "compact-history".into(),
+                    DurableEventPayload::TranscriptRewritten {
+                        source_seq: seq - 1,
+                        source_fingerprint: "fingerprint".into(),
+                        messages: Vec::new(),
+                        reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                            trigger: "manual".into(),
+                            pre_tokens: 100,
+                            post_tokens: 20,
+                            summary: summary.into(),
+                            transcript_path: None,
+                            strategy: CompactStrategy::Manual {
+                                keep_recent_turns: None,
+                            },
+                        }),
+                    },
+                ),
+            )
+        };
+        let entries = project_events(
+            &[compaction(1, "older"), compaction(2, "newest")],
+            &mut HashMap::new(),
+        );
+        assert!(matches!(
+            entries.as_slice(),
+            [TimelineEntry {
+                position: TimelinePosition::Event(2),
+                block: ConversationBlockDto::CompactSummary { summary, .. },
+            }] if summary == "newest"
+        ));
     }
 
     #[tokio::test]

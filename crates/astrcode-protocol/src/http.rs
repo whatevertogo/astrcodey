@@ -336,6 +336,10 @@ pub struct SessionListItemDto {
 #[serde(rename_all = "camelCase")]
 pub struct SessionListResponseDto {
     pub sessions: Vec<SessionListItemDto>,
+    #[serde(default)]
+    pub unsupported_log_count: u32,
+    #[serde(default)]
+    pub corrupt_log_count: u32,
 }
 
 /// conversation cursor。v1 中它是 snapshot 最新 durable seq 的十进制字符串。

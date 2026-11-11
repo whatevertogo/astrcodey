@@ -25,4 +25,6 @@ pub use traits::{
     EventConsumerQuarantine, EventConsumerSkip, EventConsumerState, EventReader,
     SessionEventJournal, SessionPathResolver, SessionReader, SessionStore, ToolResultArtifactStore,
 };
-pub use types::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactRef};
+pub use types::{
+    CompactSnapshotInput, SessionCatalog, ToolResultArtifactInput, ToolResultArtifactRef,
+};

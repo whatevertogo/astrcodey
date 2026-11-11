@@ -1,5 +1,8 @@
 use astrcode_core::{
-    event::{DurableEventPayload, StoredEvent},
+    event::{
+        DurableEvent, DurableEventPayload, EVENT_FORMAT_VERSION, StoredEvent, ToolCallOutcome,
+    },
+    tool::ToolResult,
     types::SessionId,
 };
 use tempfile::tempdir;
@@ -84,6 +87,49 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
         [1, 2]
     );
     assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn event_log_finds_requested_tool_settlements_after_cursor_across_chunks() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("settlement-history");
+    let (log, _) = EventLog::create(dir.path().join("events.jsonl"), started_event(&session_id))
+        .await
+        .unwrap();
+    let settlement = |id: &str| {
+        DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::ToolCallSettled {
+                call_id: id.into(),
+                outcome: ToolCallOutcome::Completed,
+                result: ToolResult::success(id),
+            },
+        )
+    };
+    log.append_batch(vec![
+        settlement("at-cursor"),
+        settlement("first"),
+        user_event(&session_id, &"x".repeat(70 * 1024)),
+        settlement("unrequested"),
+        settlement("last"),
+    ])
+    .await
+    .unwrap();
+    log.force_sync().await.unwrap();
+
+    let matches = log
+        .tool_settlements_after(
+            1,
+            ["at-cursor", "first", "last"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let mut sequences: Vec<_> = matches.into_iter().map(|event| event.seq).collect();
+    sequences.sort_unstable();
+    assert_eq!(sequences, [2, 5]);
 }
 
 #[tokio::test]
@@ -257,4 +303,56 @@ fn event_log_rejects_malformed_event_lines() {
             "case {index} ({description}) unexpectedly passed: {result:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn incompatible_logs_are_classified_before_tail_recovery() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let session_id = SessionId::new("versioned-session");
+    let current = serde_json::to_value(StoredEvent::new(0, started_event(&session_id))).unwrap();
+    let incomplete_tail = b"\xf0\x9f";
+
+    for version in [None, Some(1), Some(EVENT_FORMAT_VERSION + 1)] {
+        let mut record = current.clone();
+        match version {
+            None => {
+                record.as_object_mut().unwrap().remove("format_version");
+            },
+            Some(version) => record["format_version"] = version.into(),
+        }
+        let mut bytes = format!("{record}\n").into_bytes();
+        bytes.extend_from_slice(incomplete_tail);
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(matches!(
+            EventLog::open(path.clone()).await,
+            Err(StorageError::UnsupportedEventFormat { found, line: 1, .. }) if found == version
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    for invalid_version in [serde_json::Value::Null, serde_json::json!("2")] {
+        let mut record = current.clone();
+        record["format_version"] = invalid_version;
+        assert!(matches!(
+            parse_event_line(&path, 1, &record.to_string()),
+            Err(StorageError::CorruptLog(_))
+        ));
+    }
+
+    let mut malformed = current.clone();
+    malformed["payload"] = serde_json::json!({ "type": "session_started" });
+    assert!(matches!(
+        parse_event_line(&path, 1, &malformed.to_string()),
+        Err(StorageError::CorruptLog(_))
+    ));
+
+    let committed = format!("{current}\n");
+    let mut bytes = committed.as_bytes().to_vec();
+    bytes.extend_from_slice(incomplete_tail);
+    std::fs::write(&path, &bytes).unwrap();
+    let (_log, events) = EventLog::open(path.clone()).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), committed.as_bytes());
 }

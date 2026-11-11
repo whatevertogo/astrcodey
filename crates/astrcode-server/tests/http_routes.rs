@@ -28,10 +28,11 @@ use astrcode_protocol::{
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
-        ConversationItemsPageResponseDto, ConversationSnapshotResponseDto,
-        ConversationStateResponseDto, CreateSessionResponseDto, CustomEventConsumerListResponseDto,
-        CustomEventConsumerStatusDto, PromptSubmitResponse, ProviderCatalogResponseDto,
-        SlashCommandListResponseDto, ToolSelectionDto,
+        ConversationErrorEnvelopeDto, ConversationItemsPageResponseDto,
+        ConversationSnapshotResponseDto, ConversationStateResponseDto, CreateSessionResponseDto,
+        CustomEventConsumerListResponseDto, CustomEventConsumerStatusDto, PromptSubmitResponse,
+        ProviderCatalogResponseDto, SessionListResponseDto, SlashCommandListResponseDto,
+        ToolSelectionDto,
     },
     wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -41,7 +42,7 @@ use astrcode_server::{
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, ServerRuntimeTestExt,
         SessionManager, TurnRegistry, TurnScheduler, assemble_server_runtime,
-        router_with_event_bus,
+        router_with_event_bus, session_started_event_for_test,
     },
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary};
@@ -1135,6 +1136,103 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     )
     .await;
     assert_eq!(after.blocks.len(), 2);
+}
+
+#[tokio::test]
+async fn session_routes_distinguish_incompatible_corrupt_and_missing_event_logs() {
+    let temp = tempfile::tempdir().unwrap();
+    let projects_base = temp.path().join("projects");
+    let config_path = temp.path().join("config.toml");
+    let repository =
+        astrcode_storage::testing::filesystem_session_repository(projects_base.clone());
+    let healthy_id = SessionId::new("healthy-session");
+    let incompatible_id = SessionId::new("incompatible-session");
+    let corrupt_id = SessionId::new("corrupt-session");
+    for id in [&healthy_id, &incompatible_id, &corrupt_id] {
+        repository
+            .create_session(session_started_event_for_test(
+                id.clone(),
+                ".",
+                "mock-model",
+            ))
+            .await
+            .unwrap();
+    }
+
+    let session_log = async |id: &SessionId| {
+        let dir = repository.session_store_dir(id).await.unwrap().unwrap();
+        dir.join(format!("session-{id}.jsonl"))
+    };
+    let incompatible_log = session_log(&incompatible_id).await;
+    let corrupt_log = session_log(&corrupt_id).await;
+    drop(repository);
+    let current_log = fs::read_to_string(&incompatible_log).unwrap();
+    let mut first_record: serde_json::Value =
+        serde_json::from_str(current_log.lines().next().unwrap()).unwrap();
+    assert!(
+        first_record
+            .as_object_mut()
+            .unwrap()
+            .remove("format_version")
+            .is_some()
+    );
+    fs::write(&incompatible_log, format!("{first_record}\n")).unwrap();
+    fs::write(corrupt_log, "not JSON\n").unwrap();
+
+    let app = router(
+        runtime_with_event_store(
+            Arc::new(immediate_llm()),
+            Arc::new(astrcode_storage::testing::filesystem_session_repository(
+                projects_base,
+            )),
+            config_path,
+            Vec::new(),
+        )
+        .await,
+    )
+    .unwrap();
+    let listing = get_json::<SessionListResponseDto>(app.clone(), "/api/sessions").await;
+    assert_eq!(listing.unsupported_log_count, 1);
+    assert_eq!(listing.corrupt_log_count, 1);
+    assert_eq!(listing.sessions.len(), 1);
+    assert_eq!(listing.sessions[0].session_id, healthy_id.as_str());
+
+    for (id, status, code) in [
+        (
+            incompatible_id.as_str(),
+            StatusCode::CONFLICT,
+            "unsupported_session_log_format",
+        ),
+        (
+            corrupt_id.as_str(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_log_corrupt",
+        ),
+        (
+            "missing-session",
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+        ),
+    ] {
+        for suffix in [
+            "/conversation",
+            "/conversation/state",
+            "/conversation/items",
+            "/stream",
+        ] {
+            let uri = format!("/api/sessions/{id}{suffix}");
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri.as_str()).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+            let error: ConversationErrorEnvelopeDto =
+                serde_json::from_slice(&body_bytes(response).await).unwrap();
+            assert_eq!(error.code, code, "{uri}");
+            assert!(!error.message.contains("jsonl"), "{uri}");
+        }
+    }
 }
 
 #[tokio::test]

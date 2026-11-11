@@ -1,14 +1,17 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEvent, StoredEvent},
+    event::{DurableEvent, DurableEventPayload, StoredEvent},
     tool::ToolResultArtifactSlice,
-    types::{Cursor, SessionId},
+    types::{Cursor, SessionId, ToolCallId},
 };
 use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
 use serde::{Deserialize, Serialize};
 
-use crate::{CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef};
+use crate::{
+    CompactSnapshotInput, SessionCatalog, StorageError, ToolResultArtifactInput,
+    ToolResultArtifactRef,
+};
 
 pub(crate) const EVENT_CONSUMER_AUDIT_RECORD_LIMIT: usize = 128;
 const EVENT_CONSUMER_ERROR_MAX_BYTES: usize = 4 * 1024;
@@ -240,6 +243,32 @@ pub trait EventReader: Send + Sync {
         Ok(events.split_off(keep_from))
     }
 
+    /// Finds at most one settlement per requested call from a single committed
+    /// snapshot, strictly after `after_seq`. The result order is unspecified.
+    async fn tool_settlements_after(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        mut call_ids: HashSet<ToolCallId>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        if call_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max_matches = call_ids.len();
+        let events = self.replay_from(session_id, &after_seq.to_string()).await?;
+        Ok(events
+            .into_iter()
+            .rev()
+            .filter(|event| {
+                matches!(
+                    &event.payload,
+                    DurableEventPayload::ToolCallSettled { call_id, .. } if call_ids.remove(call_id)
+                )
+            })
+            .take(max_matches)
+            .collect())
+    }
+
     async fn replay_events_active_or_recycled(
         &self,
         session_id: &SessionId,
@@ -320,6 +349,13 @@ pub trait SessionReader: Send + Sync {
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
+
+    async fn list_session_catalog(&self) -> Result<SessionCatalog, StorageError> {
+        Ok(SessionCatalog {
+            summaries: self.list_session_summaries().await?,
+            ..SessionCatalog::default()
+        })
+    }
 
     /// Lists every active session, including nested subagent sessions.
     ///

@@ -4,6 +4,7 @@
 //! 写入后不可修改。存储层在追加时分配单调递增的 `seq` 序号。
 
 use std::{
+    collections::HashSet,
     fs::{self, File},
     io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -13,10 +14,14 @@ use std::{
     },
 };
 
-use astrcode_core::event::{DurableEvent, DurableEventPayload, StoredEvent};
+use astrcode_core::{
+    event::{DurableEvent, DurableEventPayload, EVENT_FORMAT_VERSION, EventEnvelope, StoredEvent},
+    types::ToolCallId,
+};
 use astrcode_session_projection::{
     PreparedProjectionBatch, SessionSummary, SessionSummaryProjection,
 };
+use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
@@ -39,11 +44,7 @@ fn validate_event(
     path: &Path,
 ) -> Result<(), StorageError> {
     if event.session_id.as_str().is_empty() {
-        return Err(StorageError::InvalidId(format!(
-            "event at {}:{} has empty session_id",
-            path.display(),
-            line_number,
-        )));
+        return Err(corrupt_log(path, line_number, "event has empty session_id"));
     }
     if event.timestamp.timestamp() == 0 {
         tracing::warn!(
@@ -139,6 +140,38 @@ fn corrupt_log(path: &Path, line_number: usize, message: impl Into<String>) -> S
     ))
 }
 
+fn unsupported_event_format(path: &Path, line: usize, input: &str) -> Option<StorageError> {
+    #[derive(Deserialize)]
+    struct EventTag {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    let record: serde_json::Value = serde_json::from_str(input).ok()?;
+    let found = record
+        .get("format_version")
+        .map(u32::deserialize)
+        .transpose()
+        .ok()?;
+    if found == Some(EVENT_FORMAT_VERSION) {
+        return None;
+    }
+
+    record.get("seq")?.as_u64()?;
+    let event = EventEnvelope::<EventTag>::deserialize(&record).ok()?;
+    if event.id.as_str().is_empty()
+        || event.session_id.as_str().is_empty()
+        || event.payload.kind.is_empty()
+    {
+        return None;
+    }
+    Some(StorageError::UnsupportedEventFormat {
+        path: path.to_path_buf(),
+        line,
+        found,
+    })
+}
+
 fn parse_event_line(
     path: &Path,
     line_number: usize,
@@ -146,6 +179,9 @@ fn parse_event_line(
 ) -> Result<StoredEvent, StorageError> {
     let trimmed = line.trim();
     let event = serde_json::from_str::<StoredEvent>(trimmed).map_err(|error| {
+        if let Some(error) = unsupported_event_format(path, line_number, trimmed) {
+            return error;
+        }
         let preview = if trimmed.len() > 100 {
             format!("{}...", crate::traits::truncate_utf8(trimmed, 100))
         } else {
@@ -174,16 +210,16 @@ fn scan_events_at_path(
     let mut reader = BufReader::new(file.take(max_bytes.unwrap_or(u64::MAX)));
     let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
+        let bytes_read = reader.read_until(b'\n', &mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
         if bytes_read == 0 {
             break;
         }
-        if !line.ends_with('\n') {
+        if !line.ends_with(b"\n") {
             tracing::warn!(
                 path = %path.display(),
                 discarded_bytes = bytes_read,
@@ -191,11 +227,13 @@ fn scan_events_at_path(
             );
             break;
         }
+        let line = std::str::from_utf8(&line)
+            .map_err(|error| corrupt_log(path, line_number + 1, error.to_string()))?;
         if line.trim().is_empty() {
             continue;
         }
         line_number += 1;
-        let event = parse_event_line(path, line_number, &line)?;
+        let event = parse_event_line(path, line_number, line)?;
         validator.observe(&event, line_number, path)?;
         if !visit(event)? {
             return Ok(());
@@ -232,6 +270,21 @@ fn replay_events_before_at_path(
     if max_events == 0 {
         return Ok(Vec::new());
     }
+    let mut events = Vec::with_capacity(max_events);
+    scan_events_reverse_at_path(path, |event| {
+        if before_seq.is_none_or(|before| event.seq < before) {
+            events.push(event);
+        }
+        events.len() < max_events
+    })?;
+    events.reverse();
+    Ok(events)
+}
+
+fn scan_events_reverse_at_path(
+    path: &Path,
+    mut visit: impl FnMut(StoredEvent) -> bool,
+) -> Result<(), StorageError> {
     const REVERSE_SCAN_CHUNK_BYTES: u64 = 64 * 1024;
 
     let mut file = File::open(path).map_err(|error| {
@@ -242,14 +295,13 @@ fn replay_events_before_at_path(
     })?;
     let file_len = file.metadata().map_err(StorageError::Io)?.len();
     let Some(mut position) = last_committed_offset(&mut file, file_len)? else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let mut leading_fragment = Vec::new();
-    let mut events = Vec::with_capacity(max_events);
     let mut newer_seq = None;
     let mut session_id = None;
 
-    while position > 0 && events.len() < max_events {
+    while position > 0 {
         let start = position.saturating_sub(REVERSE_SCAN_CHUNK_BYTES);
         let mut chunk = vec![0; (position - start) as usize];
         file.seek(SeekFrom::Start(start))
@@ -305,19 +357,15 @@ fn replay_events_before_at_path(
             }
             newer_seq = Some(event.seq);
 
-            if before_seq.is_none_or(|before| event.seq < before) {
-                events.push(event);
-                if events.len() == max_events {
-                    break;
-                }
+            if !visit(event) {
+                return Ok(());
             }
         }
         leading_fragment = next_fragment;
         position = start;
     }
 
-    events.reverse();
-    Ok(events)
+    Ok(())
 }
 
 fn last_committed_offset(file: &mut File, file_len: u64) -> Result<Option<u64>, StorageError> {
@@ -698,7 +746,6 @@ fn open_at_path(path: PathBuf) -> Result<(WriterState, Vec<StoredEvent>), Storag
         )
         .into());
     }
-    recover_incomplete_tail(&path)?;
     let confirmed_len = sync_existing_log(&path)?;
     // 冷打开只扫一遍文件:校验事件流的同时把事件交给调用方做 projection 恢复,
     // 避免 open 与 replay 各自全量读一次。
@@ -710,6 +757,8 @@ fn open_at_path(path: PathBuf) -> Result<(WriterState, Vec<StoredEvent>), Storag
         .last()
         .and_then(|event| event.seq.checked_add(1))
         .ok_or_else(|| StorageError::CorruptLog("session event sequence overflow".into()))?;
+    // Decode the committed records before allowing tail recovery to modify the file.
+    recover_incomplete_tail(&path)?;
     let state = WriterState::open_append(path, first.session_id.clone(), next_seq)?;
     Ok((state, events))
 }
@@ -946,6 +995,30 @@ impl EventLog {
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_before_at_path(&path, before_seq, max_events)).await
+    }
+
+    pub(crate) async fn tool_settlements_after(
+        &self,
+        after_seq: u64,
+        mut call_ids: HashSet<ToolCallId>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || {
+            let mut settlements = Vec::new();
+            scan_events_reverse_at_path(&path, |event| {
+                if event.seq <= after_seq {
+                    return false;
+                }
+                if let DurableEventPayload::ToolCallSettled { call_id, .. } = &event.payload
+                    && call_ids.remove(call_id)
+                {
+                    settlements.push(event);
+                }
+                !call_ids.is_empty()
+            })?;
+            Ok(settlements)
+        })
+        .await
     }
 
     /// Replay events whose assigned seq is greater than `seq`.

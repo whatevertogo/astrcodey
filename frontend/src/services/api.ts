@@ -77,6 +77,12 @@ async function formatRequestError(
     if (parsed.code === 'no_active_turn') {
       return '当前 turn 已结束，无法 inject（消息会保留在 queue 中）'
     }
+    if (parsed.code === 'unsupported_session_log_format') {
+      return '此会话的日志格式与当前版本不兼容，请使用兼容版本打开。'
+    }
+    if (parsed.code === 'session_log_corrupt') {
+      return '此会话的日志已损坏，无法打开。'
+    }
     if (parsed.message) {
       return parsed.message
     }

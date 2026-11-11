@@ -328,6 +328,6 @@ HTTP 的 assistant block 使用 `complete`、`error`、`cancelled` 区分持久�
 
 ### 版本边界
 
-新 `StoredEvent` 记录显式写入 `format_version: 2`。缺少版本、旧版本和未知版本都返回读取错误；本次没有迁移或改写已有用户日志。旧日志需要保留旧运行时或另行迁移。stdio 的 `PROTOCOL_VERSION` 同步为 2；外部客户端和使用变更后的宿主事件 receipt 的插件需要同步对应契约。HTTP 使用明确的 DTO 映射，不直接把新的 outcome enum 当作客户端类型。
+新 `StoredEvent` 记录显式写入 `format_version: 2`。会话列表会分别提示因格式不兼容或日志损坏而跳过的会话数量。直接打开格式不兼容的会话时，服务返回 `unsupported_session_log_format`。原始日志保留，旧日志可用写入它的运行时读取或另行迁移。stdio 的 `PROTOCOL_VERSION` 同步为 2；外部客户端和使用变更后的宿主事件 receipt 的插件需要同步对应契约。HTTP 使用明确的 DTO 映射，不直接把新的 outcome enum 当作客户端类型。
 
 事件载荷、信封、提交入口和终态类型分别位于 `event/payload.rs`、`event/envelope.rs`、`event/ingress.rs` 和 `event/outcome.rs`。这些划分围绕实际责任，不新增另一套事件发布或状态管理机制。

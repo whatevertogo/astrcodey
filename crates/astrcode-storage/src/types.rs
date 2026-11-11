@@ -1,5 +1,13 @@
 use astrcode_core::llm::LlmMessage;
+use astrcode_session_projection::SessionSummary;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Default)]
+pub struct SessionCatalog {
+    pub summaries: Vec<SessionSummary>,
+    pub unsupported_log_count: u32,
+    pub corrupt_log_count: u32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactSnapshotInput {
