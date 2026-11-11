@@ -1,14 +1,20 @@
 //! 实时 EventPayload → ConversationDeltaDto 投影 + 控制态推算。
 
 use astrcode_core::event::{
-    CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
+    AgentSessionOutcome, AssistantDelta, CustomEventData, DurableEventPayload, Event, EventPayload,
+    LiveEventPayload, Phase,
 };
 use astrcode_protocol::{
     agent_session_link::AgentSessionUpdateDto,
-    http::{ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto},
+    http::{
+        ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto,
+        ToolCallStatusDto,
+    },
 };
 
-use super::blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block};
+use super::blocks::{
+    block_from_payload, streaming_assistant_block, tool_call_block, tool_settlement_delta,
+};
 
 pub(in crate::http) fn event_to_deltas(
     event: &Event,
@@ -28,22 +34,23 @@ fn durable_event_to_deltas(
     match payload {
         DurableEventPayload::UserMessage { .. }
         | DurableEventPayload::ErrorOccurred { .. }
+        | DurableEventPayload::UserInputDiscarded { .. }
+        | DurableEventPayload::ToolCallRequested { .. }
         | DurableEventPayload::RecapGenerated { .. } => block_from_payload(event)
             .map(|block| ConversationDeltaDto::AppendBlock { block })
             .into_iter()
             .collect(),
-        DurableEventPayload::AssistantMessageCompleted { .. } => block_from_payload(event)
+        DurableEventPayload::AssistantMessage { .. } => block_from_payload(event)
             .map(|block| ConversationDeltaDto::FinalizeBlock { block })
             .into_iter()
             .collect(),
-        DurableEventPayload::ToolCallCompleted { .. }
-        | DurableEventPayload::ToolCallFailed { .. }
-        | DurableEventPayload::ToolCallCancelled { .. } => {
-            let Some(block) = block_from_payload(event) else {
-                return Vec::new();
-            };
+        DurableEventPayload::ToolCallSettled {
+            call_id,
+            outcome,
+            result,
+        } => {
             vec![
-                ConversationDeltaDto::FinalizeBlock { block },
+                tool_settlement_delta(call_id, *outcome, result),
                 ConversationDeltaDto::UpdateControlState {
                     control: control_from_event(event, has_messages),
                 },
@@ -55,33 +62,23 @@ fn durable_event_to_deltas(
         DurableEventPayload::TurnStarted => vec![ConversationDeltaDto::UpdateControlState {
             control: control_from_event(event, has_messages),
         }],
-        DurableEventPayload::TurnCompleted { .. } => {
+        DurableEventPayload::TurnEnded { .. } => {
             let mut deltas = clear_transient_turn(event);
             deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
             });
             deltas
         },
-        DurableEventPayload::ToolCallRequested {
-            call_id,
-            tool_name,
-            arguments,
-            raw_arguments,
-        } => vec![ConversationDeltaDto::AppendBlock {
-            block: streaming_tool_call_block(
-                call_id.to_string(),
-                tool_name,
-                raw_arguments.is_none().then_some(arguments),
-            ),
-        }],
         DurableEventPayload::ToolApprovalRequested {
             call_id,
+            arguments,
             prompt,
             rule_key,
             ..
         } => vec![ConversationDeltaDto::ToolApprovalRequested {
             approval: ToolApprovalDto {
                 call_id: call_id.to_string(),
+                effective_arguments: arguments.clone(),
                 prompt: prompt.clone(),
                 rule_key: rule_key.clone(),
             },
@@ -108,25 +105,23 @@ fn durable_event_to_deltas(
                 task: task.clone(),
             },
         }],
-        DurableEventPayload::AgentSessionCompleted {
+        DurableEventPayload::AgentSessionSettled {
             child_session_id,
-            final_session_id,
-            summary,
+            outcome: AgentSessionOutcome::Completed { summary },
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: AgentSessionUpdateDto::Completed {
                 child_session_id: child_session_id.to_string(),
-                final_session_id: final_session_id.to_string(),
+                final_session_id: child_session_id.to_string(),
                 summary: summary.clone(),
             },
         }],
-        DurableEventPayload::AgentSessionFailed {
+        DurableEventPayload::AgentSessionSettled {
             child_session_id,
-            final_session_id,
-            error,
+            outcome: AgentSessionOutcome::Failed { error },
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: AgentSessionUpdateDto::Failed {
                 child_session_id: child_session_id.to_string(),
-                final_session_id: final_session_id.to_string(),
+                final_session_id: child_session_id.to_string(),
                 error: error.clone(),
             },
         }],
@@ -159,28 +154,34 @@ fn live_event_to_deltas(
             });
             deltas
         },
-        LiveEventPayload::AssistantMessageReset { message_id } => {
-            vec![ConversationDeltaDto::ResetBlock {
-                block_id: message_id.to_string(),
-            }]
-        },
-        LiveEventPayload::AssistantTextDelta { message_id, delta } => {
+        LiveEventPayload::AssistantMessageDelta {
+            message_id,
+            delta: AssistantDelta::Text(delta),
+        } => {
             vec![ConversationDeltaDto::PatchBlock {
                 block_id: message_id.to_string(),
                 text_delta: delta.clone(),
             }]
         },
-        LiveEventPayload::ThinkingDelta { message_id, delta } => {
+        LiveEventPayload::AssistantMessageDelta {
+            message_id,
+            delta: AssistantDelta::Reasoning(delta),
+        } => {
             vec![ConversationDeltaDto::ThinkingDelta {
                 block_id: message_id.to_string(),
                 delta: delta.clone(),
             }]
         },
-        LiveEventPayload::ToolCallStarted { call_id, tool_name } => {
-            let mut deltas = append_transient_block(
-                event,
-                streaming_tool_call_block(call_id.to_string(), tool_name, None),
+        LiveEventPayload::ToolCallPreviewStarted {
+            call_id, tool_name, ..
+        } => {
+            let block = tool_call_block(
+                call_id.to_string(),
+                tool_name,
+                None,
+                ToolCallStatusDto::Preparing,
             );
+            let mut deltas = append_transient_block(event, block);
             deltas.push(ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
             });
@@ -207,12 +208,10 @@ fn live_event_to_deltas(
             deltas
         },
         LiveEventPayload::AgentRunStarted
-        | LiveEventPayload::AgentRunCompleted { .. }
+        | LiveEventPayload::AgentRunEnded { .. }
         | LiveEventPayload::LlmRetryRecovered
         | LiveEventPayload::CompactionStarted
-        | LiveEventPayload::CompactionCompleted { .. }
-        | LiveEventPayload::CompactionSkipped { .. }
-        | LiveEventPayload::CompactionFailed { .. } => {
+        | LiveEventPayload::CompactionEnded { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
             }]
@@ -220,7 +219,22 @@ fn live_event_to_deltas(
         LiveEventPayload::CustomEvent(extension_event) => {
             vec![custom_event_delta(extension_event)]
         },
-        LiveEventPayload::ToolCallArgumentsDelta { .. } => vec![],
+        LiveEventPayload::ToolCallArgumentsDelta { call_id, delta, .. } => {
+            vec![ConversationDeltaDto::ToolArgumentsDelta {
+                call_id: call_id.to_string(),
+                delta: delta.clone(),
+            }]
+        },
+        LiveEventPayload::ToolExecutionStarted { call_id, .. } => {
+            vec![ConversationDeltaDto::ToolExecutionStarted {
+                call_id: call_id.to_string(),
+            }]
+        },
+        LiveEventPayload::ToolCallPreviewDiscarded { call_id } => {
+            vec![ConversationDeltaDto::ToolCallPreviewDiscarded {
+                call_id: call_id.to_string(),
+            }]
+        },
     }
 }
 
@@ -267,25 +281,27 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::Live(
             LiveEventPayload::AgentRunStarted
             | LiveEventPayload::LlmRetrying { .. }
-            | LiveEventPayload::LlmRetryRecovered
-            | LiveEventPayload::AssistantMessageReset { .. },
+            | LiveEventPayload::LlmRetryRecovered,
         ) => Phase::Thinking,
         EventPayload::Live(
             LiveEventPayload::AssistantMessageStarted { .. }
-            | LiveEventPayload::AssistantTextDelta { .. }
-            | LiveEventPayload::ThinkingDelta { .. },
+            | LiveEventPayload::AssistantMessageDelta {
+                delta: AssistantDelta::Text(_),
+                ..
+            }
+            | LiveEventPayload::AssistantMessageDelta {
+                delta: AssistantDelta::Reasoning(_),
+                ..
+            }
+            | LiveEventPayload::ToolCallPreviewStarted { .. }
+            | LiveEventPayload::ToolCallArgumentsDelta { .. },
         ) => Phase::Streaming,
         EventPayload::Durable(DurableEventPayload::ToolCallRequested { .. })
         | EventPayload::Live(
-            LiveEventPayload::ToolCallStarted { .. }
-            | LiveEventPayload::ToolCallArgumentsDelta { .. }
+            LiveEventPayload::ToolExecutionStarted { .. }
             | LiveEventPayload::ToolOutputDelta { .. },
         ) => Phase::CallingTool,
-        EventPayload::Durable(
-            DurableEventPayload::ToolCallCompleted { .. }
-            | DurableEventPayload::ToolCallFailed { .. }
-            | DurableEventPayload::ToolCallCancelled { .. },
-        ) => Phase::Thinking,
+        EventPayload::Durable(DurableEventPayload::ToolCallSettled { .. }) => Phase::Thinking,
         EventPayload::Live(LiveEventPayload::CompactionStarted) => Phase::Compacting,
         EventPayload::Durable(DurableEventPayload::ErrorOccurred { .. })
         | EventPayload::Live(LiveEventPayload::ErrorOccurred { .. }) => Phase::Error,
@@ -295,21 +311,17 @@ fn projected_phase(payload: &EventPayload) -> Phase {
 
 fn active_turn_id_for_event(event: &Event) -> Option<String> {
     match &event.payload {
-        EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
-        | EventPayload::Live(LiveEventPayload::AgentRunCompleted { .. }) => None,
+        EventPayload::Durable(DurableEventPayload::TurnEnded { .. })
+        | EventPayload::Live(LiveEventPayload::AgentRunEnded { .. }) => None,
         _ => event.turn_id.as_ref().map(|turn_id| turn_id.to_string()),
     }
 }
 
 fn control_from_event(event: &Event, has_messages: bool) -> ConversationControlStateDto {
     let phase = match &event.payload {
-        EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
-        | EventPayload::Live(LiveEventPayload::AgentRunCompleted { .. }) => Phase::Idle,
-        EventPayload::Live(
-            LiveEventPayload::CompactionCompleted { .. }
-            | LiveEventPayload::CompactionSkipped { .. }
-            | LiveEventPayload::CompactionFailed { .. },
-        ) => {
+        EventPayload::Durable(DurableEventPayload::TurnEnded { .. })
+        | EventPayload::Live(LiveEventPayload::AgentRunEnded { .. }) => Phase::Idle,
+        EventPayload::Live(LiveEventPayload::CompactionEnded { .. }) => {
             if event.turn_id.is_some() {
                 Phase::Thinking
             } else {
@@ -388,15 +400,15 @@ mod tests {
     fn tool_request_upserts_durable_block_with_concise_arguments() {
         let event = event(
             EventPayload::Durable(DurableEventPayload::ToolCallRequested {
-                call_id: "tool-1".into(),
-                tool_name: "agent".into(),
-                arguments: serde_json::json!({
+provider_call_id: "tool-1".to_owned(),
+call_id: "tool-1".into(),
+tool_name: "agent".into(),
+arguments: (serde_json::json!({
                     "description": "Explore crate architecture",
                     "prompt": "Read every module and provide a very long report that should not appear in the collapsed summary line.",
                     "subagent_type": "explorer",
-                }),
-                raw_arguments: None,
-            }),
+                })).to_string(),
+}),
             None,
         );
 
@@ -421,7 +433,7 @@ mod tests {
                 let json = arguments_json.as_ref().unwrap();
                 assert_eq!(json["description"], "Explore crate architecture");
                 assert_eq!(json["subagent_type"], "explorer");
-                assert_eq!(*status, ToolCallStatusDto::Streaming);
+                assert_eq!(*status, ToolCallStatusDto::Pending);
             },
             other => panic!("unexpected delta: {other:?}"),
         }
@@ -437,7 +449,8 @@ mod tests {
                 "assistant-1",
             ),
             (
-                EventPayload::Live(LiveEventPayload::ToolCallStarted {
+                EventPayload::Live(LiveEventPayload::ToolCallPreviewStarted {
+                    message_id: "message".into(),
                     call_id: "tool-1".into(),
                     tool_name: "read".into(),
                 }),
@@ -466,10 +479,11 @@ mod tests {
     #[test]
     fn assistant_completion_finalizes_with_full_text() {
         let event = event(
-            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
+            EventPayload::Durable(DurableEventPayload::AssistantMessage {
                 message_id: "assistant-1".into(),
                 text: "complete answer".into(),
                 reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             }),
             None,
         );
@@ -505,9 +519,9 @@ mod tests {
     #[test]
     fn thinking_delta_targets_assistant_block() {
         let event = event(
-            EventPayload::Live(LiveEventPayload::ThinkingDelta {
+            EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
                 message_id: "assistant-1".into(),
-                delta: "reasoning".into(),
+                delta: astrcode_core::event::AssistantDelta::Reasoning("reasoning".into()),
             }),
             None,
         );
@@ -560,21 +574,6 @@ mod tests {
     }
 
     #[test]
-    fn assistant_message_reset_projects_explicit_block_reset() {
-        let event = event(
-            EventPayload::Live(LiveEventPayload::AssistantMessageReset {
-                message_id: "assistant-1".into(),
-            }),
-            Some("turn-1"),
-        );
-
-        assert!(matches!(
-            event_to_deltas(&event, true).as_slice(),
-            [ConversationDeltaDto::ResetBlock { block_id }] if block_id == "assistant-1"
-        ));
-    }
-
-    #[test]
     fn extension_event_preserves_namespaced_live_payload() {
         let event = event(
             EventPayload::Live(LiveEventPayload::CustomEvent(CustomEventData {
@@ -606,52 +605,47 @@ mod tests {
     fn tool_terminal_events_preserve_status_content_and_duration() {
         let cases = [
             (
-                EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
+                EventPayload::Durable(DurableEventPayload::ToolCallSettled {
                     call_id: "complete".into(),
-                    tool_name: "read".into(),
                     result: astrcode_core::tool::ToolResult::success("file contents")
                         .with_duration_ms(Some(4)),
-                    arguments: String::new(),
-                    arguments_json: None,
+                    outcome: astrcode_core::event::ToolCallOutcome::Completed,
                 }),
                 ToolCallStatusDto::Complete,
                 "file contents",
                 Some(4),
             ),
             (
-                EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
+                EventPayload::Durable(DurableEventPayload::ToolCallSettled {
                     call_id: "error".into(),
-                    tool_name: "read".into(),
                     result: astrcode_core::tool::ToolResult::error("domain error"),
-                    arguments: String::new(),
-                    arguments_json: None,
+                    outcome: astrcode_core::event::ToolCallOutcome::Completed,
                 }),
                 ToolCallStatusDto::Complete,
                 "domain error",
                 None,
             ),
             (
-                EventPayload::Durable(DurableEventPayload::ToolCallFailed {
+                EventPayload::Durable(DurableEventPayload::ToolCallSettled {
                     call_id: "failed".into(),
-                    tool_name: "read".into(),
-                    error: "executor failed".into(),
-                    metadata: Default::default(),
-                    duration_ms: Some(7),
-                    arguments: String::new(),
-                    arguments_json: None,
+                    outcome: astrcode_core::event::ToolCallOutcome::Failed,
+                    result: astrcode_core::tool::ToolResult::error("executor failed")
+                        .with_metadata(Default::default())
+                        .with_duration_ms(Some(7)),
                 }),
                 ToolCallStatusDto::Failed,
                 "executor failed",
                 Some(7),
             ),
             (
-                EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
+                EventPayload::Durable(DurableEventPayload::ToolCallSettled {
                     call_id: "cancelled".into(),
-                    tool_name: "read".into(),
-                    reason: "turn aborted".into(),
-                    duration_ms: Some(8),
-                    arguments: String::new(),
-                    arguments_json: None,
+                    outcome: astrcode_core::event::ToolCallOutcome::Cancelled,
+                    result: astrcode_core::tool::ToolResult::error(format!(
+                        "Tool cancelled: {}",
+                        "turn aborted".to_owned()
+                    ))
+                    .with_duration_ms(Some(8)),
                 }),
                 ToolCallStatusDto::Cancelled,
                 "Tool cancelled: turn aborted",
@@ -663,14 +657,11 @@ mod tests {
             let event = event(payload, None);
             let deltas = event_to_deltas(&event, true);
             let [
-                ConversationDeltaDto::FinalizeBlock {
-                    block:
-                        ConversationBlockDto::ToolCall {
-                            text,
-                            status,
-                            metadata,
-                            ..
-                        },
+                ConversationDeltaDto::ToolCallSettled {
+                    text,
+                    status,
+                    metadata,
+                    ..
                 },
                 ConversationDeltaDto::UpdateControlState { control },
             ] = deltas.as_slice()
@@ -695,8 +686,10 @@ mod tests {
     fn lifecycle_events_project_control_state() {
         let cases = [
             (
-                EventPayload::Live(LiveEventPayload::CompactionCompleted {
-                    messages_removed: 2,
+                EventPayload::Live(LiveEventPayload::CompactionEnded {
+                    outcome: astrcode_core::event::CompactionOutcome::Completed {
+                        messages_removed: 2,
+                    },
                 }),
                 Some("turn-1"),
                 PhaseDto::Thinking,
@@ -711,8 +704,10 @@ mod tests {
                 Some("turn-42"),
             ),
             (
-                EventPayload::Durable(DurableEventPayload::TurnCompleted {
-                    finish_reason: "stop".into(),
+                EventPayload::Durable(DurableEventPayload::TurnEnded {
+                    reason: astrcode_core::event::TurnEndReason::Completed {
+                        finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                    },
                 }),
                 Some("turn-42"),
                 PhaseDto::Idle,
@@ -720,8 +715,10 @@ mod tests {
                 None,
             ),
             (
-                EventPayload::Live(LiveEventPayload::CompactionCompleted {
-                    messages_removed: 2,
+                EventPayload::Live(LiveEventPayload::CompactionEnded {
+                    outcome: astrcode_core::event::CompactionOutcome::Completed {
+                        messages_removed: 2,
+                    },
                 }),
                 None,
                 PhaseDto::Idle,
@@ -742,7 +739,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("expected a control-state delta, got {deltas:?}"));
             if matches!(
                 event.payload,
-                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
+                EventPayload::Durable(DurableEventPayload::TurnEnded { .. })
             ) {
                 assert!(matches!(
                     deltas.first(),

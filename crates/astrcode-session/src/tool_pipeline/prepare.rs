@@ -43,9 +43,10 @@ impl ToolCalls {
             return Ok(PreparedToolInvocation {
                 index,
                 call_id: tc.call_id.clone(),
+                provider_call_id: tc.provider_call_id.clone(),
                 name: tc.name.clone(),
                 tool_input: args,
-                raw_arguments: None,
+                raw_arguments: tc.arguments.clone(),
                 plan: ToolPlan::default(),
                 mode: ExecutionMode::Sequential,
                 discovery_gate: None,
@@ -172,9 +173,10 @@ impl ToolCalls {
         Ok(PreparedToolInvocation {
             index,
             call_id: tc.call_id.clone(),
+            provider_call_id: tc.provider_call_id.clone(),
             name: tc.name.clone(),
             tool_input,
-            raw_arguments: None,
+            raw_arguments: tc.arguments.clone(),
             plan,
             mode,
             discovery_gate: self
@@ -296,11 +298,12 @@ fn reject_malformed_tool_call(
     PreparedToolInvocation {
         index,
         call_id: tool_call.call_id.clone(),
+        provider_call_id: tool_call.provider_call_id.clone(),
         name: tool_call.name.clone(),
         // `Value::String` keeps the provider output serializable and exact in
         // ToolCallRequested instead of disguising a parse failure as `{}`.
         tool_input: serde_json::Value::String(tool_call.arguments.clone()),
-        raw_arguments: Some(tool_call.arguments.clone()),
+        raw_arguments: tool_call.arguments.clone(),
         plan: ToolPlan::default(),
         mode: ExecutionMode::Sequential,
         discovery_gate: None,
@@ -435,6 +438,7 @@ mod tests {
     fn malformed_tool_call_preserves_provider_arguments_and_is_blocked() {
         let raw = r#"{"segments":[{"emotion":"NORMAL","text">"news"}]}"#;
         let tool_call = StreamedToolCall {
+            provider_call_id: "call-invalid".to_owned(),
             call_id: "call-invalid".into(),
             name: "interact".into(),
             arguments: raw.into(),
@@ -446,7 +450,7 @@ mod tests {
 
         assert_eq!(prepared.index, 3);
         assert_eq!(prepared.tool_input, serde_json::Value::String(raw.into()));
-        assert_eq!(prepared.raw_arguments.as_deref(), Some(raw));
+        assert_eq!(prepared.raw_arguments, raw);
         let PreparedToolDisposition::Rejected { error } = prepared.disposition else {
             panic!("malformed arguments must never be executable");
         };
@@ -499,6 +503,7 @@ mod tests {
         )]));
         let calls = ToolCalls::new(turn, Arc::clone(&registry), hooks, session, cancellation, 1);
         let tool_call = StreamedToolCall {
+            provider_call_id: "call-canonical".to_owned(),
             call_id: "call-canonical".into(),
             name: "canonicalProbe".into(),
             arguments: serde_json::json!({"provider": "raw"}).to_string(),
@@ -516,6 +521,7 @@ mod tests {
 
         let canonical = serde_json::json!({"enabled": true});
         assert_eq!(prepared.tool_input, canonical);
+        assert_eq!(prepared.raw_arguments, tool_call.arguments);
         assert!(matches!(
             prepared.disposition,
             PreparedToolDisposition::AwaitApprovals(ref approvals)

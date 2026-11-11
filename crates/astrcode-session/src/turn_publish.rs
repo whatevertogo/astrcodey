@@ -207,7 +207,7 @@ async fn dispatch_payload(
         // 其余 Live 变体默认 best-effort，丢事件是可接受的降级。
         EventPayload::Live(payload @ LiveEventPayload::CustomEvent(_)) => {
             let event_id = publisher.live_required(payload).await?;
-            Ok(EventDeliveryReceipt::LivePublished { event_id })
+            Ok(EventDeliveryReceipt::LiveAccepted { event_id })
         },
         EventPayload::Live(payload) => {
             publisher.live(payload);
@@ -616,10 +616,10 @@ mod tests {
             .emit_durable(
                 Some(&turn_id),
                 DurableEventPayload::ToolCallRequested {
+                    provider_call_id: "call-abort".to_owned(),
                     call_id: astrcode_core::types::ToolCallId::new("call-abort"),
                     tool_name: "read".into(),
-                    arguments: serde_json::json!({"path": "README.md"}),
-                    raw_arguments: None,
+                    arguments: (serde_json::json!({"path": "README.md"})).to_string(),
                 },
             )
             .await
@@ -647,9 +647,9 @@ mod tests {
         );
         assert!(!events.iter().any(|event| matches!(
             event.payload,
-            DurableEventPayload::ToolCallCancelled { .. }
+            DurableEventPayload::ToolCallSettled { .. }
                 | DurableEventPayload::TurnAbortedContext
-                | DurableEventPayload::TurnCompleted { .. }
+                | DurableEventPayload::TurnEnded { .. }
         )));
     }
 
@@ -665,10 +665,10 @@ mod tests {
             .emit_durable(
                 Some(&turn_id),
                 DurableEventPayload::ToolCallRequested {
+                    provider_call_id: "call-unsettled".to_owned(),
                     call_id: "call-unsettled".into(),
                     tool_name: "read".into(),
-                    arguments: serde_json::json!({"path": "README.md"}),
-                    raw_arguments: None,
+                    arguments: (serde_json::json!({"path": "README.md"})).to_string(),
                 },
             )
             .await
@@ -678,9 +678,10 @@ mod tests {
             &session,
             &turn_id,
             &crate::TurnFinalization {
-                finish_reason: "stop".into(),
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
                 pending_error: None,
-                aborted: false,
                 terminal_persisted: false,
             },
         )
@@ -701,7 +702,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event.payload, DurableEventPayload::TurnCompleted { .. }))
+                .any(|event| matches!(event.payload, DurableEventPayload::TurnEnded { .. }))
         );
     }
 

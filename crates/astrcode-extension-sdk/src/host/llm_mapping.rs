@@ -107,11 +107,13 @@ fn llm_content_to_wire(content: LlmContent) -> HostLlmContent {
             name,
             arguments,
             raw_arguments,
+            provider_call_id,
         } => HostLlmContent::ToolCall {
             call_id,
             name,
             arguments,
             raw_arguments,
+            provider_call_id,
         },
         LlmContent::ToolResult {
             tool_call_id,
@@ -142,7 +144,9 @@ fn llm_content_from_wire(content: HostLlmContent) -> LlmContent {
             name,
             arguments,
             raw_arguments,
+            provider_call_id,
         } => LlmContent::ToolCall {
+            provider_call_id,
             call_id,
             name,
             arguments,

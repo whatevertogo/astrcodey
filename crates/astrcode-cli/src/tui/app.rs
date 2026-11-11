@@ -45,8 +45,6 @@ pub struct App {
     pub needs_extension_refresh: bool,
     /// Resume / 切换会话后需要清屏重置终端。
     pub needs_terminal_reset: bool,
-    /// 流重试后需要从终端历史中撤回的 assistant message。
-    pub pending_assistant_stream_reset: Option<String>,
     /// 服务端 UI 选择请求。
     pub ui_picker: Option<UiPicker>,
     /// 挂起的工具审批（Tool Gate）。
@@ -63,6 +61,7 @@ pub struct App {
     pub scrollback_queue: Vec<ScrollbackEntry>,
     // Streaming state
     pub stream_states: BTreeMap<String, crate::tui::streaming::controller::StreamController>,
+    pub tool_names: BTreeMap<String, String>,
     pub child_agents: BTreeMap<String, crate::tui::store::child_agent::ChildAgentTracker>,
     /// child_session_id → tool_call_id 映射，用于将子 session 事件路由到对应的 tracker。
     pub child_session_map: BTreeMap<String, String>,
@@ -131,7 +130,6 @@ impl App {
             keybindings: Vec::new(),
             needs_extension_refresh: false,
             needs_terminal_reset: false,
-            pending_assistant_stream_reset: None,
             ui_picker: None,
             pending_tool_approval: None,
             session_picker: None,
@@ -142,6 +140,7 @@ impl App {
             messages: Vec::new(),
             scrollback_queue: Vec::new(),
             stream_states: BTreeMap::new(),
+            tool_names: BTreeMap::new(),
             child_agents: BTreeMap::new(),
             child_session_map: BTreeMap::new(),
             tool_renderers,
@@ -245,7 +244,7 @@ impl App {
         };
         if !is_streaming {
             self.scrollback_queue
-                .push(ScrollbackEntry::Message(msg.clone()));
+                .push(ScrollbackEntry::Message(Box::new(msg.clone())));
         }
         self.messages.push(msg);
     }
@@ -270,7 +269,7 @@ impl App {
         };
         if !is_streaming {
             self.scrollback_queue
-                .push(ScrollbackEntry::Message(msg.clone()));
+                .push(ScrollbackEntry::Message(Box::new(msg.clone())));
         }
         self.messages.push(msg);
     }

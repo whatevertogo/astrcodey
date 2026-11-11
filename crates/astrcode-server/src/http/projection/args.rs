@@ -1,8 +1,13 @@
-//! 工具调用参数 → 折叠摘要文本格式化。
+//! 工具参数在 HTTP 边界的解析投影与摘要展示。
 
 use crate::presentation::inline_preview;
 
 const MAX_ARGUMENT_SUMMARY_CHARS: usize = 140;
+
+pub(in crate::http) fn project_tool_arguments(arguments: &str) -> serde_json::Value {
+    astrcode_core::tool::parse_tool_arguments(arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_owned()))
+}
 
 /// 将工具调用参数 JSON 格式化为单行摘要文本。
 pub(in crate::http) fn format_args_inline(args: &serde_json::Value) -> String {

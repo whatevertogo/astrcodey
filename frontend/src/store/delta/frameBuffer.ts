@@ -19,7 +19,10 @@ function deltaTextChars(delta: ConversationDelta): number {
       return delta.textDelta.length
     case 'thinkingDelta':
     case 'toolOutput':
+    case 'toolArgumentsDelta':
       return delta.delta.length
+    case 'toolCallSettled':
+      return delta.text.length
     case 'patchArguments':
       return delta.arguments.length
     case 'statusItemUpdate':

@@ -241,6 +241,7 @@ impl AnthropicMapper {
                     name,
                     arguments,
                     raw_arguments,
+                    ..
                 } => Some(Self::tool_call(
                     call_id,
                     name,
@@ -394,12 +395,14 @@ mod tests {
             role: LlmRole::Assistant,
             content: vec![
                 LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_1".into(),
                     name: "read".into(),
                     arguments: serde_json::json!({"path": "foo.rs"}),
                     raw_arguments: None,
                 },
                 LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_bad".into(),
                     name: "read".into(),
                     arguments: serde_json::Value::String(r#"{"path":"#.into()),

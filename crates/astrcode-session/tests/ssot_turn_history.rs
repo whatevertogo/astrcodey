@@ -100,6 +100,90 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
     );
 }
 
+
+#[tokio::test]
+async fn repeated_provider_ids_have_distinct_runtime_calls_and_one_settlement_each() {
+    let call = || {
+        vec![
+            LlmEvent::ToolCallStart {
+                call_id: "0".into(),
+                name: "unknown_tool".into(),
+                arguments: "{}".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            },
+        ]
+    };
+    let reply = || {
+        vec![
+            LlmEvent::ContentDelta {
+                delta: "done".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "stop".into(),
+            },
+        ]
+    };
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        call(),
+        call(),
+        reply(),
+        call(),
+        call(),
+        reply(),
+    ]));
+    let (session, store, sid, _) = common::spawn_session_with_context_and_services(
+        llm,
+        astrcode_core::config::ContextSettings {
+            auto_compact_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    for _ in 0..2 {
+        let result = session
+            .submit("run".into(), new_turn_id(), None)
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        assert!(result.output.is_ok(), "{:?}", result.output);
+    }
+    let events = store.replay_events(&sid).await.unwrap();
+    let calls = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::ToolCallRequested {
+                call_id,
+                provider_call_id,
+                ..
+            } => {
+                assert_eq!(provider_call_id, "0");
+                Some(call_id.clone())
+            },
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        calls.len(),
+        4,
+        "two calls in each turn have distinct runtime identities"
+    );
+    let turns = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::ToolCallRequested { .. } => event.turn_id.clone(),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(turns.len(), 2, "provider IDs repeat across turns too");
+    for call_id in calls {
+        assert_eq!(events.iter().filter(|event| matches!(&event.payload, DurableEventPayload::ToolCallSettled { call_id: settled, .. } if settled == &call_id)).count(), 1);
+    }
+}
+
 struct FailingGenerateLlm;
 
 #[async_trait::async_trait]
@@ -145,6 +229,8 @@ async fn provider_start_error_is_persisted_as_durable_error() {
         .collect::<Vec<_>>();
     assert_eq!(errors.len(), 1, "expected one durable ErrorOccurred");
     assert!(errors[0].contains("Too Many Requests"));
+    assert_eq!(events.iter().filter(|event| matches!(&event.payload,
+        DurableEventPayload::AssistantAttemptSettled { outcome: astrcode_core::event::AssistantAttemptOutcome::Failed { error }, .. } if error.contains("Too Many Requests"))).count(), 1);
 }
 
 /// 携带完整 token usage;上下文窗口 12345 与断言耦合。
@@ -221,12 +307,7 @@ async fn token_usage_is_persisted_as_durable_event() {
     let events = store.replay_events(&sid).await.unwrap();
     let assistant_completed_index = events
         .iter()
-        .position(|event| {
-            matches!(
-                event.payload,
-                DurableEventPayload::AssistantMessageCompleted { .. }
-            )
-        })
+        .position(|event| matches!(event.payload, DurableEventPayload::AssistantMessage { .. }))
         .expect("expected AssistantMessageCompleted event");
     let token_usage_index = events
         .iter()
@@ -420,7 +501,7 @@ impl LlmProvider for DelayThenCompleteLlm {
     }
 }
 
-/// 第一轮发出带 ToolCallCompleted 的工具调用,第二轮完成。
+/// 第一轮结束工具参数生成,第二轮完成回复。
 fn completed_tool_call_llm() -> ScriptedLlm {
     ScriptedLlm::new(vec![
         vec![
@@ -432,7 +513,7 @@ fn completed_tool_call_llm() -> ScriptedLlm {
                 name: "unknown_tool".into(),
                 arguments: "{}".into(),
             },
-            LlmEvent::ToolCallCompleted {
+            LlmEvent::ToolCallArgumentsCompleted {
                 call_id: "call-early".into(),
             },
             LlmEvent::Done {
@@ -471,7 +552,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
                 && message.message.content.iter().any(|content| {
                     matches!(
                         content,
-                        LlmContent::ToolCall { call_id, .. } if call_id == "call-delay"
+                        LlmContent::ToolCall { provider_call_id: Some(id), .. } if id == "call-delay"
                     )
                 })
         }),
@@ -494,12 +575,7 @@ async fn ssot_tool_request_is_durable_after_assistant_message() {
     let events = store.replay_events(&sid).await.unwrap();
     let assistant_completed_index = events
         .iter()
-        .position(|event| {
-            matches!(
-                event.payload,
-                DurableEventPayload::AssistantMessageCompleted { .. }
-            )
-        })
+        .position(|event| matches!(event.payload, DurableEventPayload::AssistantMessage { .. }))
         .expect("assistant message should be durable before tool request");
     let tool_requested_index = events
         .iter()
@@ -511,15 +587,25 @@ async fn ssot_tool_request_is_durable_after_assistant_message() {
     );
 
     let provider_messages = session.read_model().await.unwrap().provider_messages();
+    let runtime_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            DurableEventPayload::ToolCallRequested {
+                call_id,
+                provider_call_id,
+                ..
+            } if provider_call_id == "call-early" => Some(call_id.to_string()),
+            _ => None,
+        })
+        .unwrap();
     assert!(
         provider_messages.iter().any(|message| {
-            message.role == LlmRole::Assistant
-                && message.content.iter().any(|content| {
-                    matches!(
-                        content,
-                        LlmContent::ToolCall { call_id, .. } if call_id == "call-early"
-                    )
-                })
+            message.role == LlmRole::Assistant && message.content.iter().any(|content| {
+                matches!(
+                    content,
+                    LlmContent::ToolCall { provider_call_id: Some(id), .. } if id == "call-early"
+                )
+            })
         }),
         "provider history should retain assistant tool call"
     );
@@ -529,7 +615,7 @@ async fn ssot_tool_request_is_durable_after_assistant_message() {
                 && message.content.iter().any(|content| {
                     matches!(
                         content,
-                        LlmContent::ToolResult { tool_call_id, .. } if tool_call_id == "call-early"
+                        LlmContent::ToolResult { tool_call_id, .. } if tool_call_id == &runtime_id
                     )
                 })
         }),

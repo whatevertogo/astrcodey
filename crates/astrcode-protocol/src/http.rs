@@ -140,6 +140,7 @@ pub struct ToolApprovalRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ToolApprovalDto {
     pub call_id: String,
+    pub effective_arguments: serde_json::Value,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_key: Option<String>,
@@ -458,7 +459,7 @@ pub enum ConversationBlockDto {
         metadata: Option<serde_json::Value>,
         /// 当前挂起的核心工具审批。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        approval: Option<ToolApprovalDto>,
+        approval: Option<Box<ToolApprovalDto>>,
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments_json: Option<Box<serde_json::Value>>,
@@ -495,12 +496,14 @@ pub enum ConversationBlockStatusDto {
     Streaming,
     Complete,
     Error,
+    Cancelled,
 }
 
 impl_wire_values!(ConversationBlockStatusDto {
     Streaming,
     Complete,
     Error,
+    Cancelled,
 });
 
 /// 工具调用生命周期状态。`Complete` 只表示调用正常结束；
@@ -510,18 +513,24 @@ impl_wire_values!(ConversationBlockStatusDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolCallStatusDto {
-    Streaming,
+    Preparing,
+    Pending,
+    Running,
     Complete,
     Failed,
     Cancelled,
+    Interrupted,
 }
 
 impl ToolCallStatusDto {
     pub const ALL: &'static [Self] = &[
-        Self::Streaming,
+        Self::Preparing,
+        Self::Pending,
+        Self::Running,
         Self::Complete,
         Self::Failed,
         Self::Cancelled,
+        Self::Interrupted,
     ];
 }
 
@@ -560,10 +569,6 @@ pub enum ConversationDeltaDto {
         block_id: String,
         text_delta: String,
     },
-    /// 丢弃失败流为该 assistant block 产生的临时文本与思考内容。
-    ResetBlock {
-        block_id: String,
-    },
     /// 用持久化后的最终内容完成或补齐 block。
     FinalizeBlock {
         block: ConversationBlockDto,
@@ -580,6 +585,22 @@ pub enum ConversationDeltaDto {
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments_json: Option<serde_json::Value>,
+    },
+    ToolArgumentsDelta {
+        call_id: String,
+        delta: String,
+    },
+    ToolExecutionStarted {
+        call_id: String,
+    },
+    ToolCallPreviewDiscarded {
+        call_id: String,
+    },
+    ToolCallSettled {
+        call_id: String,
+        status: ToolCallStatusDto,
+        text: String,
+        metadata: Option<serde_json::Value>,
     },
     ToolOutput {
         call_id: String,

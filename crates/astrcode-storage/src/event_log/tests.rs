@@ -33,10 +33,11 @@ async fn event_log_round_trip_reopen_and_append_guards_share_one_sequence_contra
     let assistant = log
         .append(astrcode_core::event::DurableEvent::session(
             session_id.clone(),
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: "message-1".into(),
                 text: "done".into(),
                 reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
         ))
         .await

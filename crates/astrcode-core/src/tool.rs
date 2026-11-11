@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{SessionId, TurnId};
 
+mod arguments;
+pub use arguments::parse_tool_arguments;
+
 pub mod access;
 pub mod read_image;
 pub mod selection;

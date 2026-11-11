@@ -3,8 +3,10 @@ import type {
   ConversationDelta,
   ToolOutputStream,
 } from '../../services/types'
+import { toolCallIsTerminal } from '../../services/types'
 
 export type CoalescedDelta =
+  | { kind: 'toolArgumentsDelta'; callId: string; delta: string }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
   | { kind: 'thinkingDelta'; blockId: string; delta: string }
   | {
@@ -25,6 +27,16 @@ export function coalesceDeltas(deltas: ConversationDelta[]): CoalescedDelta[] {
   for (const delta of deltas) {
     const last = result[result.length - 1]
     switch (delta.kind) {
+      case 'toolArgumentsDelta':
+        if (
+          last?.kind === 'toolArgumentsDelta' &&
+          last.callId === delta.callId
+        ) {
+          last.delta += delta.delta
+        } else {
+          result.push({ ...delta })
+        }
+        break
       case 'patchBlock':
         if (last?.kind === 'patchBlock' && last.blockId === delta.blockId) {
           last.textDelta += delta.textDelta
@@ -106,6 +118,15 @@ export function applyCoalescedDeltas(
 
   for (const c of coalesced) {
     switch (c.kind) {
+      case 'toolArgumentsDelta': {
+        const idx = toolCallIndex.get(c.callId)
+        if (idx === undefined) break
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'toolCall' || block.status !== 'preparing') break
+        mutations.set(idx, { ...block, arguments: block.arguments + c.delta })
+        changed = true
+        break
+      }
       case 'patchBlock': {
         const idx = blockIndex.get(c.blockId)
         if (idx === undefined) break
@@ -131,7 +152,7 @@ export function applyCoalescedDeltas(
         const idx = toolCallIndex.get(c.blockId)
         if (idx === undefined) break
         const block = mutations.get(idx) ?? blocks[idx]
-        if (block.kind !== 'toolCall') break
+        if (block.kind !== 'toolCall' || toolCallIsTerminal(block.status)) break
         if (!c.arguments.trim()) break
         mutations.set(idx, {
           ...block,
@@ -148,10 +169,14 @@ export function applyCoalescedDeltas(
         const idx = toolCallIndex.get(c.callId)
         if (idx === undefined) break
         const block = mutations.get(idx) ?? blocks[idx]
-        if (block.kind !== 'toolCall') break
+        if (block.kind !== 'toolCall' || toolCallIsTerminal(block.status)) break
         const prefix =
           output.startsWith('\n') && !block.text ? output.slice(1) : output
-        mutations.set(idx, { ...block, text: block.text + prefix })
+        mutations.set(idx, {
+          ...block,
+          text: block.text + prefix,
+          status: 'running',
+        })
         changed = true
         break
       }

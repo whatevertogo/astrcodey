@@ -137,6 +137,7 @@ impl LlmProvider for StandardProvider {
         messages: Vec<Arc<LlmMessage>>,
         mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
+        let messages = astrcode_core::llm::provider_request_messages(messages);
         if self.api_mode != OpenAiApiMode::Responses {
             return Err(LlmError::Unsupported {
                 message: "OpenAI Chat Completions does not expose provider-side input token \

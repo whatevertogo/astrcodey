@@ -45,10 +45,7 @@ impl ChildSessionTracker {
                 self.last_progress
                     .insert(child_session_id.clone(), (Phase::Thinking, None));
             },
-            DurableEventPayload::AgentSessionCompleted {
-                child_session_id, ..
-            }
-            | DurableEventPayload::AgentSessionFailed {
+            DurableEventPayload::AgentSessionSettled {
                 child_session_id, ..
             }
             | DurableEventPayload::AgentSessionRecycled { child_session_id } => {
@@ -111,7 +108,8 @@ mod tests {
 
         let tool = live(
             initial.clone(),
-            LiveEventPayload::ToolCallStarted {
+            LiveEventPayload::ToolCallPreviewStarted {
+                message_id: "message".into(),
                 call_id: "call-1".into(),
                 tool_name: "read".into(),
             },
@@ -124,19 +122,19 @@ mod tests {
         let repeated_tool = durable(
             initial.clone(),
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "call-1".to_owned(),
                 call_id: "call-1".into(),
                 tool_name: "read".into(),
-                arguments: serde_json::json!({}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({})).to_string(),
             },
         );
-        assert!(tracker.project_event(&repeated_tool).is_none());
+        assert!(tracker.project_event(&repeated_tool).is_some());
 
         let text_delta = live(
             initial.clone(),
-            LiveEventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantMessageDelta {
                 message_id: "message-1".into(),
-                delta: "token".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("token".into()),
             },
         );
         assert!(tracker.project_event(&text_delta).is_none());

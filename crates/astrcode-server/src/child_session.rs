@@ -1669,21 +1669,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_payload_uses_matching_child_and_final_session_ids() {
+    fn terminal_payload_keeps_child_identity_and_outcome() {
         let child = SessionId::from("child-session");
         match astrcode_session::payload::agent_session_completed_payload(
             child.clone(),
             "done".into(),
         ) {
-            DurableEventPayload::AgentSessionCompleted {
+            DurableEventPayload::AgentSessionSettled {
                 child_session_id,
-                final_session_id,
-                ..
+                outcome: astrcode_core::event::AgentSessionOutcome::Completed { summary },
             } => {
                 assert_eq!(child_session_id, child);
-                assert_eq!(final_session_id, child);
+                assert_eq!(summary, "done");
             },
-            _ => panic!("expected AgentSessionCompleted"),
+            _ => panic!("expected completed child settlement"),
         }
     }
 }

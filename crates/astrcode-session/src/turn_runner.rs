@@ -11,7 +11,10 @@ use astrcode_context::{
     token_estimate,
 };
 use astrcode_core::{
-    event::{DurableEventPayload, LiveEventPayload},
+    event::{
+        AssistantAttemptOutcome, DurableEventPayload, StepEndReason, TurnCompletionReason,
+        TurnEndReason,
+    },
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRequest, LlmRole, LlmTokenUsage,
         LlmTokenUsageSource, provider_visible_messages, provider_visible_shared_messages,
@@ -34,7 +37,10 @@ use crate::{
         CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
         run_reactive_compaction,
     },
-    llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
+    llm_stream::{
+        StreamFailure, StreamOutcome, StreamResponse, consume_llm_stream,
+        non_empty_reasoning_content,
+    },
     projection_context::context_snapshot,
     session::Session,
     session_runtime_services::RuntimeGenerationView,
@@ -82,13 +88,11 @@ struct StepHooks<'a> {
 
 /// 连续相同 `input_tokens` 达到该步数时告警(frozen provider 视图检测)。
 const FROZEN_INPUT_TOKENS_STREAK_WARN: u32 = 3;
-const FINISH_REASON_LENGTH: &str = "length";
 
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
     request_id: ProviderRequestId,
     messages: Vec<Arc<LlmMessage>>,
-    context_window: usize,
     acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
 
@@ -287,17 +291,28 @@ impl TurnLoop {
             .step_body(state, extension_runner, lifecycle_ctx, publisher, user_text)
             .await;
         state.tool_deduplicator_mut().end_step();
-        if let Ok(outcome) = &result {
-            publisher
-                .durable(DurableEventPayload::StepCompleted {
-                    step_index,
-                    attempt,
-                    finish_reason: match outcome {
-                        StepOutcome::Continue => None,
-                        StepOutcome::Finished(output) => Some(output.finish_reason.clone()),
-                    },
-                })
-                .await?;
+        let reason = match &result {
+            Ok(StepOutcome::Continue) => StepEndReason::Continue,
+            Ok(StepOutcome::Finished(output)) => StepEndReason::Completed {
+                finish_reason: output.finish_reason,
+            },
+            Err(TurnError::Aborted) => StepEndReason::Cancelled,
+            Err(error) => StepEndReason::Failed {
+                error: error.to_string(),
+            },
+        };
+        let settled = publisher
+            .durable(DurableEventPayload::StepEnded {
+                step_index,
+                attempt,
+                reason,
+            })
+            .await;
+        // 原始执行错误优先；写入错误不能把失败步骤变成新的成功结果。
+        if result.is_ok() {
+            settled?;
+        } else if let Err(error) = settled {
+            tracing::warn!(%error, "failed to persist step end after execution error");
         }
         result
     }
@@ -338,35 +353,24 @@ impl TurnLoop {
         let request = LlmRequestSnapshot {
             request_id: prepared.request_id.clone(),
             messages: prepared.messages.clone(),
-            context_window: prepared.llm.model_limits().max_input_tokens,
             acknowledgements: prepared.acknowledgements.clone(),
         };
-        let outcome =
-            match timed_stage("llm", self.llm_stage(prepared, &visible_tools, publisher)).await {
-                Ok(outcome) => outcome,
-                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
-                    return self
-                        .recover_or_fail(extension_runner, state, publisher)
-                        .await;
-                },
-                Err(error) => return Err(error),
-            };
-
-        if let StreamOutcome::Complete {
-            text,
-            finish_reason,
-            message_id,
-            message_started,
-            ..
-        } = &outcome
-            && text.is_empty()
-            && finish_reason == FINISH_REASON_LENGTH
+        let outcome = match timed_stage(
+            "llm",
+            self.llm_stage(prepared, &visible_tools, publisher, state),
+        )
+        .await
         {
-            if *message_started {
-                publisher.live(LiveEventPayload::AssistantMessageReset {
-                    message_id: message_id.clone(),
-                });
-            }
+            Ok(outcome) => outcome,
+            Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                return self
+                    .recover_or_fail(extension_runner, state, publisher)
+                    .await;
+            },
+            Err(error) => return Err(error),
+        };
+
+        if outcome.needs_context_recovery() {
             return self
                 .recover_or_fail(extension_runner, state, publisher)
                 .await;
@@ -377,21 +381,18 @@ impl TurnLoop {
             lifecycle_ctx,
             publisher,
         };
-        match outcome {
-            StreamOutcome::Complete { .. } => {
-                timed_stage(
-                    "complete",
-                    self.complete_stage(&hooks, state, outcome, user_text, request),
-                )
-                .await
-            },
-            StreamOutcome::ToolCalls { .. } => {
-                timed_stage(
-                    "tool_calls",
-                    self.tool_calls_stage(&hooks, state, outcome, request),
-                )
-                .await
-            },
+        if outcome.response.tool_calls.is_empty() {
+            timed_stage(
+                "complete",
+                self.complete_stage(&hooks, state, outcome, user_text, request),
+            )
+            .await
+        } else {
+            timed_stage(
+                "tool_calls",
+                self.tool_calls_stage(&hooks, state, outcome, request),
+            )
+            .await
         }
     }
 
@@ -403,33 +404,18 @@ impl TurnLoop {
         user_text: &str,
         request: LlmRequestSnapshot,
     ) -> Result<StepOutcome, TurnError> {
-        let StreamOutcome::Complete {
+        let StreamOutcome {
+            response,
+            finish_reason,
+        } = outcome;
+        let StreamResponse {
             text,
             reasoning_content,
-            finish_reason,
-            message_id,
-            message_started,
-            usage,
-        } = outcome
-        else {
-            unreachable!("complete_stage expects StreamOutcome::Complete");
-        };
-
+            ..
+        } = response;
         let reasoning_content = non_empty_reasoning_content(reasoning_content);
         let assistant_text_for_continue = text.clone();
-        state.record_assistant_text(&text, reasoning_content.clone());
-        if (!text.is_empty() || reasoning_content.is_some()) && message_started {
-            hooks
-                .publisher
-                .durable(DurableEventPayload::AssistantMessageCompleted {
-                    message_id,
-                    text,
-                    reasoning_content,
-                })
-                .await?;
-        }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
-            .await?;
+        state.record_assistant_text(&text, reasoning_content);
         self.acknowledge_provider_request(
             hooks.extension_runner,
             hooks.publisher,
@@ -443,7 +429,7 @@ impl TurnLoop {
             .should_continue_after_stop(
                 hooks.extension_runner,
                 &assistant_text_for_continue,
-                &finish_reason,
+                finish_reason.as_str(),
                 state,
             )
             .await?
@@ -480,41 +466,17 @@ impl TurnLoop {
         outcome: StreamOutcome,
         request: LlmRequestSnapshot,
     ) -> Result<StepOutcome, TurnError> {
-        let StreamOutcome::ToolCalls {
+        let StreamResponse {
             text,
             reasoning_content,
             tool_calls,
-            message_id,
-            message_started,
-            usage,
-        } = outcome
-        else {
-            unreachable!("tool_calls_stage expects StreamOutcome::ToolCalls");
-        };
-
-        let reasoning_content = non_empty_reasoning_content(reasoning_content);
-        let visible_text = text.as_deref().unwrap_or_default();
-        state.record_assistant_tool_calls(visible_text, reasoning_content.clone(), &tool_calls);
-        if !tool_calls.is_empty() || message_started {
-            if !message_started {
-                hooks
-                    .publisher
-                    .live(LiveEventPayload::AssistantMessageStarted {
-                        message_id: message_id.clone(),
-                    });
-            }
-            hooks
-                .publisher
-                .durable(DurableEventPayload::AssistantMessageCompleted {
-                    message_id,
-                    text: visible_text.to_string(),
-                    reasoning_content,
-                })
-                .await?;
-        }
-        self.persist_token_usage(hooks.publisher, usage, request.context_window, state)
-            .await?;
-
+            ..
+        } = outcome.response;
+        state.record_assistant_tool_calls(
+            &text,
+            non_empty_reasoning_content(reasoning_content),
+            &tool_calls,
+        );
         self.tools_stage(hooks, request, state, &tool_calls).await?;
 
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
@@ -612,9 +574,11 @@ impl TurnLoop {
         prepared: PreparedProviderRequest,
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
+        state: &mut TurnState,
     ) -> Result<StreamOutcome, TurnError> {
         let request_messages = prepared.messages.clone();
-        let rx = self
+        let response = StreamResponse::empty(new_message_id());
+        let result = match self
             .start_provider_stream(
                 &prepared.llm,
                 prepared.messages,
@@ -622,50 +586,97 @@ impl TurnLoop {
                 prepared.max_output_tokens,
                 publisher,
             )
-            .await?;
-        let message_id = new_message_id();
-
-        match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
-            Ok(outcome) => Ok(self
-                .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
-                .await),
-            Err(e @ TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => Err(e),
-            Err(error) => end_turn_with_error_typed(error),
+            .await
+        {
+            Ok(rx) => {
+                consume_llm_stream(
+                    rx,
+                    publisher,
+                    response,
+                    &self.cancellation_token,
+                    prepared.llm.model_limits().max_input_tokens,
+                )
+                .await
+            },
+            Err(error) => Err(Box::new(StreamFailure { response, error })),
+        };
+        match result {
+            Ok(outcome) => {
+                let (outcome, attempt) = if outcome.needs_context_recovery() {
+                    (
+                        outcome,
+                        AssistantAttemptOutcome::Failed {
+                            error: "model reached the output limit before producing a reply".into(),
+                        },
+                    )
+                } else {
+                    (
+                        self.with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
+                            .await,
+                        AssistantAttemptOutcome::Completed,
+                    )
+                };
+                outcome
+                    .response
+                    .settle(
+                        publisher,
+                        attempt,
+                        prepared.llm.model_limits().max_input_tokens,
+                    )
+                    .await?;
+                self.record_input_tokens(outcome.response.usage.as_ref(), state);
+                Ok(outcome)
+            },
+            Err(failure) => {
+                let outcome = match &failure.error {
+                    TurnError::Aborted => AssistantAttemptOutcome::Cancelled,
+                    error => AssistantAttemptOutcome::Failed {
+                        error: error.to_string(),
+                    },
+                };
+                if let Err(error) = failure
+                    .response
+                    .settle(
+                        publisher,
+                        outcome,
+                        prepared.llm.model_limits().max_input_tokens,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "could not settle failed model attempt");
+                }
+                if !matches!(
+                    &failure.error,
+                    TurnError::Aborted | TurnError::Llm(LlmError::ContextWindowExceeded { .. })
+                ) && let Err(error) = publisher
+                    .durable_error(
+                        crate::payload::JSON_RPC_INTERNAL_ERROR,
+                        failure.error.to_string(),
+                        false,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "could not persist provider error; keeping original failure");
+                }
+                self.record_input_tokens(failure.response.usage.as_ref(), state);
+                Err(failure.error)
+            },
         }
     }
 
-    /// 持久化 token usage（若 provider 提供了统计）。
-    ///
-    /// 同一会话连续多个 step `input_tokens` 恒定时打 frozen 告警——写入侧保证 durable
-    /// transcript 永远 provider-valid 之后,恒定不变通常意味着 provider 视图被冻结
-    /// (如上下文在同一位置被反复截断)。
-    async fn persist_token_usage(
-        &self,
-        publisher: &TurnEvents,
-        usage: Option<LlmTokenUsage>,
-        model_context_window: usize,
-        state: &mut TurnState,
-    ) -> Result<(), TurnError> {
-        if let Some(usage) = usage {
-            if let Some(input_tokens) = usage.input_tokens {
-                let streak = state.record_step_input_tokens(input_tokens);
-                if streak >= FROZEN_INPUT_TOKENS_STREAK_WARN {
-                    tracing::warn!(
-                        target: "astrcode::perf",
-                        input_tokens,
-                        streak,
-                        "input_tokens identical across consecutive steps; provider view may be frozen"
-                    );
-                }
+    /// 连续步骤的输入 token 数恒定时，提示检查 provider 视图是否被冻结。
+    fn record_input_tokens(&self, usage: Option<&LlmTokenUsage>, state: &mut TurnState) {
+        if let Some(input_tokens) = usage.and_then(|usage| usage.input_tokens) {
+            let streak = state.record_step_input_tokens(input_tokens);
+            if streak >= FROZEN_INPUT_TOKENS_STREAK_WARN {
+                tracing::warn!(
+                    target: "astrcode::perf",
+                    input_tokens,
+                    streak,
+                    "input_tokens identical across consecutive steps; provider view may be frozen"
+                );
             }
-            publisher
-                .durable(DurableEventPayload::TokenUsageRecorded {
-                    usage,
-                    model_context_window,
-                })
-                .await?;
         }
-        Ok(())
     }
 
     async fn acknowledge_provider_request(
@@ -703,14 +714,10 @@ impl TurnLoop {
         request_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
     ) -> StreamOutcome {
-        match &mut outcome {
-            StreamOutcome::Complete { usage, .. } | StreamOutcome::ToolCalls { usage, .. } => {
-                if usage.is_none() {
-                    *usage = self
-                        .fallback_token_usage(llm, request_messages, tools)
-                        .await;
-                }
-            },
+        if outcome.response.usage.is_none() {
+            outcome.response.usage = self
+                .fallback_token_usage(llm, request_messages, tools)
+                .await;
         }
         outcome
     }
@@ -829,7 +836,7 @@ impl TurnLoop {
         request_id: ProviderRequestId,
         user_text: String,
         state: &mut TurnState,
-        finish_reason: String,
+        finish_reason: TurnCompletionReason,
         hook_messages: Vec<Arc<LlmMessage>>,
     ) -> Result<TurnOutput, TurnError> {
         self.dispatch_after_provider_response(extension_runner, request_id, hook_messages, state)
@@ -904,7 +911,7 @@ impl TurnLoop {
         send_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
         max_output_tokens: usize,
-        publisher: &TurnEvents,
+        _publisher: &TurnEvents,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, TurnError> {
         let result = tokio::select! {
             _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
@@ -918,16 +925,7 @@ impl TurnLoop {
             Err(LlmError::ContextWindowExceeded { message }) => {
                 Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }))
             },
-            Err(e) => {
-                publisher
-                    .durable_error(
-                        crate::payload::JSON_RPC_INTERNAL_ERROR,
-                        e.to_string(),
-                        false,
-                    )
-                    .await?;
-                end_turn_with_error_typed(e)
-            },
+            Err(e) => end_turn_with_error_typed(e),
         }
     }
 
@@ -1070,7 +1068,7 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
 #[derive(Debug)]
 pub struct TurnOutput {
     pub text: String,
-    pub finish_reason: String,
+    pub finish_reason: TurnCompletionReason,
 }
 
 /// 单个 agent step 的结果：`Continue` 进入下一 step，`Finished` 结束 turn。
@@ -1081,9 +1079,8 @@ enum StepOutcome {
 
 #[derive(Debug, Clone)]
 pub struct TurnFinalization {
-    pub finish_reason: String,
+    pub reason: TurnEndReason,
     pub pending_error: Option<String>,
-    pub aborted: bool,
     pub terminal_persisted: bool,
 }
 
@@ -1106,11 +1103,16 @@ pub(crate) async fn run_turn(
     turn_id: &TurnId,
 ) -> RunTurnResult {
     let (output, emitted_error) = drive_agent(agent, user_text, turn_id).await;
-    let aborted = matches!(output, Err(TurnError::Aborted));
-    let finish_reason = match &output {
-        Ok(output) => output.finish_reason.clone(),
-        Err(TurnError::Aborted) => crate::payload::TURN_FINISH_ABORTED.into(),
-        Err(_) => crate::payload::TURN_FINISH_ERROR.into(),
+    let reason = match &output {
+        Ok(output) => TurnEndReason::Completed {
+            finish_reason: output.finish_reason,
+        },
+        Err(TurnError::Aborted) => TurnEndReason::Cancelled {
+            reason: "turn aborted".into(),
+        },
+        Err(error) => TurnEndReason::Failed {
+            error: error.to_string(),
+        },
     };
     // 三种组合都不需要 finalizer 补发 durable ErrorOccurred：
     // - 用户中止：finalize_aborted_turn 自行处理；
@@ -1124,9 +1126,8 @@ pub(crate) async fn run_turn(
     RunTurnResult {
         output,
         finalization: TurnFinalization {
-            finish_reason,
+            reason,
             pending_error,
-            aborted,
             terminal_persisted: false,
         },
     }

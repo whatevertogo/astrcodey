@@ -97,7 +97,7 @@ export interface AssistantRunModel {
   segments: AssistantRunSegment[]
   processEntries: ProcessEntry[]
   finalReplyBlock: AssistantBlock | null
-  status: 'streaming' | 'complete' | 'error'
+  status: 'streaming' | 'complete' | 'error' | 'cancelled'
   durationSeconds: number
   hasAttention: boolean
   hasStreamingWork: boolean
@@ -199,7 +199,11 @@ export function streamingMessageListItemId(
     const item = items[index]
     if (item.type === 'forkRow') continue
     if (item.type !== 'assistantRun') return null
-    return item.blocks.some((block) => block.status === 'streaming')
+    return item.blocks.some((block) =>
+      block.kind === 'toolCall'
+        ? !toolCallIsTerminal(block.status)
+        : block.status === 'streaming'
+    )
       ? item.id
       : null
   }
@@ -397,13 +401,23 @@ export function buildAssistantRunModel(
       : block.status === 'error'
   )
     ? 'error'
-    : blocks.some((block) => block.status === 'streaming')
+    : blocks.some((block) =>
+          block.kind === 'toolCall'
+            ? !toolCallIsTerminal(block.status)
+            : block.status === 'streaming'
+        )
       ? 'streaming'
-      : 'complete'
+      : blocks.some(
+            (block) =>
+              block.kind === 'assistant' && block.status === 'cancelled'
+          )
+        ? 'cancelled'
+        : 'complete'
   const hasStreamingWork = processEntries.some(
     (entry) =>
       (entry.type === 'thinking' && entry.entry.streaming) ||
-      (entry.type === 'tool' && entry.activity.block.status === 'streaming')
+      (entry.type === 'tool' &&
+        !toolCallIsTerminal(entry.activity.block.status))
   )
   const durationSeconds = processEntries.reduce(
     (sum, entry) =>
@@ -437,7 +451,8 @@ function processSegmentFor(entries: ProcessEntry[]): AssistantRunSegment {
   const hasStreamingWork = entries.some(
     (entry) =>
       (entry.type === 'thinking' && entry.entry.streaming) ||
-      (entry.type === 'tool' && entry.activity.block.status === 'streaming')
+      (entry.type === 'tool' &&
+        !toolCallIsTerminal(entry.activity.block.status))
   )
 
   return {

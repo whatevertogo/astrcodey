@@ -12,13 +12,15 @@
       "name": "read",
       "arguments": "",
       "text": "",
-      "status": "streaming"
+      "status": "pending"
     }
   ],
   "envelopes": [
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "2" },
+      "cursor": {
+        "value": "2"
+      },
       "delta": {
         "kind": "patchBlock",
         "blockId": "assistant-contract",
@@ -27,7 +29,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "3" },
+      "cursor": {
+        "value": "3"
+      },
       "delta": {
         "kind": "patchBlock",
         "blockId": "assistant-contract",
@@ -36,7 +40,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "4" },
+      "cursor": {
+        "value": "4"
+      },
       "delta": {
         "kind": "thinkingDelta",
         "blockId": "assistant-contract",
@@ -45,17 +51,23 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "5" },
+      "cursor": {
+        "value": "5"
+      },
       "delta": {
         "kind": "patchArguments",
         "blockId": "tool-contract",
         "arguments": "Cargo.toml",
-        "argumentsJson": { "path": "Cargo.toml" }
+        "argumentsJson": {
+          "path": "Cargo.toml"
+        }
       }
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "6" },
+      "cursor": {
+        "value": "6"
+      },
       "delta": {
         "kind": "toolOutput",
         "callId": "tool-contract",
@@ -65,7 +77,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "7" },
+      "cursor": {
+        "value": "7"
+      },
       "delta": {
         "kind": "toolOutput",
         "callId": "tool-contract",
@@ -75,19 +89,24 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "8" },
+      "cursor": {
+        "value": "8"
+      },
       "delta": {
         "kind": "toolApprovalRequested",
         "approval": {
           "callId": "tool-contract",
           "prompt": "approve",
-          "ruleKey": "read"
+          "ruleKey": "read",
+          "effectiveArguments": {}
         }
       }
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "9" },
+      "cursor": {
+        "value": "9"
+      },
       "delta": {
         "kind": "finalizeBlock",
         "block": {
@@ -101,7 +120,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "10" },
+      "cursor": {
+        "value": "10"
+      },
       "delta": {
         "kind": "finalizeBlock",
         "block": {
@@ -109,7 +130,9 @@
           "id": "tool-contract",
           "name": "read",
           "arguments": "Cargo.toml",
-          "argumentsJson": { "path": "Cargo.toml" },
+          "argumentsJson": {
+            "path": "Cargo.toml"
+          },
           "text": "out\n[stderr] err",
           "status": "complete"
         }
@@ -117,7 +140,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "11" },
+      "cursor": {
+        "value": "11"
+      },
       "delta": {
         "kind": "agentSessionUpdated",
         "agentSession": {
@@ -131,7 +156,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "12" },
+      "cursor": {
+        "value": "12"
+      },
       "delta": {
         "kind": "agentSessionUpdated",
         "agentSession": {
@@ -144,7 +171,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "13" },
+      "cursor": {
+        "value": "13"
+      },
       "delta": {
         "kind": "statusItemUpdate",
         "id": "branch",
@@ -153,7 +182,9 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "14" },
+      "cursor": {
+        "value": "14"
+      },
       "delta": {
         "kind": "updateControlState",
         "control": {
@@ -178,7 +209,9 @@
         "id": "tool-contract",
         "name": "read",
         "arguments": "Cargo.toml",
-        "argumentsJson": { "path": "Cargo.toml" },
+        "argumentsJson": {
+          "path": "Cargo.toml"
+        },
         "text": "out\n[stderr] err",
         "status": "complete"
       }
@@ -200,6 +233,8 @@
         "currentTool": "read"
       }
     ],
-    "statusItems": { "branch": "main" }
+    "statusItems": {
+      "branch": "main"
+    }
   }
 }

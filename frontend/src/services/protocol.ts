@@ -133,8 +133,12 @@ const decodeApprovalDecision = stringEnumDecoder(
 
 function decodeToolApproval(value: unknown): ToolApproval {
   const object = decodeObject(value, 'tool approval')
+  if (!('effectiveArguments' in object))
+    throw new ProtocolDecodeError('missing effectiveArguments')
   return {
     callId: requiredString(object, 'callId'),
+    effectiveArguments:
+      object.effectiveArguments as ToolApproval['effectiveArguments'],
     prompt: requiredString(object, 'prompt'),
     ruleKey: optionalString(object, 'ruleKey'),
   }
@@ -266,8 +270,6 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         blockId: requiredString(object, 'blockId'),
         textDelta: requiredString(object, 'textDelta'),
       }
-    case 'resetBlock':
-      return { kind, blockId: requiredString(object, 'blockId') }
     case 'finalizeBlock':
       return { kind, block: decodeConversationBlock(object.block) }
     case 'updateControlState':
@@ -281,6 +283,28 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         newSessionId: requiredString(object, 'newSessionId'),
         parentCursor: decodeConversationCursor(object.parentCursor),
       }
+    case 'toolArgumentsDelta':
+      return {
+        kind,
+        callId: requiredString(object, 'callId'),
+        delta: requiredString(object, 'delta'),
+      }
+    case 'toolExecutionStarted':
+    case 'toolCallPreviewDiscarded':
+      return {
+        kind,
+        callId: requiredString(object, 'callId'),
+      }
+    case 'toolCallSettled': {
+      const metadata = optionalObject(object, 'metadata')
+      return {
+        kind,
+        callId: requiredString(object, 'callId'),
+        status: decodeToolCallStatus(object.status),
+        text: requiredString(object, 'text'),
+        ...(metadata ? { metadata } : {}),
+      }
+    }
     case 'toolOutput':
       return {
         kind,

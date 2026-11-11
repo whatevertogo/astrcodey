@@ -298,7 +298,7 @@ impl SessionManager {
         let events = self.event_store.replay_events(session_id).await?;
         Ok(events.iter().any(|event| {
             event.turn_id.as_ref() == Some(turn_id)
-                && matches!(event.payload, DurableEventPayload::TurnCompleted { .. })
+                && matches!(event.payload, DurableEventPayload::TurnEnded { .. })
         }))
     }
 

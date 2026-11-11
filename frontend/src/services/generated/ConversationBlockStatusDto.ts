@@ -3,4 +3,4 @@
 /**
  * conversation 块状态。
  */
-export type ConversationBlockStatusDto = "streaming" | "complete" | "error";
+export type ConversationBlockStatusDto = "streaming" | "complete" | "error" | "cancelled";

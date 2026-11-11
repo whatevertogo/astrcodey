@@ -81,16 +81,22 @@ impl CompactionPipeline<'_> {
         let terminal = match &outcome {
             CompactionPipelineOutcome::Compacted {
                 messages_removed, ..
-            } => LiveEventPayload::CompactionCompleted {
-                messages_removed: *messages_removed,
+            } => LiveEventPayload::CompactionEnded {
+                outcome: astrcode_core::event::CompactionOutcome::Completed {
+                    messages_removed: *messages_removed,
+                },
             },
             CompactionPipelineOutcome::Skipped { message, .. } => {
-                LiveEventPayload::CompactionSkipped {
-                    reason: message.clone(),
+                LiveEventPayload::CompactionEnded {
+                    outcome: astrcode_core::event::CompactionOutcome::Skipped {
+                        reason: message.clone(),
+                    },
                 }
             },
-            CompactionPipelineOutcome::Failed { error, .. } => LiveEventPayload::CompactionFailed {
-                reason: error.to_string(),
+            CompactionPipelineOutcome::Failed { error, .. } => LiveEventPayload::CompactionEnded {
+                outcome: astrcode_core::event::CompactionOutcome::Failed {
+                    reason: error.to_string(),
+                },
             },
         };
         self.session.emit_live(turn_id.as_ref(), terminal);

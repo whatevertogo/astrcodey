@@ -5,8 +5,9 @@ use std::{collections::HashSet, sync::Arc};
 use astrcode_core::{
     compaction::CompactStrategy,
     event::{
-        DurableEvent, DurableEventPayload, StoredEvent, SystemPromptSource,
-        TranscriptRewriteReason, transcript_prefix_fingerprint,
+        AssistantAttemptOutcome, DurableEvent, DurableEventPayload, PersistedSystemPrompt,
+        StoredEvent, SystemPromptSource, ToolCallOutcome, TranscriptRewriteReason,
+        transcript_prefix_fingerprint,
     },
     llm::{
         LlmContent, LlmMessage, LlmRole, TranscriptMessage, TranscriptMessageOrigin,
@@ -158,12 +159,12 @@ pub(crate) fn apply_event(
         } => {
             context.usage = input_token_anchor.clone();
         },
-        DurableEventPayload::SystemPromptConfigured {
+        DurableEventPayload::SystemPromptConfigured(PersistedSystemPrompt {
             fingerprint,
             extra_system_prompt,
             source,
             ..
-        } => {
+        }) => {
             system_prompt.extra = extra_system_prompt.clone();
             system_prompt.fingerprint = fingerprint.clone();
             system_prompt.source = *source;
@@ -214,7 +215,7 @@ fn apply_provider_event(
 ) {
     let event_seq = event.seq;
     match &event.payload {
-        DurableEventPayload::SystemPromptConfigured { text, .. } => {
+        DurableEventPayload::SystemPromptConfigured(PersistedSystemPrompt { text, .. }) => {
             text.clone_into(system_prompt);
         },
         DurableEventPayload::UserMessage {
@@ -228,26 +229,41 @@ fn apply_provider_event(
             updated_seq: event_seq,
             origin: Some(TranscriptMessageOrigin::TurnAborted),
         }),
-        DurableEventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessage {
             text,
             reasoning_content,
+            outcome,
             ..
         } => {
             let mut message = LlmMessage::assistant(text);
             message.reasoning_content = reasoning_content.clone();
-            messages.push(SequencedLlmMessage::plain(message, event_seq));
+            messages.push(SequencedLlmMessage {
+                message: Arc::new(message),
+                updated_seq: event_seq,
+                origin: match outcome {
+                    AssistantAttemptOutcome::Completed => None,
+                    AssistantAttemptOutcome::Failed { .. } => {
+                        Some(TranscriptMessageOrigin::AssistantFailed)
+                    },
+                    AssistantAttemptOutcome::Cancelled => {
+                        Some(TranscriptMessageOrigin::AssistantCancelled)
+                    },
+                },
+            });
         },
         DurableEventPayload::ToolCallRequested {
             call_id,
+            provider_call_id,
             tool_name,
             arguments,
-            raw_arguments,
         } => {
             let tool_call = LlmContent::ToolCall {
+                provider_call_id: Some(provider_call_id.clone()),
                 call_id: call_id.to_string(),
                 name: tool_name.clone(),
-                arguments: arguments.clone(),
-                raw_arguments: raw_arguments.clone(),
+                arguments: astrcode_core::tool::parse_tool_arguments(arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
+                raw_arguments: Some(arguments.clone()),
             };
             match messages.last_mut() {
                 Some(last) if last.message.role == LlmRole::Assistant => {
@@ -265,46 +281,22 @@ fn apply_provider_event(
                 )),
             }
         },
-        DurableEventPayload::ToolCallCompleted {
+        DurableEventPayload::ToolCallSettled {
             call_id,
-            tool_name,
             result,
+            outcome,
             ..
         } => apply_tool_terminal(
             messages,
             call_id,
-            tool_name,
             result.content.clone(),
-            result.is_error,
-            None,
-            event_seq,
-        ),
-        DurableEventPayload::ToolCallFailed {
-            call_id,
-            tool_name,
-            error,
-            ..
-        } => apply_tool_terminal(
-            messages,
-            call_id,
-            tool_name,
-            error.clone(),
-            true,
-            Some(TranscriptMessageOrigin::ToolCallFailed),
-            event_seq,
-        ),
-        DurableEventPayload::ToolCallCancelled {
-            call_id,
-            tool_name,
-            reason,
-            ..
-        } => apply_tool_terminal(
-            messages,
-            call_id,
-            tool_name,
-            format!("Tool cancelled: {reason}"),
-            true,
-            Some(TranscriptMessageOrigin::ToolCallCancelled),
+            outcome.settled_call_failed(result),
+            match outcome {
+                ToolCallOutcome::Completed => None,
+                ToolCallOutcome::Failed => Some(TranscriptMessageOrigin::ToolCallFailed),
+                ToolCallOutcome::Interrupted => Some(TranscriptMessageOrigin::ToolCallInterrupted),
+                ToolCallOutcome::Cancelled => Some(TranscriptMessageOrigin::ToolCallCancelled),
+            },
             event_seq,
         ),
         DurableEventPayload::TranscriptRewritten {
@@ -351,12 +343,23 @@ fn apply_transcript_rewrite(
 fn apply_tool_terminal(
     messages: &mut Vec<SequencedLlmMessage>,
     call_id: &ToolCallId,
-    tool_name: &str,
     content: String,
     is_error: bool,
     origin: Option<TranscriptMessageOrigin>,
     event_seq: u64,
 ) {
+    let tool_name = messages
+        .iter()
+        .rev()
+        .flat_map(|entry| &entry.message.content)
+        .find_map(|content| match content {
+            LlmContent::ToolCall {
+                call_id: declared,
+                name,
+                ..
+            } if declared == call_id.as_str() => Some(name.clone()),
+            _ => None,
+        });
     messages.push(SequencedLlmMessage {
         message: Arc::new(LlmMessage {
             role: LlmRole::Tool,
@@ -365,7 +368,7 @@ fn apply_tool_terminal(
                 content,
                 is_error,
             }],
-            name: Some(tool_name.to_owned()),
+            name: tool_name,
             reasoning_content: None,
         }),
         updated_seq: event_seq,
