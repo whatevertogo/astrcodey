@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Phase, StoredEvent},
+    event::{DurableEventPayload, Phase, StepEndReason, StoredEvent},
     types::{ToolCallId, TurnId},
     user_input::UserInput,
 };
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingToolApprovalView {
+    pub effective_arguments: serde_json::Value,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_key: Option<String>,
@@ -42,13 +43,16 @@ pub struct SessionExecutionState {
 pub struct ActiveStepView {
     pub step_index: u32,
     pub attempt: u32,
-    #[serde(default)]
-    pub completed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<StepEndReason>,
 }
 
 pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionState) {
+    if let Some(accepted_seq) = settled_input_seq(&event.payload) {
+        execution
+            .pending_inputs
+            .retain(|input| input.accepted_seq != accepted_seq);
+    }
     match &event.payload {
         DurableEventPayload::TurnStarted => {
             execution.phase = Phase::Thinking;
@@ -61,21 +65,19 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
             execution.active_step = Some(ActiveStepView {
                 step_index: *step_index,
                 attempt: *attempt,
-                completed: false,
-                finish_reason: None,
+                end_reason: None,
             });
         },
-        DurableEventPayload::StepCompleted {
+        DurableEventPayload::StepEnded {
             step_index,
             attempt,
-            finish_reason,
+            reason,
         } => {
             if let Some(step) = execution.active_step.as_mut()
                 && step.step_index == *step_index
                 && step.attempt == *attempt
             {
-                step.completed = true;
-                step.finish_reason = finish_reason.clone();
+                step.end_reason = Some(reason.clone());
             }
         },
         DurableEventPayload::UserInputAccepted { input } => {
@@ -85,15 +87,10 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
                 turn_id: event.turn_id.clone(),
             });
         },
-        DurableEventPayload::UserMessage { accepted_seq, .. } => {
-            if let Some(accepted_seq) = accepted_seq {
-                execution
-                    .pending_inputs
-                    .retain(|input| input.accepted_seq != *accepted_seq);
-            }
+        DurableEventPayload::UserMessage { .. } => {
             execution.phase = Phase::Thinking;
         },
-        DurableEventPayload::AssistantMessageCompleted { .. } => {
+        DurableEventPayload::AssistantMessage { .. } => {
             execution.phase = Phase::Thinking;
         },
         DurableEventPayload::ToolCallRequested { call_id, .. } => {
@@ -102,6 +99,7 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
         },
         DurableEventPayload::ToolApprovalRequested {
             call_id,
+            arguments,
             prompt,
             rule_key,
             ..
@@ -109,6 +107,7 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
             execution.pending_tool_approvals.insert(
                 call_id.clone(),
                 PendingToolApprovalView {
+                    effective_arguments: arguments.clone(),
                     prompt: prompt.clone(),
                     rule_key: rule_key.clone(),
                 },
@@ -118,9 +117,7 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
         DurableEventPayload::ToolApprovalResolved { call_id, .. } => {
             execution.pending_tool_approvals.remove(call_id);
         },
-        DurableEventPayload::ToolCallCompleted { call_id, .. }
-        | DurableEventPayload::ToolCallFailed { call_id, .. }
-        | DurableEventPayload::ToolCallCancelled { call_id, .. } => {
+        DurableEventPayload::ToolCallSettled { call_id, .. } => {
             execution.pending_tool_calls.remove(call_id);
             execution.pending_tool_approvals.remove(call_id);
             execution.phase = if execution.pending_tool_calls.is_empty() {
@@ -129,7 +126,7 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
                 Phase::CallingTool
             };
         },
-        DurableEventPayload::TurnCompleted { .. }
+        DurableEventPayload::TurnEnded { .. }
             if event.turn_id.is_none()
                 || execution.unsettled_turn_id.is_none()
                 || event.turn_id.as_ref() == execution.unsettled_turn_id.as_ref() =>
@@ -141,6 +138,14 @@ pub(crate) fn apply_event(event: &StoredEvent, execution: &mut SessionExecutionS
             execution.phase = Phase::Error;
         },
         _ => {},
+    }
+}
+
+pub(crate) fn settled_input_seq(payload: &DurableEventPayload) -> Option<u64> {
+    match payload {
+        DurableEventPayload::UserMessage { accepted_seq, .. } => *accepted_seq,
+        DurableEventPayload::UserInputDiscarded { accepted_seq, .. } => Some(*accepted_seq),
+        _ => None,
     }
 }
 

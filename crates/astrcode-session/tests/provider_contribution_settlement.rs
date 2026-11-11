@@ -108,10 +108,7 @@ impl TurnHooks for RecordingHooks {
             .await
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
         let assistant = events.iter().rposition(|event| {
-            matches!(
-                event.payload,
-                DurableEventPayload::AssistantMessageCompleted { .. }
-            )
+            matches!(event.payload, DurableEventPayload::AssistantMessage { .. })
         });
         let usage = events.iter().rposition(|event| {
             matches!(

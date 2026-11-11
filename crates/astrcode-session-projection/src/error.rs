@@ -7,6 +7,14 @@ use thiserror::Error;
 pub enum ProjectionError {
     #[error("projection batch cannot be empty")]
     EmptyBatch,
+    #[error("non-completed tool settlement at seq {0} must contain an error result")]
+    InvalidToolCallSettlement(u64),
+    #[error("tool call lifecycle at seq {0} has no matching pending declaration")]
+    UnmatchedToolCallSettlement(u64),
+    #[error("tool call declaration at seq {0} is already pending")]
+    ToolCallAlreadyPending(u64),
+    #[error("input settlement at seq {seq} references non-pending input {accepted_seq}")]
+    InputNotPending { seq: u64, accepted_seq: u64 },
     #[error("session event sequence overflow")]
     SequenceOverflow,
     #[error("session {0} has no SessionStarted event")]

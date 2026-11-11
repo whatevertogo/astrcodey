@@ -399,8 +399,10 @@ mod tests {
         let event = durable_event(
             session_id.clone(),
             Some(other_turn),
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
         );
 
@@ -421,9 +423,9 @@ mod tests {
         let parent_event = live_event(
             parent_session,
             Some(turn_id.clone()),
-            LiveEventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantMessageDelta {
                 message_id: "msg-1".into(),
-                delta: "hello".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("hello".into()),
             },
         );
         assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
@@ -431,9 +433,9 @@ mod tests {
         let child_event = live_event(
             child_session.clone(),
             Some(turn_id.clone()),
-            LiveEventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantMessageDelta {
                 message_id: "msg-2".into(),
-                delta: "world".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("world".into()),
             },
         );
         assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
@@ -472,8 +474,10 @@ mod tests {
             .send(Arc::new(live_event(
                 session_id,
                 Some(turn_id),
-                LiveEventPayload::AgentRunCompleted {
-                    reason: "stop".into(),
+                LiveEventPayload::AgentRunEnded {
+                    reason: astrcode_core::event::TurnEndReason::Completed {
+                        finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                    },
                 },
             )))
             .unwrap();

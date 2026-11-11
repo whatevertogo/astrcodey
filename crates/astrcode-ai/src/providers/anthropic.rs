@@ -142,6 +142,7 @@ impl LlmProvider for AnthropicProvider {
         messages: Vec<Arc<LlmMessage>>,
         mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
+        let messages = astrcode_core::llm::provider_request_messages(messages);
         prepare_strict_tools(
             &mut tools,
             self.config.supports_strict_tool_use,

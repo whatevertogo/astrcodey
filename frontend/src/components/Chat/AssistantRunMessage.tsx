@@ -103,7 +103,7 @@ function activityIconName(activity: ToolActivity): IconName {
 }
 
 function ActivitySummaryContent({ activity }: { activity: ToolActivity }) {
-  const streaming = activity.block.status === 'streaming'
+  const streaming = activity.block.status === 'running'
   const elapsed = useElapsedSeconds(streaming)
   const commandRuntime =
     activity.kind === 'command' && streaming

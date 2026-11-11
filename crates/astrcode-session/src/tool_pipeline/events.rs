@@ -1,4 +1,4 @@
-use astrcode_core::event::DurableEventPayload;
+use astrcode_core::event::{DurableEventPayload, ToolCallOutcome};
 
 use crate::{
     tool_types::{PreparedToolInvocation, ToolBatch, ToolExecutionOutcome},
@@ -25,9 +25,9 @@ async fn declare_tool_call(
     publisher
         .durable(DurableEventPayload::ToolCallRequested {
             call_id: call.call_id.clone().into(),
+            provider_call_id: call.provider_call_id.clone(),
             tool_name: call.name.clone(),
-            arguments: call.tool_input.clone(),
-            raw_arguments: call.raw_arguments.clone(),
+            arguments: call.raw_arguments.clone(),
         })
         .await
 }
@@ -35,43 +35,35 @@ async fn declare_tool_call(
 pub(super) async fn finish_tool_call(
     publisher: &TurnEvents,
     call_id: &str,
-    tool_name: String,
     outcome: &ToolExecutionOutcome,
-    arguments: String,
-    arguments_json: Option<serde_json::Value>,
 ) -> Result<(), TurnError> {
-    let payload = match outcome {
-        ToolExecutionOutcome::Completed(result) => DurableEventPayload::ToolCallCompleted {
-            call_id: call_id.into(),
-            tool_name,
-            result: result.result.clone(),
-            arguments,
-            arguments_json,
+    let (outcome, result) = match outcome {
+        ToolExecutionOutcome::Completed(result) => {
+            (ToolCallOutcome::Completed, result.result.clone())
         },
         ToolExecutionOutcome::Failed {
             error,
             metadata,
             duration_ms,
-        } => DurableEventPayload::ToolCallFailed {
-            call_id: call_id.into(),
-            tool_name,
-            error: error.clone(),
-            metadata: metadata.clone(),
-            duration_ms: *duration_ms,
-            arguments,
-            arguments_json,
-        },
+        } => (
+            ToolCallOutcome::Failed,
+            astrcode_core::tool::ToolResult::error(error.clone())
+                .with_metadata(metadata.clone())
+                .with_duration_ms(*duration_ms),
+        ),
         ToolExecutionOutcome::Cancelled {
             reason,
             duration_ms,
-        } => DurableEventPayload::ToolCallCancelled {
-            call_id: call_id.into(),
-            tool_name,
-            reason: reason.clone(),
-            duration_ms: *duration_ms,
-            arguments,
-            arguments_json,
-        },
+        } => (
+            ToolCallOutcome::Cancelled,
+            astrcode_core::tool::ToolResult::error(format!("Tool cancelled: {reason}"))
+                .with_duration_ms(*duration_ms),
+        ),
+    };
+    let payload = DurableEventPayload::ToolCallSettled {
+        call_id: call_id.into(),
+        outcome,
+        result,
     };
     publisher.durable(payload).await
 }

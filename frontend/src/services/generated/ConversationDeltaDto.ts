@@ -4,14 +4,15 @@ import type { ApprovalDecisionDto } from "./ApprovalDecisionDto";
 import type { ConversationBlockDto } from "./ConversationBlockDto";
 import type { ConversationControlStateDto } from "./ConversationControlStateDto";
 import type { ToolApprovalDto } from "./ToolApprovalDto";
+import type { ToolCallStatusDto } from "./ToolCallStatusDto";
 import type { ToolOutputStreamDto } from "./ToolOutputStreamDto";
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * SSE conversation 增量。
  */
-export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "appendTransientBlock", turnId: string, block: ConversationBlockDto, } | { "kind": "clearTransientBlocks", turnId: string, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "resetBlock", blockId: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "patchArguments", blockId: string, arguments: string,
+export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "appendTransientBlock", turnId: string, block: ConversationBlockDto, } | { "kind": "clearTransientBlocks", turnId: string, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "patchArguments", blockId: string, arguments: string,
 /**
  * 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
  */
-argumentsJson?: JsonValue | null, } | { "kind": "toolOutput", callId: string, stream: ToolOutputStreamDto, delta: string, } | { "kind": "thinkingDelta", blockId: string, delta: string, } | { "kind": "agentSessionUpdated", agentSession: AgentSessionUpdateDto, } | { "kind": "agentSessionRemoved", childSessionId: string, } | { "kind": "statusItemUpdate", id: string, text: string, } | { "kind": "extensionRegistryChanged" } | { "kind": "toolApprovalRequested", approval: ToolApprovalDto, } | { "kind": "toolApprovalResolved", callId: string, decision: ApprovalDecisionDto, } | { "kind": "customEvent", extensionId: string, eventType: string, schemaVersion: number, payload: JsonValue, };
+argumentsJson?: JsonValue | null, } | { "kind": "toolArgumentsDelta", callId: string, delta: string, } | { "kind": "toolExecutionStarted", callId: string, } | { "kind": "toolCallPreviewDiscarded", callId: string, } | { "kind": "toolCallSettled", callId: string, status: ToolCallStatusDto, text: string, metadata: JsonValue | null, } | { "kind": "toolOutput", callId: string, stream: ToolOutputStreamDto, delta: string, } | { "kind": "thinkingDelta", blockId: string, delta: string, } | { "kind": "agentSessionUpdated", agentSession: AgentSessionUpdateDto, } | { "kind": "agentSessionRemoved", childSessionId: string, } | { "kind": "statusItemUpdate", id: string, text: string, } | { "kind": "extensionRegistryChanged" } | { "kind": "toolApprovalRequested", approval: ToolApprovalDto, } | { "kind": "toolApprovalResolved", callId: string, decision: ApprovalDecisionDto, } | { "kind": "customEvent", extensionId: string, eventType: string, schemaVersion: number, payload: JsonValue, };

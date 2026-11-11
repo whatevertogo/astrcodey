@@ -1,3 +1,4 @@
+import { toolCallIsTerminal } from '../../../services/types'
 import type {
   AskUserOption,
   AskUserQuestion,
@@ -125,7 +126,7 @@ export function parseAskUserOutput(text: string): AskUserOutput | null {
 type AskUserBlock = Extract<ConversationBlock, { kind: 'toolCall' }>
 
 export function isPendingAskUser(block: AskUserBlock): boolean {
-  return block.name === 'askUser' && block.status === 'streaming'
+  return block.name === 'askUser' && !toolCallIsTerminal(block.status)
 }
 
 export function pendingAskUserHasVisibleBlock(
@@ -154,7 +155,7 @@ export function recoveredAskUserBlock(
     arguments: JSON.stringify(argumentsJson),
     argumentsJson,
     text: '',
-    status: 'streaming',
+    status: 'running',
   }
 }
 

@@ -2,6 +2,8 @@
 //!
 //! 从 `storage` 根模块拆出,仅含错误枚举。
 
+use std::path::PathBuf;
+
 use astrcode_core::types::SessionId;
 
 /// 存储操作产生的错误。
@@ -32,6 +34,13 @@ pub enum StorageError {
         session_id: SessionId,
         through_seq: u64,
         reason: String,
+    },
+    #[error("Unsupported session event log format at {path}:{line} (version: {found:?})")]
+    UnsupportedEventFormat {
+        path: PathBuf,
+        line: usize,
+        /// None denotes the legacy unversioned format.
+        found: Option<u32>,
     },
     /// 持久事件流不能构造合法的会话状态。
     #[error("Corrupt session event log: {0}")]

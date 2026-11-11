@@ -1036,13 +1036,16 @@ mod tests {
                 attachments: Vec::new(),
                 accepted_seq: None,
             },
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: MessageId::new("assistant-1"),
                 text: "world".into(),
                 reasoning_content: Some("reasoning".into()),
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
             DurableEventPayload::TokenUsageRecorded {
                 usage: LlmTokenUsage {
@@ -2436,8 +2439,10 @@ mod tests {
         let owned_id = astrcode_core::types::SessionId::new("owned-root");
         for payload in [
             DurableEventPayload::TurnStarted,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
             DurableEventPayload::ModelIdChanged {
                 model_id: "next-model".into(),
@@ -3025,6 +3030,7 @@ mod tests {
             LlmMessage {
                 role: astrcode_core::llm::LlmRole::Assistant,
                 content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call-1".into(),
                     name: "lookup".into(),
                     arguments: json!({ "query": "typed" }),

@@ -75,10 +75,11 @@ async fn seed_history(session: &Session, pairs: usize) {
         session
             .emit_durable(
                 None,
-                DurableEventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessage {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(24)),
                     reasoning_content: None,
+                    outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                 },
             )
             .await
@@ -90,12 +91,14 @@ async fn configure_system_prompt(session: &Session) {
     session
         .emit_durable(
             None,
-            DurableEventPayload::SystemPromptConfigured {
-                text: "integration system prompt".into(),
-                fingerprint: "integration-system-prompt".into(),
-                extra_system_prompt: None,
-                source: Default::default(),
-            },
+            DurableEventPayload::SystemPromptConfigured(
+                astrcode_core::event::PersistedSystemPrompt {
+                    text: "integration system prompt".into(),
+                    fingerprint: "integration-system-prompt".into(),
+                    extra_system_prompt: None,
+                    source: Default::default(),
+                },
+            ),
         )
         .await
         .unwrap();

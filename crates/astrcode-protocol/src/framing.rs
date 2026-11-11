@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use crate::{commands::ClientCommand, events::ClientNotification};
 
 /// 协议版本号标识符。
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 线缆上的 JSON-RPC 2.0 帧消息。
 ///

@@ -352,9 +352,11 @@ impl SessionEventJournal for BlockingChildCreateStore {
 
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         if matches!(
-            &event.payload,
-            DurableEventPayload::AgentSessionFailed { error, .. } if error == "deleted"
-        ) && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
+                    &event.payload,
+                    DurableEventPayload::AgentSessionSettled {
+        outcome: astrcode_core::event::AgentSessionOutcome::Failed { error }, .. } if error == "deleted"
+                )
+            && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
         {
             return Err(StorageError::Unsupported(
                 "injected deleted relation failure".into(),
@@ -378,9 +380,11 @@ impl SessionEventJournal for BlockingChildCreateStore {
     ) -> Result<Vec<StoredEvent>, StorageError> {
         for event in &events {
             if matches!(
-                &event.payload,
-                DurableEventPayload::AgentSessionFailed { error, .. } if error == "deleted"
-            ) && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
+                            &event.payload,
+                            DurableEventPayload::AgentSessionSettled {
+            outcome: astrcode_core::event::AgentSessionOutcome::Failed { error }, .. } if error == "deleted"
+                        )
+                && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
             {
                 return Err(StorageError::Unsupported(
                     "injected deleted relation failure".into(),
@@ -1890,8 +1894,9 @@ async fn recycle_repairs_stale_durable_turn_without_registry_ownership() {
             .any(|event| {
                 matches!(
                     &event.payload,
-                    DurableEventPayload::TurnCompleted { finish_reason }
-                        if finish_reason == "interrupted"
+                    DurableEventPayload::TurnEnded {
+                        reason: astrcode_core::event::TurnEndReason::Interrupted { .. },
+                    }
                 )
             }),
         "destructive close must persist a stale-turn terminal before recycling"
@@ -2110,15 +2115,12 @@ async fn completion_guard_registration_and_claim_serialize_tree_close() {
             .iter()
             .filter(|event| {
                 matches!(
-                    &event.payload,
-                    DurableEventPayload::AgentSessionCompleted {
-                        child_session_id,
-                        ..
-                    } | DurableEventPayload::AgentSessionFailed {
-                        child_session_id,
-                        ..
-                    } if child_session_id == child_id
-                )
+                                    &event.payload,
+                                    DurableEventPayload::AgentSessionSettled {
+                child_session_id,
+                ..
+                } if child_session_id == child_id
+                                )
             })
             .count();
         assert_eq!(
@@ -2130,12 +2132,13 @@ async fn completion_guard_registration_and_claim_serialize_tree_close() {
         assert!(
             parent_events.iter().any(|event| {
                 matches!(
-                    &event.payload,
-                    DurableEventPayload::AgentSessionCompleted {
-                        child_session_id,
-                        ..
-                    } if child_session_id == child_id
-                )
+                                                    &event.payload,
+                                                    DurableEventPayload::AgentSessionSettled {
+                child_session_id,
+                outcome: astrcode_core::event::AgentSessionOutcome::Completed { .. },
+                ..
+                } if child_session_id == child_id
+                                                )
             }),
             "the winning completion owner should keep {child_id} completed"
         );
@@ -2219,12 +2222,13 @@ async fn cancelled_completion_drain_restores_claim_for_retry() {
         .iter()
         .filter(|event| {
             matches!(
-                &event.payload,
-                DurableEventPayload::AgentSessionCompleted {
-                    child_session_id,
-                    ..
-                } if child_session_id == &child_id
-            )
+                                        &event.payload,
+                                        DurableEventPayload::AgentSessionSettled {
+            child_session_id,
+            outcome: astrcode_core::event::AgentSessionOutcome::Completed { .. },
+            ..
+            } if child_session_id == &child_id
+                                    )
         })
         .count();
     assert_eq!(terminal_count, 1);
@@ -2992,12 +2996,13 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         let parent_events = store.replay_events(&parent_id).await.unwrap();
         let completed = parent_events.iter().any(|e| {
             matches!(
-                &e.payload,
-                DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: sid,
-                    ..
-                } if sid == &child_id
-            )
+                                        &e.payload,
+                                        DurableEventPayload::AgentSessionSettled {
+            child_session_id: sid,
+            outcome: astrcode_core::event::AgentSessionOutcome::Completed { .. },
+            ..
+            } if sid == &child_id
+                                    )
         });
         let recycled = parent_events.iter().any(|e| {
             matches!(
@@ -3017,12 +3022,13 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
     assert!(
         parent_events.iter().any(|e| {
             matches!(
-                &e.payload,
-                DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: sid,
-                    ..
-                } if sid == &child_id
-            )
+                                        &e.payload,
+                                        DurableEventPayload::AgentSessionSettled {
+            child_session_id: sid,
+            outcome: astrcode_core::event::AgentSessionOutcome::Completed { .. },
+            ..
+            } if sid == &child_id
+                                    )
         }),
         "completion watcher should write AgentSessionCompleted"
     );
@@ -3132,19 +3138,21 @@ async fn parent_abort_classifies_child_by_state_before_claim() {
     );
     let parent_events = store.replay_events(&parent_id).await.unwrap();
     assert!(parent_events.iter().any(|event| matches!(
-        &event.payload,
-        DurableEventPayload::AgentSessionCompleted {
-            child_session_id,
-            ..
-        } if child_session_id == &child_id
-    )));
+                &event.payload,
+                DurableEventPayload::AgentSessionSettled {
+    child_session_id,
+    outcome: astrcode_core::event::AgentSessionOutcome::Completed { .. },
+    ..
+    } if child_session_id == &child_id
+            )));
     assert!(!parent_events.iter().any(|event| matches!(
-        &event.payload,
-        DurableEventPayload::AgentSessionFailed {
-            child_session_id,
-            ..
-        } if child_session_id == &child_id
-    )));
+                &event.payload,
+                DurableEventPayload::AgentSessionSettled {
+    child_session_id,
+    outcome: astrcode_core::event::AgentSessionOutcome::Failed { .. },
+    ..
+    } if child_session_id == &child_id
+            )));
 
     let mut notification = None;
     let mut observed_parent_events = Vec::new();
@@ -3253,12 +3261,13 @@ async fn parent_abort_classifies_child_by_state_before_claim() {
 
     let cancelled_parent_events = store.replay_events(&cancelled_parent_id).await.unwrap();
     assert!(cancelled_parent_events.iter().any(|event| matches!(
-        &event.payload,
-        DurableEventPayload::AgentSessionFailed {
-            child_session_id,
-            ..
-        } if child_session_id == &cancelled_child_id
-    )));
+                &event.payload,
+                DurableEventPayload::AgentSessionSettled {
+    child_session_id,
+    outcome: astrcode_core::event::AgentSessionOutcome::Failed { .. },
+    ..
+    } if child_session_id == &cancelled_child_id
+            )));
 }
 
 #[tokio::test]
@@ -3410,12 +3419,13 @@ async fn parent_abort_stops_sync_child_and_recycles() {
     assert!(
         parent_events.iter().any(|e| {
             matches!(
-                &e.payload,
-                DurableEventPayload::AgentSessionFailed {
-                    child_session_id: sid,
-                    ..
-                } if sid == &child_id
-            )
+                                        &e.payload,
+                                        DurableEventPayload::AgentSessionSettled {
+            child_session_id: sid,
+            outcome: astrcode_core::event::AgentSessionOutcome::Failed { .. },
+            ..
+            } if sid == &child_id
+                                    )
         }),
         "cascade abort should mark sync child as failed on parent"
     );

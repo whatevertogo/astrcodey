@@ -632,6 +632,7 @@ impl TurnScheduler {
             .start_reserved_pending(reserved, entry)
             .await
             .ok()
+            .flatten()
             .map(|started| OwnedExecution {
                 turn_id: started.turn_id,
                 handle: started.handle,
@@ -692,7 +693,7 @@ impl TurnScheduler {
                     let finalization = result.finalization.clone();
                     let (completion, tracked_output) = match result.output {
                         Ok(output) => {
-                            let finish_reason = output.finish_reason;
+                            let finish_reason = output.finish_reason.to_string();
                             let tracked_output =
                                 watch.output_tx.is_some().then_some(Ok(output.text));
                             (TurnCompletion::Completed { finish_reason }, tracked_output)

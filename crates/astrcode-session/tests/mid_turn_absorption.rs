@@ -279,7 +279,7 @@ async fn mid_turn_input_is_absorbed_after_tool_round_settles() {
             .unwrap()
     };
     let tool_completed_seq =
-        seq_of(&|payload| matches!(payload, DurableEventPayload::ToolCallCompleted { .. }));
+        seq_of(&|payload| matches!(payload, DurableEventPayload::ToolCallSettled { .. }));
     let absorbed = events
         .iter()
         .find(|event| {

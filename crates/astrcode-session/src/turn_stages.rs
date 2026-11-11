@@ -58,6 +58,7 @@ impl TurnTranscript {
             };
             LlmContent::ToolCall {
                 call_id: tool_call.call_id.clone(),
+                provider_call_id: Some(tool_call.provider_call_id.clone()),
                 name: tool_call.name.clone(),
                 arguments,
                 raw_arguments,
@@ -166,14 +167,14 @@ impl TurnState {
             tools_token_estimate,
             tool_deduplicator: ToolCallDeduplicator::new(),
             next_step_index: active_step.map_or(0, |step| {
-                if step.completed {
+                if step.end_reason.is_some() {
                     step.step_index.saturating_add(1)
                 } else {
                     step.step_index
                 }
             }),
             resumed_attempt: active_step
-                .filter(|step| !step.completed)
+                .filter(|step| step.end_reason.is_none())
                 .map(|step| step.attempt.saturating_add(1)),
         }
     }
@@ -318,6 +319,7 @@ mod tests {
             "",
             None,
             &[StreamedToolCall {
+                provider_call_id: "call-bad".to_owned(),
                 call_id: "call-bad".into(),
                 name: "search".into(),
                 arguments: raw.into(),

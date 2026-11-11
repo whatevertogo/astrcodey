@@ -52,7 +52,10 @@ pub(crate) fn apply_event(event: &StoredEvent, presentation: &mut SessionPresent
         } => {
             presentation.first_user_message = first_user_message.clone();
         },
-        DurableEventPayload::ErrorOccurred { message, .. } => {
+        DurableEventPayload::ErrorOccurred { message, .. }
+        | DurableEventPayload::UserInputDiscarded {
+            reason: message, ..
+        } => {
             presentation.artifacts.push(SessionArtifactView::Error {
                 id: event.id.to_string(),
                 message: message.clone(),

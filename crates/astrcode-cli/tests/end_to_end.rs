@@ -98,10 +98,13 @@ async fn test_e2e_create_session_and_prompt() {
                 EventPayload::Durable(DurableEventPayload::TurnStarted) => {
                     got_turn_start = true;
                 },
-                EventPayload::Live(LiveEventPayload::AssistantTextDelta { .. }) => {
+                EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
+                    delta: astrcode_core::event::AssistantDelta::Text(_),
+                    ..
+                }) => {
                     got_message = true;
                 },
-                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. }) => {
+                EventPayload::Durable(DurableEventPayload::TurnEnded { .. }) => {
                     got_turn_end = true;
                     break;
                 },

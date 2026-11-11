@@ -565,6 +565,7 @@ mod tests {
             LlmMessage {
                 role: LlmRole::Assistant,
                 content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "running-agent".into(),
                     name: AGENT_TOOL_NAME.into(),
                     arguments: json!({"description": "inspect compact flow"}),

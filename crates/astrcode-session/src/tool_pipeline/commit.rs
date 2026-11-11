@@ -84,19 +84,7 @@ impl ToolCalls {
             if let ToolExecutionOutcome::Completed(result) = &item.outcome {
                 discovered_tools.extend(result.discovered_tool_names.clone());
             }
-            let completion = crate::tool_types::tool_call_completion_arguments(
-                item.call.tool_input.clone(),
-                item.call.raw_arguments.clone(),
-            );
-            finish_tool_call(
-                &publisher,
-                &item.call.call_id,
-                item.call.name.clone(),
-                &item.outcome,
-                completion.arguments,
-                completion.arguments_json,
-            )
-            .await?;
+            finish_tool_call(&publisher, &item.call.call_id, &item.outcome).await?;
             uncommitted_calls.remove(&item.call.call_id);
         }
 

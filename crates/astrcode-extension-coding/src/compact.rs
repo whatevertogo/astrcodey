@@ -119,6 +119,7 @@ mod tests {
         LlmMessage {
             role: LlmRole::Assistant,
             content: vec![LlmContent::ToolCall {
+                provider_call_id: None,
                 call_id: call_id.into(),
                 name: READ_TOOL_NAME.into(),
                 arguments: json!({ "path": path }),
