@@ -29,7 +29,7 @@ pub(super) struct SessionOwnerLease {
 struct SessionOwnerLeaseInner {
     path: PathBuf,
     owner: Arc<()>,
-    _file: File,
+    file: File,
 }
 
 impl SessionOwnerLease {
@@ -47,6 +47,8 @@ impl SessionOwnerLease {
         let mut leases = session_owner_leases().lock();
 
         if let Some(inner) = leases.get(&key).and_then(Weak::upgrade) {
+            // The upgraded reference can become the last one, and Drop locks the registry.
+            drop(leases);
             if Arc::ptr_eq(&inner.owner, owner) {
                 return Ok(Self { _inner: inner });
             }
@@ -80,7 +82,7 @@ impl SessionOwnerLease {
         let inner = Arc::new(SessionOwnerLeaseInner {
             path: key.clone(),
             owner: Arc::clone(owner),
-            _file: file,
+            file,
         });
         leases.insert(key, Arc::downgrade(&inner));
         Ok(Self { _inner: inner })
@@ -90,11 +92,33 @@ impl SessionOwnerLease {
 impl Drop for SessionOwnerLeaseInner {
     fn drop(&mut self) {
         let mut leases = session_owner_leases().lock();
+        // An inherited or duplicated descriptor can outlive this File.
+        let unlock = FileExt::unlock(&self.file);
         if leases
             .get(&self.path)
             .is_some_and(|lease| lease.strong_count() == 0)
         {
             leases.remove(&self.path);
         }
+        drop(leases);
+        if let Err(error) = unlock {
+            tracing::warn!(path = %self.path.display(), %error, "failed to unlock session owner lease");
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releasing_owner_drops_lock_even_with_a_duplicate_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = SessionOwnerLease::acquire_blocking(dir.path(), &Arc::new(())).unwrap();
+        let duplicate = lease._inner.file.try_clone().unwrap();
+        drop(lease);
+
+        let _next_lease = SessionOwnerLease::acquire_blocking(dir.path(), &Arc::new(())).unwrap();
+        drop(duplicate);
     }
 }
