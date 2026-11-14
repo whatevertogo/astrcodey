@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 
 import {
   MAX_TIMELINE_PAGES,
+  buildConversationView,
   earliestConversationCursor,
   latestTimelineWindow,
   prependTimelinePage,
@@ -28,6 +29,48 @@ assert.deepEqual(
     ['transient', 'transient'],
   ]
 )
+
+const staleAssistant = {
+  kind: 'assistant',
+  id: 'message-1',
+  text: 'partial answer',
+  status: 'streaming',
+}
+const activeAssistant = { ...staleAssistant, id: 'message-2' }
+for (const status of ['complete', 'error', 'cancelled']) {
+  const settledAssistant = {
+    ...staleAssistant,
+    text: 'settled answer',
+    status,
+    storageSeq: 17,
+  }
+  const cursor = { value: '17' }
+  const view = buildConversationView(
+    {
+      sessionId: 'session-1',
+      sessionTitle: 'Conversation',
+      cursor,
+      control: {
+        phase: 'streaming',
+        canSubmitPrompt: false,
+        canRequestCompact: true,
+      },
+      transientBlocks: [staleAssistant, activeAssistant],
+      agentSessions: [],
+    },
+    {
+      items: [settledAssistant],
+      olderCursor: { value: 'before-17' },
+      hasOlder: true,
+      snapshotCursor: cursor,
+    }
+  )
+  assert.deepEqual(view.blocks, [settledAssistant, activeAssistant])
+  assert.equal(view.cursor, '17')
+  assert.deepEqual(view.timelinePageBlockIds, [['message-1']])
+  assert.equal(view.timelineOlderCursor, 'before-17')
+  assert.equal(view.timelineHasOlder, true)
+}
 
 window = prependTimelinePage(window, [block('older'), block('durable')])
 assert.deepEqual(

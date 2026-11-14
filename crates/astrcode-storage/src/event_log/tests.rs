@@ -10,7 +10,7 @@ use tokio::time::{Duration, timeout};
 
 use super::{
     EventLog, find_event_end, open_reverse_scan, parse_event_line, read_summary_at_path,
-    replay_events_at_path, sync_existing_log,
+    replay_events_at_path, replay_suffix_at_path, sync_existing_log,
 };
 use crate::{
     StorageError,
@@ -134,11 +134,17 @@ async fn event_log_seeks_deep_pages_at_record_boundaries() {
         .write_all(b"{")
         .unwrap();
 
+    let cursor_seq = 650;
+    let expected_end = std::fs::read(&path)
+        .unwrap()
+        .split_inclusive(|&byte| byte == b'\n')
+        .take(cursor_seq + 1)
+        .map(|line| line.len() as u64)
+        .sum();
     let (mut file, end) = open_reverse_scan(&path).unwrap();
-    assert!(
-        find_event_end(&mut file, end, &session_id, 650)
-            .unwrap()
-            .is_some()
+    assert_eq!(
+        find_event_end(&mut file, end, &session_id, cursor_seq as u64).unwrap(),
+        Some(expected_end)
     );
     drop(file);
     for (cursor, limit, expected) in [
@@ -227,6 +233,10 @@ async fn event_log_replays_recent_and_older_cursors_in_forward_order() {
         .unwrap()
         .write_all(b"{")
         .unwrap();
+    assert_eq!(
+        replay_suffix_at_path(&path, &session_id, log.count() - 1, 1, 3).as_deref(),
+        Some(&events[1..])
+    );
     for (cursor, limit, expected) in [
         (1, 3, &events[1..]),
         (0, 2, &events[..2]),

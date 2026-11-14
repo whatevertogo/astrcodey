@@ -208,13 +208,21 @@ impl ServerEventBus {
     }
 
     pub(crate) fn streaming_snapshot(&self, session_id: &SessionId) -> Option<StreamingSnapshot> {
-        let state = self.streaming.lock().get(session_id).cloned()?;
-        let state = state.lock();
-        Some(StreamingSnapshot {
-            message_id: state.message_id.to_string(),
-            text: state.text.clone(),
-            reasoning_content: (!state.reasoning.is_empty()).then(|| state.reasoning.clone()),
-        })
+        let active = self.streaming.lock().get(session_id).cloned()?;
+        let snapshot = {
+            let state = active.lock();
+            StreamingSnapshot {
+                message_id: state.message_id.to_string(),
+                text: state.text.clone(),
+                reasoning_content: (!state.reasoning.is_empty()).then(|| state.reasoning.clone()),
+            }
+        };
+        // The message can settle or be replaced while the snapshot text is copied.
+        self.streaming
+            .lock()
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &active))
+            .then_some(snapshot)
     }
 
     fn existing_conversation_fanout(
@@ -461,6 +469,7 @@ mod tests {
             },
         ));
         publish(tool_delta());
+        assert!(bus.streaming_snapshot(&session_id).is_none());
         assert!(bus.streaming.lock().is_empty());
 
         publish(start());
