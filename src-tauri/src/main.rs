@@ -6,6 +6,8 @@
 mod commands;
 mod instance;
 mod paths;
+#[cfg(target_os = "macos")]
+mod startup;
 
 use std::sync::Arc;
 
@@ -58,6 +60,9 @@ fn shutdown_sidecar(app_handle: &tauri::AppHandle) {
 }
 
 fn run() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    startup::normalize_tmp_launch()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ASTRCODE_LOG")

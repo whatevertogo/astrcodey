@@ -82,8 +82,9 @@ LAYER_NAMES: dict[int, str] = {
 # Same-layer exceptions: (dependent, dependency). Each entry states the
 # invariant that the strict layer numbering cannot express.
 ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
-    # astrcode-paths is a leaf path primitive; core is its only same-layer consumer.
+    # astrcode-paths is a leaf path primitive shared by core and desktop startup.
     ("astrcode-core", "astrcode-paths"),
+    ("astrcode-desktop", "astrcode-paths"),
     # astrcode-s5r-runtime is the s5r subprocess runtime shared by host and
     # worker; it sits beside the SDK layer it is written against.
     ("astrcode-s5r-runtime", "astrcode-extension-sdk"),

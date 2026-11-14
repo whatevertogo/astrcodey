@@ -7,3 +7,9 @@ description = "AstrCode process-level directory primitives (user home, data dir,
 
 [dependencies]
 dirs = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

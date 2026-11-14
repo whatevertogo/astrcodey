@@ -9,13 +9,14 @@ use astrcode_storage::ToolResultArtifactRef;
 /// `maxOutputTokens` 一类调优字段；所有工具在同一提交边界获得相同的落盘与预览语义。
 pub(crate) const TOOL_RESULT_INLINE_LIMIT_BYTES: usize = 30_000;
 
-/// 摘要中保留的预览字符数（与 Claude Code PREVIEW_SIZE_BYTES ≈ 2000 对齐）。
+/// 摘要中保留的预览字符数，包含中间省略标记。
 pub(crate) const TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
+const TOOL_RESULT_OMISSION: &str = "\n[... middle omitted ...]\n";
 
 /// 工具结果摘要预览。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolResultPreview {
-    /// 摘要中内联展示的前缀内容。
+    /// 摘要中内联展示的头尾内容。
     pub content: String,
     /// 原始内容是否还有更多未展示部分。
     pub has_more: bool,
@@ -31,9 +32,35 @@ pub(crate) fn should_auto_persist_tool_result(result: &ToolResult) -> bool {
 pub(crate) fn tool_result_preview(content: &str, max_chars: usize) -> ToolResultPreview {
     let mut chars = content.chars();
     let preview: String = chars.by_ref().take(max_chars).collect();
+    let has_more = chars.next().is_some();
+    let marker_chars = TOOL_RESULT_OMISSION.chars().count();
+    if !has_more || max_chars <= marker_chars {
+        return ToolResultPreview {
+            content: preview,
+            has_more,
+        };
+    }
+
+    let content_budget = max_chars - marker_chars;
+    let head_chars = content_budget / 2;
+    let tail_chars = content_budget.div_ceil(2);
+    let head_end = preview
+        .char_indices()
+        .nth(head_chars)
+        .map_or(preview.len(), |(i, _)| i);
+    let tail_start = content
+        .char_indices()
+        .rev()
+        .nth(tail_chars - 1)
+        .map_or(content.len(), |(i, _)| i);
     ToolResultPreview {
-        content: preview,
-        has_more: chars.next().is_some(),
+        content: format!(
+            "{}{}{}",
+            &preview[..head_end],
+            TOOL_RESULT_OMISSION,
+            &content[tail_start..]
+        ),
+        has_more,
     }
 }
 
@@ -103,11 +130,32 @@ mod tests {
     }
 
     #[test]
-    fn preview_reports_more_content() {
-        let preview = tool_result_preview("abcdef", 3);
-
-        assert_eq!(preview.content, "abc");
-        assert!(preview.has_more);
+    fn preview_preserves_head_and_tail_within_budget() {
+        for unit in ["x", "中", "🦀"] {
+            let content = format!("BEGIN\n{}\nFAILED: final diagnostic", unit.repeat(30_001));
+            let preview = tool_result_preview(&content, TOOL_RESULT_PREVIEW_CHARS);
+            assert!(preview.content.starts_with("BEGIN\n"));
+            assert!(preview.content.ends_with("FAILED: final diagnostic"));
+            assert!(preview.content.contains(TOOL_RESULT_OMISSION));
+            assert_eq!(preview.content.chars().count(), TOOL_RESULT_PREVIEW_CHARS);
+            assert!(preview.has_more);
+        }
+        let content = "中文🦀".repeat(30);
+        for budget in 0..=content.chars().count() + 1 {
+            let preview = tool_result_preview(&content, budget);
+            assert!(preview.content.chars().count() <= budget);
+            assert_eq!(preview.has_more, content.chars().count() > budget);
+            if !preview.has_more {
+                assert_eq!(preview.content, content);
+            }
+        }
+        assert_eq!(
+            tool_result_preview("", 0),
+            ToolResultPreview {
+                content: String::new(),
+                has_more: false
+            }
+        );
     }
 
     #[test]

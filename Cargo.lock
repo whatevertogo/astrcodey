@@ -328,6 +328,7 @@ name = "astrcode-desktop"
 version = "0.3.18"
 dependencies = [
  "anyhow",
+ "astrcode-paths",
  "dirs",
  "fs2",
  "portpicker",
@@ -340,6 +341,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-http",
  "tauri-plugin-shell",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -604,6 +606,8 @@ name = "astrcode-paths"
 version = "0.3.18"
 dependencies = [
  "dirs",
+ "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -4442,7 +4446,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
