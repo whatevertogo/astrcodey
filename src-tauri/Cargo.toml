@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+astrcode-paths = { path = "../crates/astrcode-paths" }
 tauri = { workspace = true }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

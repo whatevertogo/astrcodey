@@ -7,6 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::trusted_tmp_launch_path;
+
 const TEST_HOME_ENV: &str = "ASTRCODE_TEST_HOME";
 const USER_HOME_ENV: &str = "ASTRCODE_HOME_DIR";
 
