@@ -85,27 +85,18 @@ pub(in crate::http) async fn session_stream(
     tracing::info!(session_id = %raw_session_id, cursor = ?query.cursor, "SSE stream connected");
     let session_id = SessionId::from(raw_session_id);
 
-    // Validate session exists before opening the stream.
-    let has_messages = match http_state
+    let snapshot = match http_state
         .app
         .runtime()
         .session_manager()
-        .has_messages(&session_id)
+        .read_model(&session_id)
         .await
     {
-        Ok(has_messages) => has_messages,
+        Ok(snapshot) => snapshot,
         Err(error) => return session_read_error_response(error),
     };
-    let agent_sessions = match http_state
-        .app
-        .runtime()
-        .session_manager()
-        .agent_sessions(&session_id)
-        .await
-    {
-        Ok(agent_sessions) => agent_sessions,
-        Err(error) => return session_read_error_response(error),
-    };
+    let has_messages = snapshot.has_messages();
+    let agent_sessions = &snapshot.agent_sessions;
     let child_sessions: HashMap<SessionId, SessionId> = agent_sessions
         .iter()
         .filter(|link| link.status == AgentSessionStatus::Running)
@@ -123,6 +114,7 @@ pub(in crate::http) async fn session_stream(
         .filter(|link| link.status == AgentSessionStatus::Running)
         .map(|link| (link.child_session_id.clone(), Phase::Thinking))
         .collect();
+    drop(snapshot);
     let child_session_tracker = ChildSessionTracker::new(child_sessions.clone(), last_child_phase);
 
     http_state

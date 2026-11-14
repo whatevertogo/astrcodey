@@ -16,7 +16,7 @@ use std::{
 
 use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, EVENT_FORMAT_VERSION, EventEnvelope, StoredEvent},
-    types::ToolCallId,
+    types::{SessionId, ToolCallId},
 };
 use astrcode_session_projection::{
     PreparedProjectionBatch, SessionSummary, SessionSummaryProjection,
@@ -281,6 +281,41 @@ fn replay_events_before_at_path(
     Ok(events)
 }
 
+fn replay_suffix_at_path(
+    path: &Path,
+    session_id: &SessionId,
+    latest_seq: u64,
+    after_seq: u64,
+    max_events: usize,
+) -> Option<Vec<StoredEvent>> {
+    let remaining = usize::try_from(latest_seq.saturating_sub(after_seq)).ok()?;
+    if remaining > max_events {
+        return None;
+    }
+
+    // Probe the last event even when the cursor is already caught up.
+    let count = remaining.max(1);
+    let mut events = replay_events_before_at_path(path, None, count).ok()?;
+    let last = events.last()?;
+    if events.len() != count || last.seq != latest_seq || &last.session_id != session_id {
+        return None;
+    }
+    if events
+        .iter()
+        .any(|event| match (event.seq, &event.payload) {
+            (0, DurableEventPayload::SessionStarted(_)) => event.turn_id.is_some(),
+            (0, _) | (_, DurableEventPayload::SessionStarted(_)) => true,
+            _ => false,
+        })
+    {
+        return None;
+    }
+    if remaining == 0 {
+        events.clear();
+    }
+    Some(events)
+}
+
 fn scan_events_reverse_at_path(
     path: &Path,
     mut visit: impl FnMut(StoredEvent) -> bool,
@@ -297,71 +332,80 @@ fn scan_events_reverse_at_path(
     let Some(mut position) = last_committed_offset(&mut file, file_len)? else {
         return Ok(());
     };
-    let mut leading_fragment = Vec::new();
     let mut newer_seq = None;
     let mut session_id = None;
-
-    while position > 0 {
-        let start = position.saturating_sub(REVERSE_SCAN_CHUNK_BYTES);
-        let mut chunk = vec![0; (position - start) as usize];
-        file.seek(SeekFrom::Start(start))
-            .and_then(|_| file.read_exact(&mut chunk))
-            .map_err(StorageError::Io)?;
-        chunk.extend_from_slice(&leading_fragment);
-
-        let (complete, next_fragment) = if start == 0 {
-            (chunk.as_slice(), Vec::new())
-        } else if let Some(first_newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            (&chunk[first_newline + 1..], chunk[..first_newline].to_vec())
-        } else {
-            (&[][..], chunk)
-        };
-
-        for line in complete.rsplit(|byte| *byte == b'\n') {
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let line = std::str::from_utf8(line).map_err(|error| {
-                StorageError::CorruptLog(format!(
-                    "event at {} is not valid UTF-8: {error}",
-                    path.display()
-                ))
-            })?;
-            let event = parse_event_line(path, 0, line)?;
-            if let Some(expected_newer) = newer_seq
-                && event.seq.checked_add(1) != Some(expected_newer)
-            {
+    let mut visit_line = |line: &[u8]| -> Result<bool, StorageError> {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return Ok(true);
+        }
+        let line = std::str::from_utf8(line).map_err(|error| {
+            StorageError::CorruptLog(format!(
+                "event at {} is not valid UTF-8: {error}",
+                path.display()
+            ))
+        })?;
+        let event = parse_event_line(path, 0, line)?;
+        if let Some(expected_newer) = newer_seq
+            && event.seq.checked_add(1) != Some(expected_newer)
+        {
+            return Err(corrupt_log(
+                path,
+                0,
+                format!(
+                    "expected reverse seq {}, got {}",
+                    expected_newer.saturating_sub(1),
+                    event.seq
+                ),
+            ));
+        }
+        if let Some(expected_session) = &session_id {
+            if &event.session_id != expected_session {
                 return Err(corrupt_log(
                     path,
                     0,
                     format!(
-                        "expected reverse seq {}, got {}",
-                        expected_newer.saturating_sub(1),
-                        event.seq
+                        "event belongs to session {}, expected {}",
+                        event.session_id, expected_session
                     ),
                 ));
             }
-            if let Some(expected_session) = &session_id {
-                if &event.session_id != expected_session {
-                    return Err(corrupt_log(
-                        path,
-                        0,
-                        format!(
-                            "event belongs to session {}, expected {}",
-                            event.session_id, expected_session
-                        ),
-                    ));
-                }
-            } else {
-                session_id = Some(event.session_id.clone());
-            }
-            newer_seq = Some(event.seq);
+        } else {
+            session_id = Some(event.session_id.clone());
+        }
+        newer_seq = Some(event.seq);
+        Ok(visit(event))
+    };
 
-            if !visit(event) {
+    let mut buffer = vec![0; REVERSE_SCAN_CHUNK_BYTES as usize];
+    let mut reversed_fragment = Vec::new();
+    while position > 0 {
+        let start = position.saturating_sub(REVERSE_SCAN_CHUNK_BYTES);
+        let chunk = &mut buffer[..(position - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(chunk))
+            .map_err(StorageError::Io)?;
+
+        let mut lines = chunk.rsplit(|byte| *byte == b'\n');
+        let leading_fragment = if start == 0 { None } else { lines.next_back() };
+        for line in lines {
+            let should_continue = if reversed_fragment.is_empty() {
+                visit_line(line)?
+            } else {
+                // Fragments arrive from the end of the record. Reverse once after assembly.
+                reversed_fragment.extend(line.iter().rev());
+                reversed_fragment.reverse();
+                let should_continue = visit_line(&reversed_fragment)?;
+                reversed_fragment.clear();
+                should_continue
+            };
+            if !should_continue {
                 return Ok(());
             }
         }
-        leading_fragment = next_fragment;
+
+        if let Some(fragment) = leading_fragment {
+            reversed_fragment.extend(fragment.iter().rev());
+        }
         position = start;
     }
 
@@ -1030,16 +1074,34 @@ impl EventLog {
         run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), None)).await
     }
 
-    /// Replay at most `max_events` events after `seq`, stopping the file scan
-    /// once the limit is reached.
+    /// Replay at most `max_events` events after `seq`.
+    ///
+    /// The repository holds the confirmed commit lane across this call.
     pub(crate) async fn replay_after_limited(
         &self,
+        session_id: &SessionId,
         seq: u64,
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
+        if max_events == 0 {
+            return Ok(Vec::new());
+        }
+
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), Some(max_events)))
-            .await
+        let session_id = session_id.clone();
+        let latest_seq = self.count().checked_sub(1);
+        run_blocking_io(move || {
+            // A complete suffix is sufficient after create/open validated the prefix.
+            if let Some(latest_seq) = latest_seq
+                && let Some(events) =
+                    replay_suffix_at_path(&path, &session_id, latest_seq, seq, max_events)
+            {
+                return Ok(events);
+            }
+
+            replay_events_at_path(&path, None, Some(seq), Some(max_events))
+        })
+        .await
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).

@@ -10,7 +10,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, StoredEvent, ToolCallOutcome},
+    event::{DurableEventPayload, StoredEvent, ToolCallOutcome},
     tool::ToolResult,
     types::{SessionId, ToolCallId},
 };
@@ -18,7 +18,8 @@ use astrcode_protocol::http::{ConversationBlockDto, ToolCallStatusDto};
 use astrcode_storage::{SessionStore, StorageError};
 
 use super::projection::blocks::{
-    block_from_payload, persisted_transcript_blocks, tool_call_status, tool_terminal_metadata,
+    durable_block_from_payload, persisted_transcript_blocks, tool_call_status,
+    tool_terminal_metadata,
 };
 
 const CURSOR_PREFIX: &str = "timeline-v1:";
@@ -137,7 +138,7 @@ impl ConversationTimelineReader for EventLogConversationTimeline {
             }
             let first_seq = events.first().map(|event| event.seq);
             earliest_scanned_seq = first_seq;
-            prepend_entries(&mut entries, project_events(&events, &mut settlements));
+            prepend_entries(&mut entries, project_events(events, &mut settlements));
 
             let has_unscanned_events = chunk_has_older || first_seq.is_some_and(|seq| seq > 0);
             if !has_unscanned_events
@@ -307,47 +308,53 @@ impl TimelinePosition {
 }
 
 fn project_events(
-    events: &[StoredEvent],
+    events: Vec<StoredEvent>,
     settlements: &mut HashMap<ToolCallId, (ToolCallOutcome, ToolResult)>,
 ) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();
-    for stored in events.iter().rev() {
-        if let DurableEventPayload::ToolCallSettled {
-            call_id,
-            outcome,
-            result,
-        } = &stored.payload
-        {
-            settlements.insert(call_id.clone(), (*outcome, result.clone()));
-            continue;
-        }
-        if let DurableEventPayload::SessionForked { messages, .. } = &stored.payload {
-            entries.extend(
-                persisted_transcript_blocks(messages, stored.seq)
-                    .into_iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(item_index, mut block)| {
-                        apply_tool_settlement(&mut block, settlements);
-                        TimelineEntry {
-                            position: TimelinePosition::ForkItem {
-                                event_seq: stored.seq,
-                                item_index,
-                            },
-                            block,
-                        }
-                    }),
-            );
-            continue;
-        }
-        let Some(mut block) = block_from_payload(&Event::from(stored)) else {
-            continue;
+    for stored in events.into_iter().rev() {
+        let seq = stored.seq;
+        let mut block = match stored.event.payload {
+            DurableEventPayload::ToolCallSettled {
+                call_id,
+                outcome,
+                result,
+            } => {
+                settlements.insert(call_id, (outcome, result));
+                continue;
+            },
+            DurableEventPayload::SessionForked { messages, .. } => {
+                entries.extend(
+                    persisted_transcript_blocks(&messages, seq)
+                        .into_iter()
+                        .enumerate()
+                        .rev()
+                        .map(|(item_index, mut block)| {
+                            apply_tool_settlement(&mut block, settlements);
+                            TimelineEntry {
+                                position: TimelinePosition::ForkItem {
+                                    event_seq: seq,
+                                    item_index,
+                                },
+                                block,
+                            }
+                        }),
+                );
+                continue;
+            },
+            payload => {
+                let Some(block) = durable_block_from_payload(&payload, &stored.event.id, Some(seq))
+                else {
+                    continue;
+                };
+                block
+            },
         };
         apply_tool_settlement(&mut block, settlements);
         let id = block_id(&block);
         if !entries.iter().any(|entry| block_id(&entry.block) == id) {
             entries.push(TimelineEntry {
-                position: TimelinePosition::Event(stored.seq),
+                position: TimelinePosition::Event(seq),
                 block,
             });
         }
@@ -398,8 +405,11 @@ fn page_budget_reached(
         return Ok(true);
     }
     let mut bytes = 0usize;
+    let mut encoded = Vec::new();
     for entry in entries.iter().rev() {
-        bytes = bytes.saturating_add(serde_json::to_vec(&entry.block)?.len());
+        encoded.clear();
+        serde_json::to_writer(&mut encoded, &entry.block)?;
+        bytes = bytes.saturating_add(encoded.len());
         if bytes >= budget.max_bytes {
             return Ok(true);
         }
@@ -413,14 +423,14 @@ fn bounded_suffix(
 ) -> Result<(Vec<TimelineEntry>, Option<TimelinePosition>, bool), serde_json::Error> {
     let mut bytes = 0usize;
     let mut kept = 0usize;
-    for entry in entries.iter().rev() {
-        let item_bytes = serde_json::to_vec(&entry.block)?.len();
-        if kept > 0
-            && (kept >= budget.max_items || bytes.saturating_add(item_bytes) > budget.max_bytes)
-        {
+    let mut encoded = Vec::new();
+    for entry in entries.iter().rev().take(budget.max_items.max(1)) {
+        encoded.clear();
+        serde_json::to_writer(&mut encoded, &entry.block)?;
+        bytes = bytes.saturating_add(encoded.len());
+        if kept > 0 && bytes > budget.max_bytes {
             break;
         }
-        bytes = bytes.saturating_add(item_bytes);
         kept += 1;
     }
     let start = entries.len().saturating_sub(kept);
@@ -742,7 +752,7 @@ mod tests {
             )
         };
         let entries = project_events(
-            &[compaction(1, "older"), compaction(2, "newest")],
+            vec![compaction(1, "older"), compaction(2, "newest")],
             &mut HashMap::new(),
         );
         assert!(matches!(

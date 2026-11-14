@@ -90,6 +90,71 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
 }
 
 #[tokio::test]
+async fn event_log_replays_recent_and_older_cursors_in_forward_order() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let session_id = SessionId::new("resume-session");
+    let (log, started) = EventLog::create(path.clone(), started_event(&session_id))
+        .await
+        .unwrap();
+    let events = log
+        .append_batch(
+            [
+                "one".to_owned(),
+                "🌟".repeat(64 * 1024),
+                "three".into(),
+                "four".into(),
+            ]
+            .iter()
+            .map(|text| user_event(&session_id, text))
+            .collect(),
+        )
+        .await
+        .unwrap();
+
+    // Buffered events are readable, while an incomplete trailing record is ignored.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{")
+        .unwrap();
+    for (cursor, limit, expected) in [
+        (1, 3, &events[1..]),
+        (0, 2, &events[..2]),
+        (4, 3, &[]),
+        (u64::MAX, 3, &[]),
+        (1, 0, &[]),
+    ] {
+        assert_eq!(
+            log.replay_after_limited(&session_id, cursor, limit)
+                .await
+                .unwrap(),
+            expected,
+            "cursor {cursor}, limit {limit}"
+        );
+    }
+
+    // A tail at the expected sequence must still belong to the open session.
+    let wrong = StoredEvent::new(4, user_event(&SessionId::new("other-session"), "wrong"));
+    let mut bytes = Vec::new();
+    for record in std::iter::once(&started)
+        .chain(&events[..3])
+        .chain([&wrong])
+    {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    std::fs::write(&path, bytes).unwrap();
+    assert!(matches!(
+        log.replay_after_limited(&session_id, 3, 1).await,
+        Err(StorageError::CorruptLog(_))
+    ));
+}
+
+#[tokio::test]
 async fn event_log_finds_requested_tool_settlements_after_cursor_across_chunks() {
     let dir = tempdir().unwrap();
     let session_id = SessionId::new("settlement-history");

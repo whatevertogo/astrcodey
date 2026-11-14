@@ -266,6 +266,11 @@ async fn synced_append_stays_hidden_and_sticky_until_exact_retry_or_reopen() {
         repo.replay_events(&session_id).await,
         Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
     ));
+    let cursor = "1".to_owned();
+    assert!(matches!(
+        repo.replay_from_limited(&session_id, &cursor, 1).await,
+        Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
+    ));
     assert!(matches!(
         repo.append_event(user_event(&session_id, "must be blocked"))
             .await,
@@ -287,6 +292,12 @@ async fn synced_append_stays_hidden_and_sticky_until_exact_retry_or_reopen() {
         .await
         .unwrap();
     assert_eq!(confirmed.len(), 1);
+    assert_eq!(
+        repo.replay_from_limited(&session_id, &cursor, 1)
+            .await
+            .unwrap(),
+        confirmed
+    );
     assert!(
         repo.retry_uncertain_sync(&session_id, pending_seq)
             .await
