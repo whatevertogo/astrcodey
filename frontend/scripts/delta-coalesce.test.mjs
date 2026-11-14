@@ -179,7 +179,6 @@ const framePatch = reduceConversationDeltas(
   frameState,
   [
     { kind: 'patchBlock', blockId: 'assistant-frame', textDelta: 'hello ' },
-    { kind: 'patchBlock', blockId: 'assistant-frame', textDelta: 'world' },
     {
       kind: 'agentSessionUpdated',
       agentSession: {
@@ -198,6 +197,7 @@ const framePatch = reduceConversationDeltas(
       },
     },
     { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
+    { kind: 'patchBlock', blockId: 'assistant-frame', textDelta: 'world' },
   ],
   '6'
 )
@@ -670,12 +670,26 @@ applyLifecycle([{ kind: 'toolExecutionStarted', callId: 'runtime-new' }])
 assert.equal(lifecycle.blocks[1].status, 'running')
 applyLifecycle([
   {
+    kind: 'patchArguments',
+    blockId: 'runtime-new',
+    arguments: '{"command":"echo before settlement"}',
+  },
+  { kind: 'statusItemUpdate', id: 'progress', text: 'running' },
+  {
     kind: 'toolCallSettled',
     callId: 'runtime-new',
     status: 'interrupted',
     text: 'process stopped',
   },
+  { kind: 'statusItemUpdate', id: 'progress', text: 'stopped' },
+  { kind: 'patchArguments', blockId: 'runtime-new', arguments: 'stale' },
 ])
+assert.equal(
+  lifecycle.blocks[1].arguments,
+  '{"command":"echo before settlement"}'
+)
+assert.deepEqual(lifecycle.statusItems, { progress: 'stopped' })
+assert.deepEqual(lifecycle.statusItemRevisions, { progress: 2 })
 applyLifecycle([
   { kind: 'toolArgumentsDelta', callId: 'runtime-new', delta: 'stale' },
   { kind: 'toolExecutionStarted', callId: 'runtime-new' },

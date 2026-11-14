@@ -9,7 +9,8 @@ use tempfile::tempdir;
 use tokio::time::{Duration, timeout};
 
 use super::{
-    EventLog, parse_event_line, read_summary_at_path, replay_events_at_path, sync_existing_log,
+    EventLog, find_event_end, open_reverse_scan, parse_event_line, read_summary_at_path,
+    replay_events_at_path, sync_existing_log,
 };
 use crate::{
     StorageError,
@@ -74,9 +75,18 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
     }
     log.force_sync().await.unwrap();
 
-    let latest = log.replay_before_limited(None, 2).await.unwrap();
-    let older = log.replay_before_limited(Some(3), 2).await.unwrap();
-    let empty = log.replay_before_limited(Some(1), 0).await.unwrap();
+    let latest = log
+        .replay_before_limited(&session_id, None, 2)
+        .await
+        .unwrap();
+    let older = log
+        .replay_before_limited(&session_id, Some(3), 2)
+        .await
+        .unwrap();
+    let empty = log
+        .replay_before_limited(&session_id, Some(1), 0)
+        .await
+        .unwrap();
 
     assert_eq!(
         latest.iter().map(|event| event.seq).collect::<Vec<_>>(),
@@ -87,6 +97,102 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
         [1, 2]
     );
     assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn event_log_seeks_deep_pages_at_record_boundaries() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("deep-history.jsonl");
+    let session_id = SessionId::new("deep-history");
+    let (log, started) = EventLog::create(path.clone(), started_event(&session_id))
+        .await
+        .unwrap();
+    let mut records = vec![started];
+    records.extend(
+        log.append_batch(
+            (1..=1600)
+                .map(|seq| {
+                    let text = if seq == 650 {
+                        "🌟".repeat(40_000)
+                    } else {
+                        "variable".repeat(seq % 27)
+                    };
+                    user_event(&session_id, &text)
+                })
+                .collect(),
+        )
+        .await
+        .unwrap(),
+    );
+    log.force_sync().await.unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{")
+        .unwrap();
+
+    let (mut file, end) = open_reverse_scan(&path).unwrap();
+    assert!(
+        find_event_end(&mut file, end, &session_id, 650)
+            .unwrap()
+            .is_some()
+    );
+    drop(file);
+    for (cursor, limit, expected) in [
+        (None, 7, &records[1594..]),
+        (Some(u64::MAX), 7, &records[1594..]),
+        (Some(1500), 7, &records[1493..1500]),
+        (Some(651), 7, &records[644..651]),
+        (Some(650), 1, &records[649..650]),
+        (Some(42), 2, &records[40..42]),
+        (Some(2), 7, &records[..2]),
+        (Some(0), 7, &[]),
+        (Some(42), 0, &[]),
+    ] {
+        assert_eq!(
+            log.replay_before_limited(&session_id, cursor, limit)
+                .await
+                .unwrap(),
+            expected,
+            "cursor {cursor:?}, limit {limit}"
+        );
+    }
+
+    let write_records = |records: &[StoredEvent]| {
+        let mut bytes = Vec::new();
+        for record in records {
+            serde_json::to_writer(&mut bytes, &record).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+    };
+    let large = StoredEvent::new(650, user_event(&session_id, &"x".repeat(1024 * 1024)));
+    let original = std::mem::replace(&mut records[650], large);
+    write_records(&records);
+    let (mut file, end) = open_reverse_scan(&path).unwrap();
+    assert_eq!(
+        find_event_end(&mut file, end, &session_id, 900).unwrap(),
+        None
+    );
+    drop(file);
+    assert_eq!(
+        log.replay_before_limited(&session_id, Some(900), 7)
+            .await
+            .unwrap(),
+        records[893..900]
+    );
+
+    // Preserve the normal validation when the fetched range crosses a replaced record.
+    records[650] = original;
+    records[649] = StoredEvent::new(649, user_event(&SessionId::new("other-session"), "wrong"));
+    write_records(&records);
+    assert!(matches!(
+        log.replay_before_limited(&session_id, Some(650), 1).await,
+        Err(StorageError::CorruptLog(_))
+    ));
 }
 
 #[tokio::test]
