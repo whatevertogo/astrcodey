@@ -19,7 +19,7 @@ use astrcode_session::{
     Session, SessionCreationFailed, SessionError, SessionEventObserver, SessionEventSink,
     SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
 };
-use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
+use astrcode_session_projection::{SessionReadModel, SessionSummary};
 use astrcode_storage::{SessionCatalog, SessionStore, StorageError};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
@@ -300,26 +300,6 @@ impl SessionManager {
             event.turn_id.as_ref() == Some(turn_id)
                 && matches!(event.payload, DurableEventPayload::TurnEnded { .. })
         }))
-    }
-
-    pub(crate) async fn has_messages(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<bool, SessionManagerError> {
-        self.event_store
-            .session_has_messages(session_id)
-            .await
-            .map_err(SessionManagerError::from)
-    }
-
-    pub(crate) async fn agent_sessions(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<AgentSessionLinkView>, SessionManagerError> {
-        self.event_store
-            .session_agent_sessions(session_id)
-            .await
-            .map_err(SessionManagerError::from)
     }
 
     pub(crate) async fn list_summaries(&self) -> Result<Vec<SessionSummary>, SessionManagerError> {
@@ -762,9 +742,7 @@ mod tests {
     use astrcode_session::{
         SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams,
     };
-    use astrcode_session_projection::{
-        AgentSessionLinkView, AgentSessionStatus, SessionReadModel, SessionSummary,
-    };
+    use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary};
     use astrcode_storage::{
         CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
         ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
@@ -1150,13 +1128,6 @@ mod tests {
 
         async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
             self.inner.list_session_summaries().await
-        }
-
-        async fn session_agent_sessions(
-            &self,
-            session_id: &SessionId,
-        ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
-            self.inner.session_agent_sessions(session_id).await
         }
     }
 

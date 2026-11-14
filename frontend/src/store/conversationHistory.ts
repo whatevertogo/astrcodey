@@ -106,9 +106,20 @@ function mergeById(
     const index = merged.findIndex((block) => block.id === update.id)
     if (index === -1) {
       merged.push(update)
-    } else {
-      merged[index] = update
+      continue
     }
+
+    const existing = merged[index]
+    // The durable page can include a settlement before the live preview is cleared.
+    if (
+      existing.kind === 'assistant' &&
+      existing.status !== 'streaming' &&
+      update.kind === 'assistant' &&
+      update.status === 'streaming'
+    ) {
+      continue
+    }
+    merged[index] = update
   }
   return merged
 }

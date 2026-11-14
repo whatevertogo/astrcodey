@@ -25,7 +25,11 @@ pub(crate) struct StreamingSnapshot {
     pub reasoning_content: Option<String>,
 }
 
-type StreamingState = parking_lot::Mutex<Option<(MessageId, String, String)>>;
+struct StreamingState {
+    message_id: MessageId,
+    text: String,
+    reasoning: String,
+}
 
 #[derive(Clone)]
 enum SessionRoute {
@@ -53,7 +57,7 @@ pub struct ServerEventBus {
     global_notifications: broadcast::Sender<ClientNotification>,
     conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
-    streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
+    streaming: Mutex<HashMap<SessionId, Arc<Mutex<StreamingState>>>>,
     downstream_observers: Mutex<Vec<Arc<dyn SessionEventObserver>>>,
 }
 
@@ -204,20 +208,21 @@ impl ServerEventBus {
     }
 
     pub(crate) fn streaming_snapshot(&self, session_id: &SessionId) -> Option<StreamingSnapshot> {
-        self.streaming.lock().get(session_id).and_then(|state| {
-            state
-                .lock()
-                .as_ref()
-                .map(|(id, text, reasoning)| StreamingSnapshot {
-                    message_id: id.to_string(),
-                    text: text.clone(),
-                    reasoning_content: if reasoning.is_empty() {
-                        None
-                    } else {
-                        Some(reasoning.clone())
-                    },
-                })
-        })
+        let active = self.streaming.lock().get(session_id).cloned()?;
+        let snapshot = {
+            let state = active.lock();
+            StreamingSnapshot {
+                message_id: state.message_id.to_string(),
+                text: state.text.clone(),
+                reasoning_content: (!state.reasoning.is_empty()).then(|| state.reasoning.clone()),
+            }
+        };
+        // The message can settle or be replaced while the snapshot text is copied.
+        self.streaming
+            .lock()
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &active))
+            .then_some(snapshot)
     }
 
     fn existing_conversation_fanout(
@@ -290,13 +295,36 @@ impl ServerEventBus {
     }
 
     fn update_streaming_snapshot(&self, event: &Event) {
-        let state = Arc::clone(
-            self.streaming
-                .lock()
-                .entry(event.session_id.clone())
-                .or_insert_with(|| Arc::new(StreamingState::new(None))),
-        );
-        update_streaming(&state, &event.payload);
+        match &event.payload {
+            EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
+                self.streaming.lock().insert(
+                    event.session_id.clone(),
+                    Arc::new(Mutex::new(StreamingState {
+                        message_id: message_id.clone(),
+                        text: String::new(),
+                        reasoning: String::new(),
+                    })),
+                );
+            },
+            EventPayload::Live(LiveEventPayload::AssistantMessageDelta { delta, .. }) => {
+                let state = self.streaming.lock().get(&event.session_id).cloned();
+                if let Some(state) = state {
+                    let mut state = state.lock();
+                    match delta {
+                        AssistantDelta::Text(delta) => state.text.push_str(delta),
+                        AssistantDelta::Reasoning(delta) => state.reasoning.push_str(delta),
+                    }
+                }
+            },
+            EventPayload::Durable(
+                DurableEventPayload::AssistantMessage { .. }
+                | DurableEventPayload::AssistantAttemptSettled { .. }
+                | DurableEventPayload::TurnEnded { .. },
+            ) => {
+                self.streaming.lock().remove(&event.session_id);
+            },
+            _ => {},
+        }
     }
 }
 
@@ -335,39 +363,6 @@ pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, O
 impl Default for ServerEventBus {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn update_streaming(state: &StreamingState, payload: &EventPayload) {
-    let mut guard = state.lock();
-    match payload {
-        EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
-            *guard = Some((message_id.clone(), String::new(), String::new()));
-        },
-        EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
-            delta: AssistantDelta::Text(delta),
-            ..
-        }) => {
-            if let Some((_, text, _)) = guard.as_mut() {
-                text.push_str(delta);
-            }
-        },
-        EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
-            delta: AssistantDelta::Reasoning(delta),
-            ..
-        }) => {
-            if let Some((_, _, reasoning)) = guard.as_mut() {
-                reasoning.push_str(delta);
-            }
-        },
-        EventPayload::Durable(
-            DurableEventPayload::AssistantMessage { .. }
-            | DurableEventPayload::AssistantAttemptSettled { .. }
-            | DurableEventPayload::TurnEnded { .. },
-        ) => {
-            *guard = None;
-        },
-        _ => {},
     }
 }
 
@@ -433,6 +428,54 @@ mod tests {
         bus.publish_event(turn_started(&session_id));
 
         assert!(bus.existing_conversation_fanout(&session_id).is_none());
+    }
+
+    #[test]
+    fn streaming_state_is_retained_only_while_an_assistant_message_is_active() {
+        let bus = ServerEventBus::new();
+        let session_id = SessionId::new("session-1");
+        let start = || LiveEventPayload::AssistantMessageStarted {
+            message_id: "message-1".into(),
+        };
+        let delta = |delta| LiveEventPayload::AssistantMessageDelta {
+            message_id: "message-1".into(),
+            delta,
+        };
+        let tool_delta = || LiveEventPayload::ToolCallArgumentsDelta {
+            message_id: "message-1".into(),
+            call_id: "call-1".into(),
+            delta: "{}".into(),
+        };
+        let publish = |payload| bus.publish_event(live(session_id.clone(), payload));
+
+        publish(tool_delta());
+        publish(delta(AssistantDelta::Text("stray text".into())));
+        assert!(bus.streaming.lock().is_empty());
+
+        publish(start());
+        publish(delta(AssistantDelta::Text("answer".into())));
+        publish(tool_delta());
+        publish(delta(AssistantDelta::Reasoning("thought".into())));
+        let snapshot = bus.streaming_snapshot(&session_id).unwrap();
+        assert_eq!(snapshot.message_id, "message-1");
+        assert_eq!(snapshot.text, "answer");
+        assert_eq!(snapshot.reasoning_content.as_deref(), Some("thought"));
+
+        bus.publish_event(durable(
+            session_id.clone(),
+            DurableEventPayload::AssistantAttemptSettled {
+                message_id: "message-1".into(),
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Cancelled,
+            },
+        ));
+        publish(tool_delta());
+        assert!(bus.streaming_snapshot(&session_id).is_none());
+        assert!(bus.streaming.lock().is_empty());
+
+        publish(start());
+        bus.detach(&session_id);
+        publish(delta(AssistantDelta::Text("late text".into())));
+        assert!(bus.streaming.lock().is_empty());
     }
 
     #[tokio::test]

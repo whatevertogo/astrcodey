@@ -172,8 +172,19 @@ export function reduceConversationDeltas(
       continue
     }
 
-    flushBlockDeltas()
     const delta = coalesced.delta
+    switch (delta.kind) {
+      // These fields are independent of the visible blocks.
+      case 'updateControlState':
+      case 'agentSessionUpdated':
+      case 'agentSessionRemoved':
+      case 'statusItemUpdate':
+      case 'extensionRegistryChanged':
+        break
+      default:
+        flushBlockDeltas()
+    }
+
     switch (delta.kind) {
       case 'toolCallPreviewDiscarded':
         if (

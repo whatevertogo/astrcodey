@@ -13,7 +13,7 @@ use astrcode_core::{
         attachments_from_user_message,
     },
     tool::ToolResult,
-    types::ToolCallId,
+    types::{EventId, ToolCallId},
 };
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ConversationDeltaDto, ToolCallStatusDto,
@@ -82,16 +82,23 @@ pub(in crate::http) fn tool_call_block(
 
 /// 为单个可见 block 的 payload 构建共享投影。
 pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
-    let payload = match &event.payload {
-        EventPayload::Durable(payload) => payload,
+    match &event.payload {
+        EventPayload::Durable(payload) => durable_block_from_payload(payload, &event.id, event.seq),
         EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
-            return Some(ConversationBlockDto::Error {
+            Some(ConversationBlockDto::Error {
                 id: event.id.to_string(),
                 message: message.clone(),
-            });
+            })
         },
-        EventPayload::Live(_) => return None,
-    };
+        EventPayload::Live(_) => None,
+    }
+}
+
+pub(in crate::http) fn durable_block_from_payload(
+    payload: &DurableEventPayload,
+    event_id: &EventId,
+    seq: Option<u64>,
+) -> Option<ConversationBlockDto> {
     match payload {
         DurableEventPayload::UserMessage {
             message_id,
@@ -113,7 +120,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             id: message_id.to_string(),
             text: text.clone(),
             reasoning_content: reasoning_content.clone(),
-            storage_seq: event.seq,
+            storage_seq: seq,
             status: match outcome {
                 AssistantAttemptOutcome::Completed => ConversationBlockStatusDto::Complete,
                 AssistantAttemptOutcome::Failed { .. } => ConversationBlockStatusDto::Error,
@@ -135,7 +142,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
         | DurableEventPayload::UserInputDiscarded {
             reason: message, ..
         } => Some(ConversationBlockDto::Error {
-            id: event.id.to_string(),
+            id: event_id.to_string(),
             message: message.clone(),
         }),
         DurableEventPayload::TranscriptRewritten {
@@ -150,7 +157,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             transcript_path: details.transcript_path.clone(),
         }),
         DurableEventPayload::RecapGenerated { text, source } => Some(ConversationBlockDto::Recap {
-            id: event.id.to_string(),
+            id: event_id.to_string(),
             text: text.clone(),
             source: source.clone(),
         }),

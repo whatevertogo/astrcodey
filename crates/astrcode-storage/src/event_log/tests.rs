@@ -9,7 +9,8 @@ use tempfile::tempdir;
 use tokio::time::{Duration, timeout};
 
 use super::{
-    EventLog, parse_event_line, read_summary_at_path, replay_events_at_path, sync_existing_log,
+    EventLog, find_event_end, open_reverse_scan, parse_event_line, read_summary_at_path,
+    replay_events_at_path, replay_suffix_at_path, sync_existing_log,
 };
 use crate::{
     StorageError,
@@ -74,9 +75,18 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
     }
     log.force_sync().await.unwrap();
 
-    let latest = log.replay_before_limited(None, 2).await.unwrap();
-    let older = log.replay_before_limited(Some(3), 2).await.unwrap();
-    let empty = log.replay_before_limited(Some(1), 0).await.unwrap();
+    let latest = log
+        .replay_before_limited(&session_id, None, 2)
+        .await
+        .unwrap();
+    let older = log
+        .replay_before_limited(&session_id, Some(3), 2)
+        .await
+        .unwrap();
+    let empty = log
+        .replay_before_limited(&session_id, Some(1), 0)
+        .await
+        .unwrap();
 
     assert_eq!(
         latest.iter().map(|event| event.seq).collect::<Vec<_>>(),
@@ -87,6 +97,177 @@ async fn event_log_replays_bounded_pages_before_exclusive_cursor() {
         [1, 2]
     );
     assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn event_log_seeks_deep_pages_at_record_boundaries() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("deep-history.jsonl");
+    let session_id = SessionId::new("deep-history");
+    let (log, started) = EventLog::create(path.clone(), started_event(&session_id))
+        .await
+        .unwrap();
+    let mut records = vec![started];
+    records.extend(
+        log.append_batch(
+            (1..=1600)
+                .map(|seq| {
+                    let text = if seq == 650 {
+                        "🌟".repeat(40_000)
+                    } else {
+                        "variable".repeat(seq % 27)
+                    };
+                    user_event(&session_id, &text)
+                })
+                .collect(),
+        )
+        .await
+        .unwrap(),
+    );
+    log.force_sync().await.unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{")
+        .unwrap();
+
+    let cursor_seq = 650;
+    let expected_end = std::fs::read(&path)
+        .unwrap()
+        .split_inclusive(|&byte| byte == b'\n')
+        .take(cursor_seq + 1)
+        .map(|line| line.len() as u64)
+        .sum();
+    let (mut file, end) = open_reverse_scan(&path).unwrap();
+    assert_eq!(
+        find_event_end(&mut file, end, &session_id, cursor_seq as u64).unwrap(),
+        Some(expected_end)
+    );
+    drop(file);
+    for (cursor, limit, expected) in [
+        (None, 7, &records[1594..]),
+        (Some(u64::MAX), 7, &records[1594..]),
+        (Some(1500), 7, &records[1493..1500]),
+        (Some(651), 7, &records[644..651]),
+        (Some(650), 1, &records[649..650]),
+        (Some(42), 2, &records[40..42]),
+        (Some(2), 7, &records[..2]),
+        (Some(0), 7, &[]),
+        (Some(42), 0, &[]),
+    ] {
+        assert_eq!(
+            log.replay_before_limited(&session_id, cursor, limit)
+                .await
+                .unwrap(),
+            expected,
+            "cursor {cursor:?}, limit {limit}"
+        );
+    }
+
+    let write_records = |records: &[StoredEvent]| {
+        let mut bytes = Vec::new();
+        for record in records {
+            serde_json::to_writer(&mut bytes, &record).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+    };
+    let large = StoredEvent::new(650, user_event(&session_id, &"x".repeat(1024 * 1024)));
+    let original = std::mem::replace(&mut records[650], large);
+    write_records(&records);
+    let (mut file, end) = open_reverse_scan(&path).unwrap();
+    assert_eq!(
+        find_event_end(&mut file, end, &session_id, 900).unwrap(),
+        None
+    );
+    drop(file);
+    assert_eq!(
+        log.replay_before_limited(&session_id, Some(900), 7)
+            .await
+            .unwrap(),
+        records[893..900]
+    );
+
+    // Preserve the normal validation when the fetched range crosses a replaced record.
+    records[650] = original;
+    records[649] = StoredEvent::new(649, user_event(&SessionId::new("other-session"), "wrong"));
+    write_records(&records);
+    assert!(matches!(
+        log.replay_before_limited(&session_id, Some(650), 1).await,
+        Err(StorageError::CorruptLog(_))
+    ));
+}
+
+#[tokio::test]
+async fn event_log_replays_recent_and_older_cursors_in_forward_order() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let session_id = SessionId::new("resume-session");
+    let (log, started) = EventLog::create(path.clone(), started_event(&session_id))
+        .await
+        .unwrap();
+    let events = log
+        .append_batch(
+            [
+                "one".to_owned(),
+                "🌟".repeat(64 * 1024),
+                "three".into(),
+                "four".into(),
+            ]
+            .iter()
+            .map(|text| user_event(&session_id, text))
+            .collect(),
+        )
+        .await
+        .unwrap();
+
+    // Buffered events are readable, while an incomplete trailing record is ignored.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{")
+        .unwrap();
+    assert_eq!(
+        replay_suffix_at_path(&path, &session_id, log.count() - 1, 1, 3).as_deref(),
+        Some(&events[1..])
+    );
+    for (cursor, limit, expected) in [
+        (1, 3, &events[1..]),
+        (0, 2, &events[..2]),
+        (4, 3, &[]),
+        (u64::MAX, 3, &[]),
+        (1, 0, &[]),
+    ] {
+        assert_eq!(
+            log.replay_after_limited(&session_id, cursor, limit)
+                .await
+                .unwrap(),
+            expected,
+            "cursor {cursor}, limit {limit}"
+        );
+    }
+
+    // A tail at the expected sequence must still belong to the open session.
+    let wrong = StoredEvent::new(4, user_event(&SessionId::new("other-session"), "wrong"));
+    let mut bytes = Vec::new();
+    for record in std::iter::once(&started)
+        .chain(&events[..3])
+        .chain([&wrong])
+    {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    std::fs::write(&path, bytes).unwrap();
+    assert!(matches!(
+        log.replay_after_limited(&session_id, 3, 1).await,
+        Err(StorageError::CorruptLog(_))
+    ));
 }
 
 #[tokio::test]

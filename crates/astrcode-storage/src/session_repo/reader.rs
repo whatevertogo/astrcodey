@@ -58,7 +58,9 @@ impl EventReader for FileSystemSessionRepository {
         let meta = self.get_or_open_meta(session_id).await?;
         let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let seq = parse_cursor(cursor)?;
-        meta.log.replay_after_limited(seq, max_events).await
+        meta.log
+            .replay_after_limited(session_id, seq, max_events)
+            .await
     }
 
     async fn replay_from_start_limited(
@@ -80,7 +82,9 @@ impl EventReader for FileSystemSessionRepository {
         let meta = self.get_or_open_meta(session_id).await?;
         let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let before_seq = before.map(parse_cursor).transpose()?;
-        meta.log.replay_before_limited(before_seq, max_events).await
+        meta.log
+            .replay_before_limited(session_id, before_seq, max_events)
+            .await
     }
 
     async fn tool_settlements_after(
