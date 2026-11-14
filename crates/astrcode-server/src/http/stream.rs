@@ -11,7 +11,7 @@ mod replay;
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
+    event::{DurableEventPayload, Event, EventPayload, Phase},
     types::SessionId,
 };
 use astrcode_protocol::{
@@ -24,7 +24,6 @@ use astrcode_protocol::{
 use astrcode_session_projection::AgentSessionStatus;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -32,16 +31,16 @@ use axum::{
 };
 use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
-use replay::{parse_replay_cursor, replay_after_cursor};
+use replay::{ReplayedSettlements, parse_replay_cursor, replay_after_cursor};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::{
-    HttpState, error_response,
+    HttpState,
     projection::{live::event_to_deltas, replay::event_to_replay_deltas},
+    session_read_error_response,
 };
-use crate::bootstrap::ServerRuntime;
 
 type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
 
@@ -51,10 +50,10 @@ type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
 struct LiveStreamState {
     event_rx: broadcast::Receiver<Arc<Event>>,
     notification_rx: broadcast::Receiver<ClientNotification>,
-    runtime: Arc<ServerRuntime>,
     session_id: SessionId,
-    /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
+    /// 已有快照或 replay 覆盖的位置，live 阶段跳过 <= 该值的持久事件。
     replay_max_seq: Option<u64>,
+    replayed_settlements: ReplayedSettlements,
     /// 需要主动关闭流时设为 true，下一次 poll 返回 None。
     closing: bool,
     /// 单个事件产出多条 delta 时，剩余待发送的缓冲。
@@ -62,11 +61,10 @@ struct LiveStreamState {
     /// 会话是否已有消息，用于正确计算 can_request_compact。
     has_messages: bool,
     /// 是否已完成初始 stale event 排水。
-    /// replay_max_seq 存在时为 false，首次 unfold 调用时执行一次性排水。
     drained: bool,
     child_sessions: ChildSessionTracker,
-    /// 缓存的最新 cursor，用于 live-only 事件（避免每次查询存储）。
-    cached_cursor: Option<String>,
+    /// 本连接处理过的父会话持久位置。实时帧和子会话帧只沿用此值。
+    cursor: u64,
 }
 
 enum LiveInput {
@@ -96,13 +94,7 @@ pub(in crate::http) async fn session_stream(
         .await
     {
         Ok(has_messages) => has_messages,
-        Err(_) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session not found",
-            );
-        },
+        Err(error) => return session_read_error_response(error),
     };
     let agent_sessions = match http_state
         .app
@@ -112,14 +104,7 @@ pub(in crate::http) async fn session_stream(
         .await
     {
         Ok(agent_sessions) => agent_sessions,
-        Err(error) => {
-            tracing::warn!(session_id = %session_id, "failed to read agent sessions for SSE stream: {error}");
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session not found",
-            );
-        },
+        Err(error) => return session_read_error_response(error),
     };
     let child_sessions: HashMap<SessionId, SessionId> = agent_sessions
         .iter()
@@ -149,63 +134,60 @@ pub(in crate::http) async fn session_stream(
         .event_bus()
         .subscribe_conversation_events(&session_id);
     let notification_rx = http_state.app.event_bus().subscribe_global_notifications();
-    let replay_result = match query.cursor.as_deref() {
-        Some(cursor) => match parse_replay_cursor(cursor) {
-            Ok(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
-            Err(error) => Err(error),
-        },
-        None => Ok(Vec::new()),
+    let requested_cursor = query.cursor.as_deref().map(parse_replay_cursor).transpose();
+    let replay_result = match requested_cursor {
+        Ok(Some(cursor)) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor)
+            .await
+            .map(|events| (events, Some(cursor))),
+        Ok(None) => Ok((Vec::new(), None)),
+        Err(error) => Err(error),
     };
-    let (missed_events, replay_error) = match replay_result {
-        Ok(events) => (events, false),
+    let (missed_events, requested_seq, replay_error) = match replay_result {
+        Ok((events, cursor)) => (events, cursor, false),
         Err(error) => {
             if error.is_cursor_unavailable() {
                 tracing::info!(%session_id, %error, "SSE cursor requires rehydrate");
             } else {
                 tracing::warn!(%session_id, %error, "failed to replay SSE cursor");
             }
-            (Vec::new(), true)
+            (Vec::new(), None, true)
         },
     };
-    let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
-    let replay_runtime = Arc::clone(http_state.app.runtime());
+    let replay_max_seq = missed_events
+        .iter()
+        .filter_map(|event| event.seq)
+        .max()
+        .or(requested_seq);
+    let replayed_settlements = ReplayedSettlements::new(&missed_events);
     let replay_session_id = session_id.clone();
-    let replay_has_messages = has_messages;
+    let mut replay_cursor = requested_seq.unwrap_or(0);
     let replay_stream = stream::iter(missed_events)
-        .then(move |event| {
-            let runtime = Arc::clone(&replay_runtime);
-            let replay_sid = replay_session_id.clone();
-            async move {
-                let deltas = event_to_replay_deltas(&event, replay_has_messages);
-                let cursor = event_cursor(&runtime, &event).await;
-                deltas
-                    .into_iter()
-                    .map(|delta| conversation_sse_item(&replay_sid, cursor.clone(), delta))
-                    .collect::<Vec<_>>()
-            }
+        .map(move |event| {
+            conversation_event_items(
+                &replay_session_id,
+                &mut replay_cursor,
+                event.seq,
+                event_to_replay_deltas(&event, has_messages),
+            )
         })
         .flat_map(stream::iter);
-    let replay_error_stream = stream::iter(replay_error.then(|| {
-        conversation_sse_item(
-            &session_id,
-            "0".into(),
-            ConversationDeltaDto::RehydrateRequired,
-        )
-    }));
+    let replay_error_stream =
+        stream::iter(replay_error.then(|| {
+            conversation_sse_item(&session_id, 0, ConversationDeltaDto::RehydrateRequired)
+        }));
 
-    let live_runtime = Arc::clone(http_state.app.runtime());
     let live_stream = stream::unfold(
         LiveStreamState {
             event_rx,
             notification_rx,
-            runtime: live_runtime,
             session_id,
             replay_max_seq,
+            replayed_settlements,
             closing: false,
             pending: std::collections::VecDeque::new(),
             has_messages,
             drained: false,
-            cached_cursor: None,
+            cursor: replay_max_seq.unwrap_or(0),
             child_sessions: child_session_tracker,
         },
         |mut state| async move {
@@ -213,14 +195,9 @@ pub(in crate::http) async fn session_stream(
                 return None;
             }
 
-            // 首次进入 live 阶段时，一次性排空 rx 缓冲区中的 stale 事件。
-            // replay 阶段已通过 durable event 重建了完整状态；缓冲区中的 live-only
-            // 事件（AssistantTextDelta / ToolOutputDelta 等，无 seq）属于 replay
-            // 覆盖时段的残留，送达后会导致前端对已 finalize 的 block 重复追加。
-            // 排水仅丢弃 live-only 事件；seq > replay_max_seq 的 durable 事件保留。
             if !state.drained {
                 state.drained = true;
-                drain_stale_live_events(&mut state).await;
+                drain_stale_live_events(&mut state);
             }
             if state.closing {
                 return None;
@@ -234,7 +211,7 @@ pub(in crate::http) async fn session_stream(
                 match recv_live_input(&mut state).await {
                     Some(input) => {
                         let mut items: std::collections::VecDeque<_> =
-                            live_input_to_sse_items(&mut state, input).await.into();
+                            live_input_to_sse_items(&mut state, input).into();
 
                         if items.is_empty() {
                             continue;
@@ -276,34 +253,8 @@ async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
     }
 }
 
-async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
-    if let Some(seq) = event.seq {
-        seq.to_string()
-    } else {
-        state_cursor(runtime, &event.session_id).await
-    }
-}
-
-async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
-    match runtime.session_manager().latest_cursor(session_id).await {
-        Ok(Some(cursor)) => cursor,
-        Ok(None) => "0".to_string(),
-        Err(error) => {
-            tracing::warn!(
-                session_id = %session_id,
-                %error,
-                "failed to read latest cursor from storage, falling back to 0"
-            );
-            "0".to_string()
-        },
-    }
-}
-
-/// 一次性排空 rx 缓冲区，丢弃 replay 时段残留的 live-only 事件。
-///
-/// 仅在有 replay_max_seq 时有效（即客户端携带 cursor 连接、有历史事件重放）。
-/// durable 事件（带 seq）且 seq > replay_max_seq 的保留到 pending。
-async fn drain_stale_live_events(state: &mut LiveStreamState) {
+/// 首次切到实时流时过滤已回放的事件，以及这些事件已结算的临时输出。
+fn drain_stale_live_events(state: &mut LiveStreamState) {
     let Some(replay_max) = state.replay_max_seq else {
         return;
     };
@@ -312,13 +263,8 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
         match state.event_rx.try_recv() {
             Ok(event) => {
                 if event.session_id == state.session_id {
-                    // Durable replay 无法覆盖 non-durable extension state。保留它们，
-                    // 让 ask-user 等扩展在 snapshot/replay 竞态下仍能送达挂起状态。
                     let Some(seq) = event.seq else {
-                        if matches!(
-                            event.payload.as_live(),
-                            Some(LiveEventPayload::CustomEvent(_))
-                        ) {
+                        if !state.replayed_settlements.contains(&event) {
                             buffered.push(LiveInput::Event(event));
                         }
                         continue;
@@ -362,24 +308,24 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
         }
     }
     for input in buffered {
-        let items = live_input_to_sse_items(state, input).await;
+        let items = live_input_to_sse_items(state, input);
         state.pending.extend(items);
     }
 }
 
-async fn live_input_to_sse_items(state: &mut LiveStreamState, input: LiveInput) -> Vec<SseItem> {
+fn live_input_to_sse_items(state: &mut LiveStreamState, input: LiveInput) -> Vec<SseItem> {
     match input {
-        LiveInput::Event(event) => event_to_sse_items(state, event).await,
-        LiveInput::Notification(notification) => {
-            notification_to_sse_items(state, *notification).await
-        },
+        LiveInput::Event(event) => event_to_sse_items(state, event),
+        LiveInput::Notification(notification) => notification_to_sse_items(state, *notification),
     }
 }
 
-async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> Vec<SseItem> {
+fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> Vec<SseItem> {
     match event.as_ref() {
         event if event.session_id == state.session_id => {
-            if already_replayed(state.replay_max_seq, event.seq) {
+            if already_replayed(state.replay_max_seq, event.seq)
+                || state.replayed_settlements.contains(event)
+            {
                 return Vec::new();
             }
             if event_adds_message(event) {
@@ -387,41 +333,29 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
             }
             state.child_sessions.update_from_parent_event(event);
 
-            // 更新缓存的 cursor（如果有 seq）
-            if let Some(seq) = event.seq {
-                state.cached_cursor = Some(seq.to_string());
-            }
-
-            let deltas = event_to_deltas(event, state.has_messages);
-            if deltas.is_empty() {
-                return Vec::new();
-            }
-
-            // 使用缓存的 cursor（live-only 事件）或事件的 seq
-            let cursor = if let Some(seq) = event.seq {
-                seq.to_string()
-            } else {
-                get_or_fetch_cursor(state).await
-            };
-
-            deltas
-                .into_iter()
-                .map(|delta| conversation_sse_item(&state.session_id, cursor.clone(), delta))
-                .collect()
+            conversation_event_items(
+                &state.session_id,
+                &mut state.cursor,
+                event.seq,
+                event_to_deltas(event, state.has_messages),
+            )
         },
         event => {
             let Some(delta) = state.child_sessions.project_event(event) else {
                 return Vec::new();
             };
             // 子事件的 seq 属于子会话，不能用来更新父会话的 cursor
-            let cursor = get_or_fetch_cursor(state).await;
-            vec![conversation_sse_item(&state.session_id, cursor, delta)]
+            vec![conversation_sse_item(
+                &state.session_id,
+                state.cursor,
+                delta,
+            )]
         },
     }
 }
 
-async fn notification_to_sse_items(
-    state: &mut LiveStreamState,
+fn notification_to_sse_items(
+    state: &LiveStreamState,
     notification: ClientNotification,
 ) -> Vec<SseItem> {
     let delta = match notification {
@@ -475,19 +409,11 @@ async fn notification_to_sse_items(
         _ => return Vec::new(),
     };
 
-    let cursor = get_or_fetch_cursor(state).await;
-    vec![conversation_sse_item(&state.session_id, cursor, delta)]
-}
-
-/// 获取 cursor：优先使用缓存，缓存缺失时查询存储。
-async fn get_or_fetch_cursor(state: &mut LiveStreamState) -> String {
-    if let Some(ref cursor) = state.cached_cursor {
-        cursor.clone()
-    } else {
-        let cursor = state_cursor(&state.runtime, &state.session_id).await;
-        state.cached_cursor = Some(cursor.clone());
-        cursor
-    }
+    vec![conversation_sse_item(
+        &state.session_id,
+        state.cursor,
+        delta,
+    )]
 }
 
 /// 事件是否已被 replay 阶段覆盖(durable 事件 seq 不超过 replay 已发送的最大 seq)。
@@ -501,20 +427,47 @@ fn event_adds_message(event: &Event) -> bool {
     matches!(
         event.payload,
         EventPayload::Durable(
-            DurableEventPayload::UserMessage { .. }
-                | DurableEventPayload::AssistantMessageCompleted { .. }
+            DurableEventPayload::UserMessage { .. } | DurableEventPayload::AssistantMessage { .. }
         )
     )
 }
 
+fn conversation_event_items(
+    session_id: &SessionId,
+    cursor: &mut u64,
+    seq: Option<u64>,
+    deltas: Vec<ConversationDeltaDto>,
+) -> Vec<SseItem> {
+    let previous_cursor = *cursor;
+    if let Some(seq) = seq {
+        *cursor = seq;
+    }
+    // A reconnect between deltas must replay the whole durable event.
+    let count = deltas.len();
+    deltas
+        .into_iter()
+        .enumerate()
+        .map(|(index, delta)| {
+            let frame_cursor = if index + 1 == count {
+                *cursor
+            } else {
+                previous_cursor
+            };
+            conversation_sse_item(session_id, frame_cursor, delta)
+        })
+        .collect()
+}
+
 fn conversation_sse_item(
     session_id: &SessionId,
-    cursor: String,
+    cursor: u64,
     delta: ConversationDeltaDto,
 ) -> SseItem {
     Ok(sse_event(&ConversationStreamEnvelopeDto {
         session_id: session_id.to_string(),
-        cursor: ConversationCursorDto { value: cursor },
+        cursor: ConversationCursorDto {
+            value: cursor.to_string(),
+        },
         delta,
     }))
 }

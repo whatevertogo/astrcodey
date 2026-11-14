@@ -32,6 +32,11 @@ export function AssistantMessageContent({
 
   return (
     <div className="relative min-w-0 max-w-full overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
+      {(block.status === 'error' || block.status === 'cancelled') && (
+        <div className="mb-2 text-xs text-text-muted">
+          {block.status === 'cancelled' ? 'Cancelled' : 'Incomplete response'}
+        </div>
+      )}
       {showThinking &&
         assistantParts.thinkingBlocks.map((thinkingBlock, index) => (
           <details

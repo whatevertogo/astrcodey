@@ -23,6 +23,8 @@ function DeferredViewFallback() {
 export default function App() {
   const connectionStatus = useAppStore((s) => s.connectionStatus)
   const initServer = useAppStore((s) => s.initServer)
+  const unsupportedLogCount = useAppStore((s) => s.unsupportedLogCount)
+  const corruptLogCount = useAppStore((s) => s.corruptLogCount)
   const [mainView, setMainView] = useState<MainView>('chat')
 
   const { width, isOpen, toggle, onResizeStart, isResizing } =
@@ -70,6 +72,22 @@ export default function App() {
           />
         )}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {(unsupportedLogCount > 0 || corruptLogCount > 0) && (
+            <div
+              role="status"
+              className="shrink-0 border-b border-warning/20 bg-warning-soft px-3 py-2 text-[13px] text-warning"
+            >
+              {unsupportedLogCount > 0 && (
+                <p>
+                  {unsupportedLogCount}{' '}
+                  个会话因日志格式不兼容未显示，请使用兼容版本打开。
+                </p>
+              )}
+              {corruptLogCount > 0 && (
+                <p>{corruptLogCount} 个会话因日志损坏未显示。</p>
+              )}
+            </div>
+          )}
           <Suspense fallback={<DeferredViewFallback />}>
             {mainView === 'plugins' && (
               <PluginsPage

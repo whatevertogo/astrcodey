@@ -38,7 +38,7 @@ impl AnthropicStreamState {
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) -> bool {
         for call_id in self.started_tool_call_ids.drain() {
-            if !send_event(tx, LlmEvent::ToolCallCompleted { call_id }) {
+            if !send_event(tx, LlmEvent::ToolCallArgumentsCompleted { call_id }) {
                 return false;
             }
         }
@@ -251,7 +251,7 @@ fn handle_anthropic_event(
                 state.started_tool_call_ids.remove(call_id);
                 return send_event(
                     tx,
-                    LlmEvent::ToolCallCompleted {
+                    LlmEvent::ToolCallArgumentsCompleted {
                         call_id: call_id.clone(),
                     },
                 );
@@ -644,10 +644,10 @@ mod tests {
 
         assert!(state.emit_pending_tool_completions(&tx));
         let completed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter(|event| matches!(event, LlmEvent::ToolCallCompleted { .. }))
+            .filter(|event| matches!(event, LlmEvent::ToolCallArgumentsCompleted { .. }))
             .collect();
         assert!(completed.iter().any(
-            |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "call_1")
+            |event| matches!(event, LlmEvent::ToolCallArgumentsCompleted { call_id } if call_id == "call_1")
         ));
     }
 
@@ -674,10 +674,10 @@ mod tests {
             &mut state,
         ));
         let completed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter(|event| matches!(event, LlmEvent::ToolCallCompleted { .. }))
+            .filter(|event| matches!(event, LlmEvent::ToolCallArgumentsCompleted { .. }))
             .collect();
         assert!(completed.iter().any(
-            |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "call_1")
+            |event| matches!(event, LlmEvent::ToolCallArgumentsCompleted { call_id } if call_id == "call_1")
         ));
 
         assert!(state.emit_pending_tool_completions(&tx));

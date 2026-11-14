@@ -99,14 +99,23 @@ impl TurnScheduler {
         &self,
         reserved: ReservedExecution,
         entry: PendingInput,
-    ) -> Result<StartedExecution, TurnScheduleError> {
+    ) -> Result<Option<StartedExecution>, TurnScheduleError> {
         let session_id = reserved.session_id.clone();
         match self.start_reserved_execution(reserved).await {
             Ok(started) => {
                 self.queue_drains.clear_session(&session_id);
-                Ok(started)
+                Ok(Some(started))
             },
             Err(failure) => {
+                if matches!(
+                    &failure.error,
+                    TurnScheduleError::Turn(astrcode_session::TurnError::InputBlocked { .. })
+                ) {
+                    self.queue_drains.clear_session(&session_id);
+                    drop(failure);
+                    self.schedule_queue_retry(session_id);
+                    return Ok(None);
+                }
                 tracing::warn!(
                     session_id = %session_id,
                     accepted_seq = entry.accepted_seq,
@@ -114,7 +123,7 @@ impl TurnScheduler {
                     "failed to auto-submit durable queued message"
                 );
                 let error = failure.error;
-                self.schedule_queue_retry(session_id, &error);
+                self.schedule_queue_retry(session_id);
                 Err(error)
             },
         }
@@ -128,8 +137,11 @@ impl TurnScheduler {
     ) -> Result<(), TurnScheduleError> {
         let admission = self.admit_owned()?;
         let session_id = reserved.session_id.clone();
-        let StartedExecution { turn_id, handle } =
-            self.start_reserved_pending(reserved, entry).await?;
+        let Some(StartedExecution { turn_id, handle }) =
+            self.start_reserved_pending(reserved, entry).await?
+        else {
+            return Ok(());
+        };
         self.watch_owned_turn(
             admission,
             session_id,
@@ -144,12 +156,7 @@ impl TurnScheduler {
         Ok(())
     }
 
-    fn schedule_queue_retry(&self, session_id: SessionId, error: &TurnScheduleError) {
-        tracing::warn!(
-            session_id = %session_id,
-            %error,
-            "failed to start queued input; scheduling retry"
-        );
+    fn schedule_queue_retry(&self, session_id: SessionId) {
         let Some(retry) = self.queue_drains.record_start_failure(&session_id) else {
             return;
         };
@@ -192,7 +199,7 @@ impl TurnScheduler {
                 );
                 if matches!(&error, TurnScheduleError::SessionManager(_)) {
                     drop(operation);
-                    self.schedule_queue_retry(session_id, &error);
+                    self.schedule_queue_retry(session_id);
                 }
                 return;
             },

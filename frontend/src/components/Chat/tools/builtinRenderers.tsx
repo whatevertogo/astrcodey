@@ -1,3 +1,4 @@
+import { toolCallIsTerminal } from '../../../services/types'
 import {
   boolValue,
   changesLabel,
@@ -231,7 +232,7 @@ registerToolRenderer({
   render: ({ block, args, meta }) => {
     const spec = todoWriteRenderSpec(args, meta)
     if (spec) return <RenderSpecViewer spec={spec} />
-    if (block.status === 'streaming') return null
+    if (!toolCallIsTerminal(block.status)) return null
     return undefined
   },
 })

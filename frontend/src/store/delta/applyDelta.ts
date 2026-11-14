@@ -5,6 +5,7 @@ import type {
   ConversationDelta,
   PendingAskUserQuestion,
 } from '../../services/types'
+import { toolCallIsTerminal } from '../../services/types'
 import { decodePendingAskUserQuestion } from '../../services/protocol'
 import type { AppState } from '../types'
 import { applyAgentSessionUpdate, upsertBlock } from './blockHelpers'
@@ -37,7 +38,7 @@ export type ConversationRenderState = Pick<
 
 type ConversationRenderPatch = Partial<ConversationRenderState>
 
-/** ToolCallId 仅在 turn 内唯一，跨会话可能碰撞，pending map 以 sessionId+callId 复合键索引。 */
+/** 审批与提问属于会话，pending map 用 sessionId+运行时 callId 索引。 */
 export function pendingAskUserKey(sessionId: string, callId: string): string {
   return `${sessionId}:${callId}`
 }
@@ -62,7 +63,7 @@ export function mergePendingAskUserSnapshot(
   // 请求期间经 SSE 新到达的 pending 比快照新，不能被旧快照丢弃。
   if (eventsArrivedDuringRequest) {
     for (const [key, question] of Object.entries(currentPending)) {
-      // callId 可跨 turn 复用；对象身份用于区分请求开始时的旧条目与新解码的 SSE 条目。
+      // 对象身份区分请求开始时的条目与请求期间新解码的 SSE 条目。
       if (pendingAtStart[key] !== question && !resolvedCallIds[key]) {
         pending[key] = question
       }
@@ -174,6 +175,36 @@ export function reduceConversationDeltas(
     flushBlockDeltas()
     const delta = coalesced.delta
     switch (delta.kind) {
+      case 'toolCallPreviewDiscarded':
+        if (
+          !updateVisibleBlocks ||
+          transientBlockOwners[delta.callId] === undefined
+        )
+          break
+        blocks = blocks.filter((block) => block.id !== delta.callId)
+        promoteTransientBlock(delta.callId)
+        break
+
+      case 'toolExecutionStarted':
+        if (!updateVisibleBlocks) break
+        blocks = updateToolCall(blocks, delta.callId, (block) =>
+          block.status === 'preparing' || block.status === 'pending'
+            ? { ...block, status: 'running' }
+            : block
+        )
+        break
+
+      case 'toolCallSettled':
+        if (!updateVisibleBlocks) break
+        blocks = updateToolCall(blocks, delta.callId, (block) => ({
+          ...block,
+          status: delta.status,
+          text: delta.text,
+          metadata: delta.metadata,
+          approval: undefined,
+        }))
+        promoteTransientBlock(delta.callId)
+        break
       case 'appendBlock': {
         if (!updateVisibleBlocks) break
         const baseBlocks =
@@ -187,6 +218,12 @@ export function reduceConversationDeltas(
 
       case 'appendTransientBlock': {
         if (!updateVisibleBlocks) break
+        const existing = blocks.find((block) => block.id === delta.block.id)
+        if (
+          existing?.kind === 'toolCall' &&
+          toolCallIsTerminal(existing.status)
+        )
+          break
         blocks = upsertBlock(blocks, delta.block)
         if (transientBlockOwners[delta.block.id] !== delta.turnId) {
           transientBlockOwners = {
@@ -214,18 +251,6 @@ export function reduceConversationDeltas(
         if (!updateVisibleBlocks) break
         blocks = upsertBlock(blocks, delta.block)
         promoteTransientBlock(delta.block.id)
-        break
-
-      case 'resetBlock':
-        if (!updateVisibleBlocks) break
-        blocks = blocks.map((block) => {
-          if (block.id !== delta.blockId || block.kind !== 'assistant') {
-            return block
-          }
-          const reset = { ...block, text: '' }
-          delete reset.reasoningContent
-          return reset
-        })
         break
 
       case 'updateControlState': {
@@ -380,6 +405,7 @@ export function reduceConversationDeltas(
       case 'thinkingDelta':
       case 'patchArguments':
       case 'toolOutput':
+      case 'toolArgumentsDelta':
         // These variants were converted to BlockDelta by coalesceDeltas.
         break
     }

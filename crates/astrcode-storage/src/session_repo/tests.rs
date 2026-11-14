@@ -635,7 +635,7 @@ async fn session_listing_skips_unreadable_event_logs() {
     let corrupt_dir = repo.find_session_dir(&corrupt_id).await.unwrap();
     drop(repo);
 
-    // 模拟旧版本写入的日志：合法 JSON，但缺当前严格解码要求的字段。
+    // 缺少事件信封字段的记录应被归类为损坏。
     std::fs::write(
         corrupt_dir.join(format!("session-{corrupt_id}.jsonl")),
         "{\"seq\":0,\"id\":\"e01e3057-faa3-4cc0-9a05-fddbd136b8e9\"}\n",
@@ -643,9 +643,12 @@ async fn session_listing_skips_unreadable_event_logs() {
     .unwrap();
 
     let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
-    let catalog = reopened.list_session_summaries().await.unwrap();
+    let catalog = reopened.list_session_catalog().await.unwrap();
+    assert_eq!(catalog.corrupt_log_count, 1);
+    assert_eq!(catalog.unsupported_log_count, 0);
     assert_eq!(
         catalog
+            .summaries
             .iter()
             .map(|summary| &summary.session_id)
             .collect::<Vec<_>>(),
@@ -659,5 +662,8 @@ async fn session_listing_skips_unreadable_event_logs() {
         vec![&good_id]
     );
     // 直接打开该会话仍按严格解码失败，不被列表的跳过掩盖。
-    assert!(reopened.session_read_model(&corrupt_id).await.is_err());
+    assert!(matches!(
+        reopened.session_read_model(&corrupt_id).await,
+        Err(StorageError::CorruptLog(_))
+    ));
 }

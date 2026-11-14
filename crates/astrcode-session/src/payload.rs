@@ -4,28 +4,23 @@ use astrcode_context::CompactResult;
 use astrcode_core::{
     compaction::CompactStrategy,
     event::{
-        CompactionDetails, DurableEventPayload, LiveEventPayload, SystemPromptSource,
-        TranscriptRewriteReason,
+        AgentSessionOutcome, CompactionDetails, DurableEventPayload, LiveEventPayload,
+        PersistedSystemPrompt, SystemPromptSource, TranscriptRewriteReason, TurnEndReason,
     },
     llm::TranscriptMessage,
     types::SessionId,
 };
 
-pub const TURN_FINISH_ABORTED: &str = "aborted";
-pub const TURN_FINISH_INTERRUPTED: &str = "interrupted";
-pub const TURN_FINISH_ERROR: &str = "error";
 /// JSON-RPC 内部错误码，用于 ErrorOccurred 载荷。
 pub const JSON_RPC_INTERNAL_ERROR: i32 = -32603;
 
-pub fn turn_completed_payload(reason: impl Into<String>) -> DurableEventPayload {
-    DurableEventPayload::TurnCompleted {
-        finish_reason: reason.into(),
-    }
+pub fn turn_ended_payload(reason: TurnEndReason) -> DurableEventPayload {
+    DurableEventPayload::TurnEnded { reason }
 }
 
-pub fn agent_run_completed_payload(reason: impl Into<String>) -> LiveEventPayload {
-    LiveEventPayload::AgentRunCompleted {
-        reason: reason.into(),
+pub fn agent_run_completed_payload(reason: &TurnEndReason) -> LiveEventPayload {
+    LiveEventPayload::AgentRunEnded {
+        reason: reason.clone(),
     }
 }
 
@@ -36,12 +31,12 @@ pub fn system_prompt_configured_payload(
     extra_system_prompt: Option<String>,
     source: SystemPromptSource,
 ) -> DurableEventPayload {
-    DurableEventPayload::SystemPromptConfigured {
+    DurableEventPayload::SystemPromptConfigured(PersistedSystemPrompt {
         text,
         fingerprint,
         extra_system_prompt,
         source,
-    }
+    })
 }
 
 /// 构造 transcript 前缀重写事件；`source_seq` 之后的 tail 由 projection 保留。
@@ -78,44 +73,30 @@ pub(crate) fn transcript_rewritten_payload(
     }
 }
 
-/// 构造写入父 session 的 `AgentSessionCompleted` 载荷。
+/// 构造写入父 session 的 `AgentSessionSettled` 成功载荷。
 ///
 /// `child_session_id` 与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link；
-/// `final_session_id` 是应打开/订阅的 leaf（双 id 恒等关系见 `agent_session_final_ids`）。
 ///
 /// [`AgentSessionSpawned`]: astrcode_core::event::DurableEventPayload::AgentSessionSpawned
 pub fn agent_session_completed_payload(
     child_session_id: SessionId,
     summary: String,
 ) -> DurableEventPayload {
-    let (child_session_id, final_session_id) = agent_session_final_ids(child_session_id);
-    DurableEventPayload::AgentSessionCompleted {
-        final_session_id,
+    DurableEventPayload::AgentSessionSettled {
         child_session_id,
-        summary,
+        outcome: AgentSessionOutcome::Completed { summary },
     }
 }
 
-/// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 语义见
-/// `agent_session_final_ids`）。
+/// 构造写入父 session 的 `AgentSessionSettled` 失败载荷。
 pub fn agent_session_failed_payload(
     child_session_id: SessionId,
     error: String,
 ) -> DurableEventPayload {
-    let (child_session_id, final_session_id) = agent_session_final_ids(child_session_id);
-    DurableEventPayload::AgentSessionFailed {
-        final_session_id,
+    DurableEventPayload::AgentSessionSettled {
         child_session_id,
-        error,
+        outcome: AgentSessionOutcome::Failed { error },
     }
-}
-
-/// 完成/失败载荷共用的双 session id 构造：当前 `final_session_id` 与
-/// `child_session_id` 恒等——compact 只重写同一 session 的 transcript，不改变
-/// session id。若未来落地跨 session continuation 使二者不同，只需改这里。
-fn agent_session_final_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
-    let final_session_id = child_session_id.clone();
-    (child_session_id, final_session_id)
 }
 
 #[cfg(test)]

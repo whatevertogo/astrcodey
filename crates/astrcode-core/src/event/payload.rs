@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ContextTokenAnchor, PersistedSystemPrompt, SystemPromptSource, envelope::ToolOutputStream,
+    AgentSessionOutcome, AssistantAttemptOutcome, CompactionOutcome, ContextTokenAnchor,
+    PersistedSystemPrompt, StepEndReason, ToolCallOutcome, TurnEndReason,
+    envelope::ToolOutputStream,
 };
 use crate::{
     compaction::CompactStrategy,
@@ -94,13 +96,7 @@ pub enum DurableEventPayload {
     SessionToolsConfigured {
         selection: SessionToolSelection,
     },
-    SystemPromptConfigured {
-        text: String,
-        fingerprint: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        extra_system_prompt: Option<String>,
-        source: SystemPromptSource,
-    },
+    SystemPromptConfigured(PersistedSystemPrompt),
     AgentSessionSpawned {
         child_session_id: SessionId,
         agent_name: String,
@@ -110,15 +106,9 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<ToolCallId>,
     },
-    AgentSessionCompleted {
+    AgentSessionSettled {
         child_session_id: SessionId,
-        final_session_id: SessionId,
-        summary: String,
-    },
-    AgentSessionFailed {
-        child_session_id: SessionId,
-        final_session_id: SessionId,
-        error: String,
+        outcome: AgentSessionOutcome,
     },
     AgentSessionRecycled {
         child_session_id: SessionId,
@@ -128,18 +118,21 @@ pub enum DurableEventPayload {
         step_index: u32,
         attempt: u32,
     },
-    StepCompleted {
+    StepEnded {
         step_index: u32,
         attempt: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        finish_reason: Option<String>,
+        reason: StepEndReason,
     },
-    TurnCompleted {
-        finish_reason: String,
+    TurnEnded {
+        reason: TurnEndReason,
     },
     TurnAbortedContext,
     UserInputAccepted {
         input: UserInput,
+    },
+    UserInputDiscarded {
+        accepted_seq: u64,
+        reason: String,
     },
     UserMessage {
         message_id: MessageId,
@@ -153,11 +146,16 @@ pub enum DurableEventPayload {
         text: String,
         source: String,
     },
-    AssistantMessageCompleted {
+    AssistantMessage {
         message_id: MessageId,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        outcome: AssistantAttemptOutcome,
+    },
+    AssistantAttemptSettled {
+        message_id: MessageId,
+        outcome: AssistantAttemptOutcome,
     },
     TokenUsageRecorded {
         usage: LlmTokenUsage,
@@ -165,10 +163,11 @@ pub enum DurableEventPayload {
     },
     ToolCallRequested {
         call_id: ToolCallId,
+        /// 仅供出站模型请求配对；运行时与 UI 使用 `call_id`。
+        provider_call_id: String,
         tool_name: String,
-        arguments: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        raw_arguments: Option<String>,
+        /// 模型原始 JSON 文本；解析修复和执行 hook 不覆盖这个事实。
+        arguments: String,
     },
     ToolApprovalRequested {
         call_id: ToolCallId,
@@ -177,6 +176,7 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         rule_key: Option<String>,
         source: ApprovalSource,
+        /// 审批针对执行前回调与归一化后的参数，不替换模型原文。
         arguments: serde_json::Value,
     },
     ToolApprovalResolved {
@@ -185,34 +185,10 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    ToolCallCompleted {
+    ToolCallSettled {
         call_id: ToolCallId,
-        tool_name: String,
+        outcome: ToolCallOutcome,
         result: ToolResult,
-        arguments: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arguments_json: Option<serde_json::Value>,
-    },
-    ToolCallFailed {
-        call_id: ToolCallId,
-        tool_name: String,
-        error: String,
-        metadata: std::collections::BTreeMap<String, serde_json::Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        arguments: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arguments_json: Option<serde_json::Value>,
-    },
-    ToolCallCancelled {
-        call_id: ToolCallId,
-        tool_name: String,
-        reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        arguments: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arguments_json: Option<serde_json::Value>,
     },
     /// 当前 projection 仍位于 `source_seq` 时，原子替换 provider transcript。
     TranscriptRewritten {
@@ -229,7 +205,6 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         first_user_message: Option<String>,
         messages: Vec<TranscriptMessage>,
-        // StoredEvent 将锚点放在记录头，旧版严格 payload 解码器仍可读取 fork。
         #[serde(skip)]
         input_token_anchor: Option<ContextTokenAnchor>,
     },
@@ -241,13 +216,21 @@ pub enum DurableEventPayload {
     CustomEvent(CustomEventData),
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "delta", rename_all = "snake_case")]
+pub enum AssistantDelta {
+    Text(String),
+    Reasoning(String),
+}
+
 /// 只在进程内事件流和客户端通知中存在的瞬态事实。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveEventPayload {
     AgentRunStarted,
-    AgentRunCompleted {
-        reason: String,
+    AgentRunEnded {
+        reason: TurnEndReason,
     },
     LlmRetrying {
         /// HTTP 状态码；连接或响应流中断时为空。
@@ -260,25 +243,26 @@ pub enum LiveEventPayload {
     AssistantMessageStarted {
         message_id: MessageId,
     },
-    /// 丢弃同一消息在失败流中产生的临时文本与思考内容。
-    AssistantMessageReset {
+    AssistantMessageDelta {
         message_id: MessageId,
+        delta: AssistantDelta,
     },
-    AssistantTextDelta {
+    ToolCallPreviewStarted {
         message_id: MessageId,
-        delta: String,
+        call_id: ToolCallId,
+        tool_name: String,
     },
-    ThinkingDelta {
-        message_id: MessageId,
-        delta: String,
-    },
-    ToolCallStarted {
+    ToolExecutionStarted {
         call_id: ToolCallId,
         tool_name: String,
     },
     ToolCallArgumentsDelta {
+        message_id: MessageId,
         call_id: ToolCallId,
         delta: String,
+    },
+    ToolCallPreviewDiscarded {
+        call_id: ToolCallId,
     },
     ToolOutputDelta {
         call_id: ToolCallId,
@@ -286,14 +270,8 @@ pub enum LiveEventPayload {
         delta: String,
     },
     CompactionStarted,
-    CompactionCompleted {
-        messages_removed: usize,
-    },
-    CompactionSkipped {
-        reason: String,
-    },
-    CompactionFailed {
-        reason: String,
+    CompactionEnded {
+        outcome: CompactionOutcome,
     },
     ErrorOccurred {
         code: i32,
@@ -354,19 +332,17 @@ mod tests {
         assert!(serde_json::from_value::<DurableEventPayload>(configured).is_err());
 
         let mut failed = serde_json::json!({
-            "type": "tool_call_failed",
+            "type": "tool_call_settled",
+            "outcome": "failed",
             "call_id": "c1",
-            "tool_name": "t",
-            "error": "boom",
-            "metadata": {},
-            "arguments": "{}"
+            "result": { "content": "boom", "is_error": true, "error": "boom", "metadata": {} }
         });
         let decoded = serde_json::from_value::<DurableEventPayload>(failed.clone()).unwrap();
         assert_eq!(
-            serde_json::to_value(decoded).unwrap()["metadata"],
+            serde_json::to_value(decoded).unwrap()["result"]["metadata"],
             serde_json::json!({})
         );
-        failed.as_object_mut().unwrap().remove("metadata");
+        failed["result"].as_object_mut().unwrap().remove("metadata");
         assert!(serde_json::from_value::<DurableEventPayload>(failed).is_err());
     }
 }

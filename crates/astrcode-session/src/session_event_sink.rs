@@ -907,8 +907,10 @@ mod tests {
             Arc::clone(&journal_port),
             DurableEvent::session(
                 session_id.clone(),
-                DurableEventPayload::TurnCompleted {
-                    finish_reason: "stop".into(),
+                DurableEventPayload::TurnEnded {
+                    reason: astrcode_core::event::TurnEndReason::Completed {
+                        finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                    },
                 },
             ),
         ));
@@ -993,8 +995,10 @@ mod tests {
         let mut durable_replies = Vec::new();
         for payload in [
             DurableEventPayload::TurnStarted,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "first".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
         ] {
             let (reply, received) = oneshot::channel();
@@ -1093,8 +1097,10 @@ mod tests {
             Arc::clone(&journal_port),
             DurableEvent::session(
                 session_id.clone(),
-                DurableEventPayload::TurnCompleted {
-                    finish_reason: "discarded".into(),
+                DurableEventPayload::TurnEnded {
+                    reason: astrcode_core::event::TurnEndReason::Completed {
+                        finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                    },
                 },
             ),
         )

@@ -1,14 +1,14 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Phase},
+    event::{DurableEventPayload, Phase, StepEndReason, TurnEndReason},
     types::{SessionId, TurnId},
     user_input::UserInput,
 };
 use astrcode_session::{
     InterruptedToolOutcome, Session, TurnFinalization, emit_interrupted_tool_results,
     emit_turn_aborted_context, finalize_aborted_turn, finalize_turn,
-    payload::{TURN_FINISH_INTERRUPTED, agent_run_completed_payload, turn_completed_payload},
+    payload::{agent_run_completed_payload, turn_ended_payload},
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel};
 
@@ -652,7 +652,7 @@ impl TurnScheduler {
             .read_model()
             .await
             .map_err(TurnScheduleError::Session)?;
-        if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
+        if state.execution.phase == Phase::Idle {
             return Ok(None);
         }
         let (Some(turn_id), Some(step)) = (
@@ -662,14 +662,29 @@ impl TurnScheduler {
             return Ok(None);
         };
 
-        if let Some(finish_reason) = &step.finish_reason {
+        let end_reason = match &step.end_reason {
+            Some(StepEndReason::Completed { finish_reason }) => Some(TurnEndReason::Completed {
+                finish_reason: *finish_reason,
+            }),
+            Some(StepEndReason::Failed { error }) => Some(TurnEndReason::Failed {
+                error: error.clone(),
+            }),
+            Some(StepEndReason::Cancelled) => Some(TurnEndReason::Cancelled {
+                reason: "turn aborted".into(),
+            }),
+            Some(StepEndReason::Continue) | None => None,
+        };
+        if let Some(reason) = end_reason {
+            let pending_error = match &reason {
+                TurnEndReason::Failed { error } => Some(error.clone()),
+                _ => None,
+            };
             finalize_turn(
                 &session,
                 &turn_id,
                 &TurnFinalization {
-                    finish_reason: finish_reason.clone(),
-                    pending_error: None,
-                    aborted: false,
+                    reason,
+                    pending_error,
                     terminal_persisted: false,
                 },
             )
@@ -681,6 +696,9 @@ impl TurnScheduler {
             return Ok(None);
         }
 
+        if state.execution.phase == Phase::Error {
+            return Ok(None);
+        }
         emit_interrupted_tool_results(
             &session,
             &state,
@@ -701,8 +719,8 @@ impl TurnScheduler {
         tracing::info!(
             %session_id,
             %turn_id,
-            step_index = if step.completed { step.step_index.saturating_add(1) } else { step.step_index },
-            next_attempt = if step.completed { 1 } else { step.attempt.saturating_add(1) },
+            step_index = if step.end_reason.is_some() { step.step_index.saturating_add(1) } else { step.step_index },
+            next_attempt = if step.end_reason.is_some() { 1 } else { step.attempt.saturating_add(1) },
             "resuming stale turn from durable step"
         );
         let handle = session.resume(turn_id.clone()).await?;
@@ -802,10 +820,20 @@ async fn repair_stale_phase_for_state(
         .await
         .map_err(TurnScheduleError::EventEmit)?;
     session
-        .emit_durable(None, turn_completed_payload(TURN_FINISH_INTERRUPTED))
+        .emit_durable(
+            None,
+            turn_ended_payload(TurnEndReason::Interrupted {
+                reason: "session recovered after process interruption".into(),
+            }),
+        )
         .await
         .map_err(TurnScheduleError::EventEmit)?;
-    session.emit_live(None, agent_run_completed_payload(TURN_FINISH_INTERRUPTED));
+    session.emit_live(
+        None,
+        agent_run_completed_payload(&TurnEndReason::Interrupted {
+            reason: "session recovered after process interruption".into(),
+        }),
+    );
     Ok(())
 }
 
@@ -856,9 +884,10 @@ async fn repair_stale_runs_for_state(
 
 fn aborted_finalization() -> TurnFinalization {
     TurnFinalization {
-        finish_reason: astrcode_session::payload::TURN_FINISH_ABORTED.into(),
+        reason: TurnEndReason::Cancelled {
+            reason: "turn aborted".into(),
+        },
         pending_error: None,
-        aborted: true,
         terminal_persisted: false,
     }
 }

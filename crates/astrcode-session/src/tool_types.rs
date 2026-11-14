@@ -13,8 +13,10 @@ use super::turn_publish::TurnEvents;
 use crate::turn_stages::TurnState;
 
 /// Provider stream 中解析出的工具调用草稿，参数可能仍是逐段拼接的原始 JSON 字符串。
+#[derive(Debug)]
 pub(crate) struct StreamedToolCall {
     pub(crate) call_id: String,
+    pub(crate) provider_call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: String,
 }
@@ -23,9 +25,10 @@ pub(crate) struct StreamedToolCall {
 pub(crate) struct PreparedToolInvocation {
     pub(crate) index: usize,
     pub(crate) call_id: String,
+    pub(crate) provider_call_id: String,
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
-    pub(crate) raw_arguments: Option<String>,
+    pub(crate) raw_arguments: String,
     pub(crate) plan: ToolPlan,
     pub(crate) mode: ExecutionMode,
     pub(crate) discovery_gate: Option<String>,
@@ -164,33 +167,7 @@ pub(crate) struct ExecutableToolInvocation {
     pub(crate) plan: ToolPlan,
 }
 
-/// 工具完成事件所需的参数形状。
-///
-/// 有 provider 原始参数时原样回放（保证 durable 事件与 provider 输出精确一致）；
-/// 否则回退到解析后的 JSON。
-pub(crate) struct ToolCallCompletionArguments {
-    pub(crate) arguments: String,
-    pub(crate) arguments_json: Option<serde_json::Value>,
-}
-
-pub(crate) fn tool_call_completion_arguments(
-    tool_input: serde_json::Value,
-    raw_arguments: Option<String>,
-) -> ToolCallCompletionArguments {
-    match raw_arguments {
-        Some(raw) => ToolCallCompletionArguments {
-            arguments: raw,
-            arguments_json: None,
-        },
-        None => ToolCallCompletionArguments {
-            arguments: tool_input.to_string(),
-            arguments_json: Some(tool_input),
-        },
-    }
-}
-
 impl PreparedToolInvocation {
-    /// 将预处理后的工具调用转换为可执行任务输入。
     pub(crate) fn to_executable(&self) -> ExecutableToolInvocation {
         ExecutableToolInvocation {
             index: self.index,
@@ -198,35 +175,6 @@ impl PreparedToolInvocation {
             name: self.name.clone(),
             tool_input: self.tool_input.clone(),
             plan: self.plan.clone(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn completion_arguments_distinguish_raw_from_valid_json_strings() {
-        let cases = [
-            (
-                serde_json::Value::String("hello".into()),
-                None,
-                r#""hello""#,
-                true,
-            ),
-            (
-                serde_json::Value::String(r#"{"query":"unfinished"#.into()),
-                Some(r#"{"query":"unfinished"#.into()),
-                r#"{"query":"unfinished"#,
-                false,
-            ),
-        ];
-
-        for (input, raw, expected_text, has_json) in cases {
-            let completion = tool_call_completion_arguments(input, raw);
-            assert_eq!(completion.arguments, expected_text);
-            assert_eq!(completion.arguments_json.is_some(), has_json);
         }
     }
 }

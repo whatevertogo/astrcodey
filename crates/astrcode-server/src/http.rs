@@ -6,13 +6,14 @@
 use std::sync::Arc;
 
 use astrcode_protocol::http::ConversationErrorEnvelopeDto;
+use astrcode_storage::StorageError;
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 
-use crate::{bootstrap::ServerApp, session_command_contract::HandlerError};
+use crate::{SessionManagerError, bootstrap::ServerApp, session_command_contract::HandlerError};
 
 mod auth;
 mod conversation_timeline;
@@ -60,6 +61,31 @@ pub(crate) fn conflict_response(code: &'static str, message: impl ToString) -> R
 
 pub(crate) fn internal_error_response(code: &'static str, message: impl ToString) -> Response {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, code, message)
+}
+
+fn session_read_error_response(error: SessionManagerError) -> Response {
+    match error {
+        SessionManagerError::Storage(StorageError::NotFound(_) | StorageError::InvalidId(_)) => {
+            not_found_response("session_not_found", "Session not found")
+        },
+        SessionManagerError::Storage(StorageError::UnsupportedEventFormat { .. }) => {
+            conflict_response(
+                "unsupported_session_log_format",
+                "This session uses an unsupported event log format. Open it with a compatible \
+                 version.",
+            )
+        },
+        SessionManagerError::Storage(
+            StorageError::CorruptLog(_) | StorageError::Serialization(_),
+        ) => {
+            tracing::warn!(%error, "failed to decode session event log");
+            internal_error_response("session_log_corrupt", "The session event log is corrupt")
+        },
+        error => {
+            tracing::warn!(%error, "failed to read session");
+            internal_error_response("session_read_failed", "Failed to read session")
+        },
+    }
 }
 
 pub(crate) fn handler_error_response(error: HandlerError, default_code: &'static str) -> Response {

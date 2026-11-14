@@ -3,7 +3,7 @@
 //! EventLog is the source of truth. This module validates event ordering and fans each validated
 //! event out to the independent read-model components.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     event::{CustomEventAudience, DurableEvent, DurableEventPayload, StoredEvent},
@@ -11,8 +11,9 @@ use astrcode_core::{
 };
 
 use crate::{
-    ForkSourceRef, ProjectionError, SessionExecutionState, SessionReadModel, SessionSummary,
-    agents, execution, model_context, model_context::ModelContextValidationState, presentation,
+    ForkSourceRef, PendingInput, ProjectionError, SessionExecutionState, SessionReadModel,
+    SessionSummary, agents, execution, model_context, model_context::ModelContextValidationState,
+    presentation,
 };
 
 #[derive(Clone)]
@@ -73,6 +74,18 @@ impl PreparedProjectionBatch {
             .then(|| ModelContextValidationState::new(&model.system_prompt, &model.model_context));
 
         let mut current_seq = model.stats.last_seq;
+        let mut pending_calls = None;
+        let mut pending_inputs = stored_events
+            .iter()
+            .any(|event| execution::settled_input_seq(&event.payload).is_some())
+            .then(|| {
+                model
+                    .execution
+                    .pending_inputs
+                    .iter()
+                    .map(|input| input.accepted_seq)
+                    .collect::<HashSet<_>>()
+            });
         for event in &stored_events {
             validate_next_event_details(
                 event.seq,
@@ -80,6 +93,48 @@ impl PreparedProjectionBatch {
                 &model.identity.session_id,
                 current_seq,
             )?;
+            if let Some(pending) = pending_inputs.as_mut() {
+                if matches!(
+                    &event.payload,
+                    DurableEventPayload::UserInputAccepted { .. }
+                ) {
+                    pending.insert(event.seq);
+                }
+                if let Some(accepted_seq) = execution::settled_input_seq(&event.payload)
+                    && !pending.remove(&accepted_seq)
+                {
+                    return Err(ProjectionError::InputNotPending {
+                        seq: event.seq,
+                        accepted_seq,
+                    });
+                }
+            }
+            if let DurableEventPayload::ToolCallRequested { call_id, .. }
+            | DurableEventPayload::ToolCallSettled { call_id, .. } = &event.payload
+            {
+                let pending = pending_calls.get_or_insert_with(|| {
+                    let mut pending = model.execution.pending_tool_calls.clone();
+                    pending.extend(
+                        model
+                            .model_context
+                            .tail_unanswered_tool_calls()
+                            .into_iter()
+                            .map(|call| call.call_id.into()),
+                    );
+                    pending
+                });
+                match &event.payload {
+                    DurableEventPayload::ToolCallRequested { .. }
+                        if !pending.insert(call_id.clone()) =>
+                    {
+                        return Err(ProjectionError::ToolCallAlreadyPending(event.seq));
+                    },
+                    DurableEventPayload::ToolCallSettled { .. } if !pending.remove(call_id) => {
+                        return Err(ProjectionError::UnmatchedToolCallSettlement(event.seq));
+                    },
+                    _ => {},
+                }
+            }
             if let Some(model_context) = model_context.as_mut() {
                 model_context.validate_and_apply(event)?;
             }
@@ -183,6 +238,7 @@ impl SessionSummaryProjection {
         };
 
         validate_next_event_details(event.seq, &event.event, &self.session_id, self.last_seq)?;
+        validate_pending_input(event.seq, &event.payload, &self.execution.pending_inputs)?;
         execution::apply_event(event, &mut self.execution);
         match &event.payload {
             DurableEventPayload::ModelIdChanged { model_id } => {
@@ -267,7 +323,38 @@ fn validate_next_event(
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
     validate_next_event_details(seq, event, &model.identity.session_id, model.stats.last_seq)?;
+    validate_pending_input(seq, &event.payload, &model.execution.pending_inputs)?;
+    if let DurableEventPayload::ToolCallSettled { call_id, .. } = &event.payload
+        && !model.execution.pending_tool_calls.contains(call_id)
+        && !model
+            .model_context
+            .tail_unanswered_tool_calls()
+            .iter()
+            .any(|call| call.call_id == call_id.as_str())
+    {
+        return Err(ProjectionError::UnmatchedToolCallSettlement(seq));
+    }
+    if let DurableEventPayload::ToolCallRequested { call_id, .. } = &event.payload
+        && model.execution.pending_tool_calls.contains(call_id)
+    {
+        return Err(ProjectionError::ToolCallAlreadyPending(seq));
+    }
     model_context::validate_rewrite_fingerprint(event, &model.system_prompt, &model.model_context)
+}
+
+fn validate_pending_input(
+    seq: u64,
+    payload: &DurableEventPayload,
+    pending: &[PendingInput],
+) -> Result<(), ProjectionError> {
+    if let Some(accepted_seq) = execution::settled_input_seq(payload)
+        && !pending
+            .iter()
+            .any(|input| input.accepted_seq == accepted_seq)
+    {
+        return Err(ProjectionError::InputNotPending { seq, accepted_seq });
+    }
+    Ok(())
 }
 
 fn validate_next_event_details(
@@ -291,6 +378,14 @@ fn validate_next_event_details(
             if event.audience != CustomEventAudience::Session
     ) {
         return Err(ProjectionError::InvalidDurableCustomEventAudience(seq));
+    }
+    if let DurableEventPayload::ToolCallSettled {
+        outcome, result, ..
+    } = &event.payload
+        && *outcome != astrcode_core::event::ToolCallOutcome::Completed
+        && !result.is_error
+    {
+        return Err(ProjectionError::InvalidToolCallSettlement(seq));
     }
     if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload
         && *source_seq > current_seq

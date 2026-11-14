@@ -141,12 +141,16 @@ impl Extension for FailSecondEnvelope {
 impl UserMessageEnvelopeHandler for FailSecondEnvelopeHandler {
     async fn handle(
         &self,
-        _ctx: UserMessageEnvelopeContext,
+        ctx: UserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
-        if self.calls.fetch_add(1, Ordering::AcqRel) == 1 {
+        let call = self.calls.fetch_add(1, Ordering::AcqRel);
+        if ctx.text() == "rejected" {
             return Ok(UserMessageEnvelopeResult::Block {
-                reason: "transient test failure".into(),
+                reason: "input rejected by test hook".into(),
             });
+        }
+        if call == 2 {
+            return Err(ExtensionError::Timeout(1));
         }
         Ok(UserMessageEnvelopeResult::Allow)
     }
@@ -515,9 +519,11 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
     assert!(events.iter().any(|event| {
         event.turn_id.as_ref() == Some(&first_turn_id)
             && matches!(
-                &event.payload,
-                DurableEventPayload::TurnCompleted { finish_reason } if finish_reason == "stop"
-            )
+                            &event.payload,
+                            DurableEventPayload::TurnEnded {
+            reason: astrcode_core::event::TurnEndReason::Completed { finish_reason },
+            } if finish_reason.as_str() == "stop"
+                        )
     }));
 
     let final_sid = seed_session(&store).await;
@@ -534,15 +540,18 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
             step_index: 0,
             attempt: 1,
         },
-        DurableEventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessage {
             message_id: new_message_id(),
             text: "done".into(),
             reasoning_content: None,
+            outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
         },
-        DurableEventPayload::StepCompleted {
+        DurableEventPayload::StepEnded {
             step_index: 0,
             attempt: 1,
-            finish_reason: Some("stop".into()),
+            reason: astrcode_core::event::StepEndReason::Completed {
+                finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+            },
         },
     ] {
         store
@@ -566,9 +575,11 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
     );
     assert!(final_events.iter().any(|event| {
         matches!(
-            &event.payload,
-            DurableEventPayload::TurnCompleted { finish_reason } if finish_reason == "stop"
-        )
+                    &event.payload,
+                    DurableEventPayload::TurnEnded {
+        reason: astrcode_core::event::TurnEndReason::Completed { finish_reason },
+        } if finish_reason.as_str() == "stop"
+                )
     }));
 }
 
@@ -622,7 +633,7 @@ async fn stale_repair_does_not_resume_a_step_after_a_durable_error() {
 }
 
 #[tokio::test]
-async fn queued_input_retries_after_a_transient_start_failure() {
+async fn queued_input_discards_a_rejection_and_retries_a_transient_failure() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let release = Arc::new(Semaphore::new(0));
     let envelope_calls = Arc::new(AtomicUsize::new(0));
@@ -649,14 +660,16 @@ async fn queued_input_retries_after_a_transient_start_failure() {
         .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
         .await
         .unwrap();
-    scheduler
-        .deliver_input(
-            sid.clone(),
-            "queued".into(),
-            InputDelivery::QueueIfRunningElseStart,
-        )
-        .await
-        .unwrap();
+    for text in ["rejected", "queued"] {
+        scheduler
+            .deliver_input(
+                sid.clone(),
+                text.into(),
+                InputDelivery::QueueIfRunningElseStart,
+            )
+            .await
+            .unwrap();
+    }
     release.add_permits(1);
 
     for _ in 0..100 {
@@ -682,7 +695,22 @@ async fn queued_input_retries_after_a_transient_start_failure() {
             .collect::<Vec<_>>(),
         ["first", "queued"]
     );
-    assert_eq!(envelope_calls.load(Ordering::Acquire), 3);
+    assert_eq!(envelope_calls.load(Ordering::Acquire), 4);
+    let events = store.replay_events(&sid).await.unwrap();
+    let accepted = events.iter().find(|event| {
+        matches!(&event.payload, DurableEventPayload::UserInputAccepted { input } if input.text == "rejected")
+    }).unwrap();
+    let discarded = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::UserInputDiscarded {
+                accepted_seq,
+                reason,
+            } => Some((*accepted_seq, reason.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(discarded, [(accepted.seq, "input rejected by test hook")]);
 }
 
 #[tokio::test]
@@ -817,7 +845,14 @@ fn turn_completed_reasons(events: &[StoredEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match &e.payload {
-            DurableEventPayload::TurnCompleted { finish_reason } => Some(finish_reason.clone()),
+            DurableEventPayload::TurnEnded { reason } => Some(match reason {
+                astrcode_core::event::TurnEndReason::Completed { finish_reason } => {
+                    finish_reason.to_string()
+                },
+                astrcode_core::event::TurnEndReason::Failed { .. } => "error".into(),
+                astrcode_core::event::TurnEndReason::Cancelled { .. } => "aborted".into(),
+                astrcode_core::event::TurnEndReason::Interrupted { .. } => "interrupted".into(),
+            }),
             _ => None,
         })
         .collect()
@@ -1146,19 +1181,22 @@ async fn repair_stale_repairs_trailing_unanswered_tool_call() {
             attachments: Vec::new(),
             accepted_seq: None,
         },
-        DurableEventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessage {
             message_id: new_message_id(),
             text: String::new(),
             reasoning_content: None,
+            outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
         },
         DurableEventPayload::ToolCallRequested {
+            provider_call_id: "call-orphan".to_owned(),
             call_id: ToolCallId::new("call-orphan"),
             tool_name: "read".into(),
-            arguments: serde_json::json!({}),
-            raw_arguments: None,
+            arguments: (serde_json::json!({})).to_string(),
         },
-        DurableEventPayload::TurnCompleted {
-            finish_reason: "interrupted".into(),
+        DurableEventPayload::TurnEnded {
+            reason: astrcode_core::event::TurnEndReason::Interrupted {
+                reason: "process interrupted".into(),
+            },
         },
     ] {
         store
@@ -1176,10 +1214,13 @@ async fn repair_stale_repairs_trailing_unanswered_tool_call() {
     let events = store.replay_events(&sid).await.unwrap();
     assert!(
         events.iter().any(|event| matches!(
-            &event.payload,
-            DurableEventPayload::ToolCallFailed { call_id, .. } if call_id.as_str() == "call-orphan"
-        )),
-        "repair must append a durable ToolCallFailed for the trailing unanswered call"
+                            &event.payload,
+                            DurableEventPayload::ToolCallSettled {
+        call_id,
+        ..
+        } if call_id.as_str() == "call-orphan"
+                        )),
+        "repair must settle the trailing unanswered call as interrupted"
     );
     assert!(
         events

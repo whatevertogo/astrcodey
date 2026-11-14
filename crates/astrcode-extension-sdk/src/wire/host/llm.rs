@@ -50,6 +50,8 @@ pub enum HostLlmContent {
     },
     ToolCall {
         call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_call_id: Option<String>,
         name: String,
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]

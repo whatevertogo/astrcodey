@@ -5,6 +5,7 @@ import {
 } from '../../hooks/useElapsedSeconds'
 import {
   toolCallHasError,
+  toolCallIsTerminal,
   type AgentSessionLink,
   type ConversationBlock,
 } from '../../services/types'
@@ -151,7 +152,7 @@ function ToolCallDetailsPanel({
   const { block, args } = context
   const detailArgs = formatArgs(args, block.arguments)
   const agentChildUi =
-    linkedAgent && block.status === 'streaming' ? (
+    linkedAgent && !toolCallIsTerminal(block.status) ? (
       <AgentChildSessionPanel agent={linkedAgent} onOpenChild={onOpenChild} />
     ) : null
 
@@ -182,7 +183,6 @@ function ToolCallDetailsPanel({
               sessionId={sessionId}
               toolName={block.name}
               approval={block.approval}
-              args={args}
             />
           ) : (
             <DetailRow label="Result">
@@ -275,10 +275,10 @@ function ToolCallBlock({
       <AskUserCard block={block} sessionId={sessionId} args={args} />
     ) : null
 
-  const streaming = block.status === 'streaming'
-  const elapsed = useElapsedSeconds(streaming)
+  const streaming = !toolCallIsTerminal(block.status)
+  const elapsed = useElapsedSeconds(block.status === 'running')
   const shellRunningSummary =
-    block.name === 'shell' && streaming && !block.text
+    block.name === 'shell' && block.status === 'running' && !block.text
       ? runningElapsedLabel(elapsed, 'en')
       : null
 
@@ -291,21 +291,24 @@ function ToolCallBlock({
     (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
   const summaryLine = compactPreviewLine(summarySource)
 
-  const gatePending = block.status === 'streaming' && block.approval != null
+  const gatePending =
+    !toolCallIsTerminal(block.status) && block.approval != null
   const questionnairePending = isPendingAskUser(block)
   const autoExpand = questionnairePending || gatePending
   const forceOpen = autoExpand
   const open = forceOpen || isOpen
 
-  const displayStatus = streaming
-    ? streamingStatusText({
-        gatePending,
-        questionnairePending,
-        linkedAgentCurrentTool: linkedAgent?.currentTool,
-        linkedAgentRunning: Boolean(linkedAgent && streaming),
-        elapsed,
-      })
-    : statusLabel(block.status)
+  const displayStatus =
+    streaming &&
+    (gatePending || questionnairePending || block.status === 'running')
+      ? streamingStatusText({
+          gatePending,
+          questionnairePending,
+          linkedAgentCurrentTool: linkedAgent?.currentTool,
+          linkedAgentRunning: Boolean(linkedAgent && streaming),
+          elapsed,
+        })
+      : statusLabel(block.status)
   const durationLabel = durationFromMetadata(meta)
   const toolName = block.name || 'tool'
   const summaryIcon = summaryIconName ?? toolIconName(toolName)

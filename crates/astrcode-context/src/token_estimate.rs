@@ -101,6 +101,7 @@ fn estimate_content_tokens(content: &LlmContent) -> usize {
             name,
             arguments,
             raw_arguments,
+            ..
         } => {
             TOOL_CALL_BASE_TOKENS
                 + estimate_text_tokens(call_id)
@@ -134,6 +135,7 @@ mod tests {
                 filename: None,
             },
             LlmContent::ToolCall {
+                provider_call_id: None,
                 call_id: "1".into(),
                 name: String::new(),
                 arguments: json!({}),

@@ -4,4 +4,4 @@ import type { SessionListItemDto } from "./SessionListItemDto";
 /**
  * 会话列表响应。
  */
-export type SessionListResponseDto = { sessions: Array<SessionListItemDto>, };
+export type SessionListResponseDto = { sessions: Array<SessionListItemDto>, unsupportedLogCount: number, corruptLogCount: number, };

@@ -164,19 +164,8 @@ impl ToolCalls {
                 TurnError::Aborted => ToolExecutionOutcome::cancelled(message.clone(), None),
                 _ => ToolExecutionOutcome::failed(message.clone()),
             };
-            let completion = crate::tool_types::tool_call_completion_arguments(
-                call.tool_input.clone(),
-                call.raw_arguments.clone(),
-            );
-            if let Err(commit_error) = finish_tool_call(
-                &input.publisher,
-                &call.call_id,
-                call.name.clone(),
-                &outcome,
-                completion.arguments,
-                completion.arguments_json,
-            )
-            .await
+            if let Err(commit_error) =
+                finish_tool_call(&input.publisher, &call.call_id, &outcome).await
             {
                 tracing::warn!(
                     call_id = %call.call_id,

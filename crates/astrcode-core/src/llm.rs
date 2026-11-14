@@ -68,11 +68,14 @@ pub enum LlmContent {
     ToolCall {
         /// 工具调用的唯一标识。
         call_id: String,
+        /// Provider 的调用身份；运行时创建的调用使用独立 `call_id`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_call_id: Option<String>,
         /// 要调用的工具名称。
         name: String,
         /// 工具调用参数（JSON 值）。
         arguments: serde_json::Value,
-        /// Provider 返回但无法解析的原始参数。旧记录和合法 JSON 参数为 `None`。
+        /// 模型参数原文；合成消息可以只提供解析后的 `arguments`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         raw_arguments: Option<String>,
     },
@@ -147,6 +150,9 @@ pub enum TranscriptMessageOrigin {
     TurnAborted,
     ToolCallFailed,
     ToolCallCancelled,
+    ToolCallInterrupted,
+    AssistantFailed,
+    AssistantCancelled,
 }
 
 /// 一条 durable provider transcript 消息及其非 provider 元数据。
@@ -687,10 +693,51 @@ pub struct LlmRequest {
     pub max_output_tokens: Option<usize>,
 }
 
+/// 出站请求恢复 provider 调用 ID；存储与指纹继续使用运行时调用身份。
+pub fn provider_request_messages(messages: Vec<Arc<LlmMessage>>) -> Vec<Arc<LlmMessage>> {
+    let mut provider_ids = std::collections::HashMap::new();
+    messages
+        .into_iter()
+        .map(|mut message| {
+            for index in 0..message.content.len() {
+                match &message.content[index] {
+                    LlmContent::ToolCall {
+                        call_id,
+                        provider_call_id: Some(provider_id),
+                        ..
+                    } => {
+                        provider_ids.insert(call_id.clone(), provider_id.clone());
+                        let provider_id = provider_id.clone();
+                        if let LlmContent::ToolCall {
+                            call_id,
+                            provider_call_id,
+                            ..
+                        } = &mut Arc::make_mut(&mut message).content[index]
+                        {
+                            *call_id = provider_id;
+                            *provider_call_id = None;
+                        }
+                    },
+                    LlmContent::ToolResult { tool_call_id, .. } => {
+                        if let Some(provider_id) = provider_ids.get(tool_call_id).cloned()
+                            && let LlmContent::ToolResult { tool_call_id, .. } =
+                                &mut Arc::make_mut(&mut message).content[index]
+                        {
+                            *tool_call_id = provider_id;
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            message
+        })
+        .collect()
+}
+
 impl LlmRequest {
     pub fn new(messages: Vec<Arc<LlmMessage>>, tools: Vec<ToolDefinition>) -> Self {
         Self {
-            messages,
+            messages: provider_request_messages(messages),
             tools,
             max_output_tokens: None,
         }
@@ -736,11 +783,8 @@ pub enum LlmEvent {
         /// 本次增量参数片段。
         delta: String,
     },
-    /// 单个工具调用的参数已全部接收完毕。
-    ///
-    /// 此事件允许下游在 LLM 仍在流式输出其他工具调用时就提前准备和执行
-    /// 已完成的工具,从而缩短多工具调用场景的端到端延迟。
-    ToolCallCompleted {
+    /// 模型已生成完整工具参数；不表示工具已开始执行或执行完成。
+    ToolCallArgumentsCompleted {
         /// 工具调用 ID。
         call_id: String,
     },
@@ -1104,6 +1148,39 @@ pub async fn collect_stream_text(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_request_restores_ids_without_mutating_runtime_history() {
+        let mut messages = Vec::new();
+        for index in 0..2 {
+            let id = format!("runtime-{index}");
+            messages.push(Arc::new(LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: id.clone(),
+                    provider_call_id: Some("0".into()),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": format!("file-{index}")}),
+                    raw_arguments: None,
+                }],
+                name: None,
+                reasoning_content: None,
+            }));
+            messages.push(Arc::new(LlmMessage::tool("read", &id, "result", false)));
+        }
+        let request = LlmRequest::new(messages.clone(), Vec::new());
+        for index in 0..2 {
+            assert!(
+                matches!(&request.messages[index * 2].content[0], LlmContent::ToolCall { call_id, provider_call_id: None, .. } if call_id == "0")
+            );
+            assert!(
+                matches!(&request.messages[index * 2 + 1].content[0], LlmContent::ToolResult { tool_call_id, .. } if tool_call_id == "0")
+            );
+            assert!(
+                matches!(&messages[index * 2].content[0], LlmContent::ToolCall { call_id, provider_call_id: Some(provider_id), .. } if call_id == &format!("runtime-{index}") && provider_id == "0")
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1194,6 +1271,7 @@ mod tests {
             LlmMessage {
                 role: LlmRole::Assistant,
                 content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call-1".into(),
                     name: "shell".into(),
                     arguments: serde_json::json!({"command": "sleep"}),
@@ -1215,6 +1293,7 @@ mod tests {
         let assistant_call = LlmMessage {
             role: LlmRole::Assistant,
             content: vec![LlmContent::ToolCall {
+                provider_call_id: None,
                 call_id: "call-1".into(),
                 name: "askUser".into(),
                 arguments: serde_json::json!({"question": "which one?"}),
@@ -1276,6 +1355,7 @@ mod tests {
             LlmMessage {
                 role: LlmRole::Assistant,
                 content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call-1".into(),
                     name: "shell".into(),
                     arguments: serde_json::json!({"command": "sleep"}),
@@ -1307,6 +1387,7 @@ mod tests {
         let assistant_tool_call = LlmMessage {
             role: LlmRole::Assistant,
             content: vec![LlmContent::ToolCall {
+                provider_call_id: None,
                 call_id: "call-1".into(),
                 name: "shell".into(),
                 arguments: serde_json::json!({"command": "sleep"}),

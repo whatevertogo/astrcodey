@@ -92,7 +92,7 @@ assert.deepEqual(
 assert.equal(onlyFinal.status, 'complete')
 
 const streamingRun = buildAssistantRunModel([
-  tool('t3', 'shell', 'streaming', {
+  tool('t3', 'shell', 'running', {
     argumentsJson: { command: 'cargo test' },
   }),
 ])
@@ -305,7 +305,7 @@ assert.equal(
 )
 assert.equal(recoveredBlock.id, recoveredPendingQuestion.callId)
 assert.equal(recoveredBlock.name, 'askUser')
-assert.equal(recoveredBlock.status, 'streaming')
+assert.equal(recoveredBlock.status, 'running')
 assert.deepEqual(recoveredBlock.argumentsJson, {
   questions: recoveredPendingQuestion.questions,
   metadata: recoveredPendingQuestion.metadata,
@@ -323,3 +323,10 @@ assert.equal(
   false,
   'a reused call id with only an old terminal block still needs recovery rendering'
 )
+
+for (const status of ['error', 'cancelled']) {
+  const partial = [assistant(`partial-${status}`, 'partial answer', status)]
+  assert.equal(buildAssistantRunModel(partial).status, status)
+  assert.equal(assistantRunCompletedReply(partial), null)
+  assert.equal(assistantRunCopyText(partial), 'partial answer')
+}

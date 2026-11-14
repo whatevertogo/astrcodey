@@ -76,10 +76,14 @@ pub struct StoredEvent {
     pub event: DurableEvent,
 }
 
+/// Version of the durable record and its payload tags.
+pub const EVENT_FORMAT_VERSION: u32 = 2;
+
 impl Serialize for StoredEvent {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct StoredEventRef<'a> {
+            format_version: u32,
             seq: u64,
             #[serde(flatten)]
             event: &'a DurableEvent,
@@ -93,6 +97,7 @@ impl Serialize for StoredEvent {
             _ => None,
         };
         StoredEventRef {
+            format_version: EVENT_FORMAT_VERSION,
             seq: self.seq,
             event: &self.event,
             input_token_anchor,
@@ -105,6 +110,7 @@ impl<'de> Deserialize<'de> for StoredEvent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct StoredEventWire {
+            format_version: u32,
             seq: u64,
             #[serde(flatten)]
             event: DurableEvent,
@@ -112,6 +118,12 @@ impl<'de> Deserialize<'de> for StoredEvent {
             input_token_anchor: Option<ContextTokenAnchor>,
         }
         let mut wire = StoredEventWire::deserialize(deserializer)?;
+        if wire.format_version != EVENT_FORMAT_VERSION {
+            return Err(D::Error::custom(format!(
+                "unsupported event format version {}; expected {EVENT_FORMAT_VERSION}",
+                wire.format_version,
+            )));
+        }
         match &mut wire.event.payload {
             DurableEventPayload::SessionForked {
                 input_token_anchor, ..

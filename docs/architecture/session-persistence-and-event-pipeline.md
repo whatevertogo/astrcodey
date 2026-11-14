@@ -33,10 +33,9 @@
 | 运行时资源 | event sink、审批 sender、file observation、工具缓存 | 否 | `SessionRuntimeState` |
 | 大结果/诊断输入 | tool artifact、compact snapshot | 独立文件 | storage |
 
-fork 的用量锚点（真实 token 用量及其覆盖的消息范围）保存于 `StoredEvent` 的可选记录头
-`input_token_anchor`，不进入严格解码的领域 payload。旧版 storage 可忽略记录头并继续
-读取 fork 消息；新版读取时将锚点恢复到 fork 事实，并在 projection 边界校验覆盖范围和
-模型窗口。发送给客户端的 `Event` 不携带该记录头。
+fork 的用量锚点（真实 token 用量及其覆盖的消息范围）保存在
+`StoredEvent.input_token_anchor` 记录头，只允许分叉记录携带。读模型在回放时校验覆盖范围
+和模型窗口。发送给客户端的 `Event` 不携带这个记录头。
 
 `Event` 联合类型只用于进程内 fan-out 和协议映射：
 
@@ -286,3 +285,49 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
+
+
+## 9. 事件领域契约
+
+参考 Vvbot PR #1176 的 `73b57e8a81c21b10f34e26f8f4462217e77801d7`：采用明确的执行结局、参数原文、模型尝试结算和事实/进度分离。另参考 DeepSeek Harness 的 `571902028a75c64c1d767f4ae5fd099485f0ddf0`：已声明调用必须配对结果，展示投影明确区分中断与失败。AstrCode 保留更强的 `DurableEventPayload` / `LiveEventPayload` 类型边界，发布顺序继续由现有 session lane 负责。
+
+### 完整分类
+
+| 领域 | 持久事实 | 实时通知 | 事实的含义 |
+| --- | --- | --- | --- |
+| 会话配置 | `SessionStarted`、`ModelIdChanged`、`SessionToolsConfigured`、`SystemPromptConfigured` | 无 | 创建状态完整；后续配置只记录被改变的领域。创建和配置复用 `PersistedSystemPrompt`。 |
+| 子会话关系 | `AgentSessionSpawned`、`AgentSessionSettled`、`AgentSessionRecycled` | 无 | 父会话拥有链接；结算带成功摘要或失败错误，身份只记录 `child_session_id`。 |
+| 回合与步骤 | `TurnStarted`、`TurnEnded`、`StepStarted`、`StepEnded` | `AgentRunStarted`、`AgentRunEnded` | durable 描述逻辑交互，live 描述当前执行器运行。重启后可恢复原 turn，因此两种生命周期仍分开。 |
+| 用户输入 | `UserInputAccepted`、`UserMessage`、`UserInputDiscarded` | 无 | `accepted_seq` 关联待处理输入与实际进入回合的正文，或被插件拒绝的原因。每条待处理输入只能结算一次。 |
+| 模型输出 | `AssistantMessage`、`AssistantAttemptSettled`、`TokenUsageRecorded` | `AssistantMessageStarted`、`AssistantMessageDelta`、`LlmRetrying`、`LlmRetryRecovered` | 可见正文与无正文尝试分别结算；增量和重试状态不能作为恢复事实。 |
+| 工具调用 | `ToolCallRequested`、`ToolCallSettled` | `ToolCallPreviewStarted`、`ToolCallArgumentsDelta`、`ToolCallPreviewDiscarded`、`ToolExecutionStarted`、`ToolOutputDelta` | 请求是模型意图，结算是执行结果；预览不是执行完成。 |
+| 工具审批 | `ToolApprovalRequested`、`ToolApprovalResolved` | 无 | 审批展示执行前的有效参数；决定必须能在重启后恢复。 |
+| 上下文 | `TurnAbortedContext`、`TranscriptRewritten`、`SessionForked` | `CompactionStarted`、`CompactionEnded` | 上下文的实际改变持久化；压缩进度只通知当前订阅者。前缀指纹和 source cursor 保护仍在提交边界校验。 |
+| 展示补充 | `RecapGenerated` | 无 | 供展示的回顾保留来源，不隐式改写模型上下文。 |
+| 诊断 | `ErrorOccurred` | `ErrorOccurred` | durable 保存诊断，live 通知可恢复错误；执行是否失败以对应终态为准。 |
+| 扩展 | `CustomEvent` | `CustomEvent` | 宿主根据声明选择生命周期；audience、schema、因果链与载荷仍保留在既有契约中。 |
+
+`LlmEvent` 属于 provider（模型接口）的输出边界。`ToolCallArgumentsCompleted` 只表示参数生成完毕，不表示工具执行完成；其余 provider 增量、用量、重试和结束通知继续由流消费者转换成 session 事件。
+
+### 终态和参数不变式
+
+- `TurnEndReason` 区分完成、失败、取消与进程中断。provider 的 `finish_reason` 在入口归一为 `TurnCompletionReason`（完成原因），只附在完成结局上；错误与取消携带各自的数据。
+- `StepEndReason` 区分继续、完成、失败与取消。每个已开始的步骤都会尝试写入结束事实；原始执行错误优先于后续写入错误。执行投影只保留可选 `end_reason`，不维护相互独立的 completed/finish_reason 标记。
+- `AssistantMessage` 携带 `AssistantAttemptOutcome`；失败/取消保留部分正文、推理和已知用量。无正文时只写 `AssistantAttemptSettled`，不制造可见空消息。重试先结算旧尝试的部分正文和已知用量，再以新 message ID 开始尝试；工具草稿通过 `ToolCallPreviewDiscarded` 撤销。
+- `ToolCallSettled` 共用一份 `ToolResult`。正常完成可以带业务错误；失败、取消或中断必须携带错误结果，storage projection 在提交/重放边界拒绝矛盾的载荷。
+- `ToolCallRequested.arguments` 记录模型原始 JSON 文本。执行 hook 可改变有效参数，不能覆盖这个事实。解析修复算法由 `astrcode-core::tool::parse_tool_arguments` 共享，执行入口负责诊断，projection 和 HTTP 边界按相同规则解读原文；无法解析的展示参数保留原文字符串。
+- 每个工具调用分配独立的运行时 `call_id`，另存 `provider_call_id`。hook、审批、结果和 UI 都引用运行时身份；发给模型的边界恢复 provider 的原始 ID，避免跨步骤、跨回合复用 ID 覆盖旧卡片。
+- 工具终态只记录 `call_id`、`outcome` 和 `result`，通过已声明意图取得名称与原始参数。分页 timeline 跨日志块寻找声明再合并结果；未知或重复结算在持久化投影边界被拒绝，崩溃恢复仍可补齐已关闭回合的未回答调用。
+- `preparing` 表示生成参数，`pending` 表示已有持久请求，`running` 必须来自实际执行入口或工具输出。审批展示 `effectiveArguments`（hook 调整后的执行参数），原始参数仍属于模型意图。终态不接受迟到的预览或输出增量。
+- `AgentSessionSettled` 不重复记录当前必定等于 child 的 final session ID。旧 HTTP 链接 DTO 的 finalSessionId 在边界从 child 身份派生。
+- `CompactionEnded` 用一个 outcome 表达完成、跳过或失败；实际上下文修改由 `TranscriptRewritten` 表达。
+
+SSE 重放只过滤已被持久事实覆盖的消息、调用或已结束回合；缓冲区中尚未结算的预览和正文继续投递，避免重连时丢失正在生成的输出。游标从请求位置和已回放记录初始化，随后随连接处理的父会话持久事件推进，实时通知和子会话帧沿用当前值。一个事件产生多帧时，最后一帧才携带新游标。
+
+HTTP 的 assistant block 使用 `complete`、`error`、`cancelled` 区分持久终态；重放和 snapshot 保留同样的状态。未完成正文不会进入“完整回复”的复制/导出操作。core 的 `LiveAccepted` receipt 仅确认事件已进入有序队列，不承诺 observer 已收到。
+
+### 版本边界
+
+新 `StoredEvent` 记录显式写入 `format_version: 2`。会话列表会分别提示因格式不兼容或日志损坏而跳过的会话数量。直接打开格式不兼容的会话时，服务返回 `unsupported_session_log_format`。原始日志保留，旧日志可用写入它的运行时读取或另行迁移。stdio 的 `PROTOCOL_VERSION` 同步为 2；外部客户端和使用变更后的宿主事件 receipt 的插件需要同步对应契约。HTTP 使用明确的 DTO 映射，不直接把新的 outcome enum 当作客户端类型。
+
+事件载荷、信封、提交入口和终态类型分别位于 `event/payload.rs`、`event/envelope.rs`、`event/ingress.rs` 和 `event/outcome.rs`。这些划分围绕实际责任，不新增另一套事件发布或状态管理机制。

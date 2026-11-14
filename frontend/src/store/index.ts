@@ -82,6 +82,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   connectionStatus: 'disconnected',
   connectionError: null,
   sessions: [],
+  unsupportedLogCount: 0,
+  corruptLogCount: 0,
   ...DEFAULT_SESSION_STATE,
   modelRefreshKey: 0,
   extensions: [],
@@ -136,6 +138,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const response = await api.listSessions()
       set((current) => ({
         sessions: response.sessions,
+        unsupportedLogCount: response.unsupportedLogCount ?? 0,
+        corruptLogCount: response.corruptLogCount ?? 0,
         projectFolderOrder:
           current.projectFolderOrder.length === 0
             ? computeInitialProjectFolderOrder(response.sessions)

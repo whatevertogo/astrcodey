@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { ToolApprovalCard } from '../src/components/Chat/tools/ToolApprovalCard.tsx'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import '../src/components/Chat/tools/builtinRenderers.tsx'
@@ -106,3 +108,18 @@ const namedWithIntent = toolContext(
   'content'
 )
 assert.equal(getToolRenderer(namedWithIntent)?.id, 'builtin:read')
+
+const approvalMarkup = renderToStaticMarkup(
+  createElement(ToolApprovalCard, {
+    sessionId: 'session',
+    toolName: 'shell',
+    approval: {
+      callId: 'runtime-call',
+      prompt: 'Allow process?',
+      effectiveArguments: { command: 'echo effective' },
+    },
+    args: { command: 'echo original' },
+  })
+)
+assert.match(approvalMarkup, /echo effective/)
+assert.doesNotMatch(approvalMarkup, /echo original/)

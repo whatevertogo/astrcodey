@@ -12,6 +12,9 @@ pub enum SessionMessageOriginDto {
     TurnAborted,
     ToolCallFailed,
     ToolCallCancelled,
+    ToolCallInterrupted,
+    AssistantFailed,
+    AssistantCancelled,
 }
 
 /// Tool selection wire contract shared by the plugin session API.

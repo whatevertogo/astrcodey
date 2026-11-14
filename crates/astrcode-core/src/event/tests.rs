@@ -11,7 +11,7 @@ fn initial_prompt() -> PersistedSystemPrompt {
 }
 
 #[test]
-fn fork_usage_anchor_remains_readable_by_legacy_storage_readers() {
+fn versioned_fork_usage_anchor_is_kept_out_of_the_wire_payload() {
     #[derive(serde::Deserialize)]
     #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
     enum LegacyPayload {
@@ -50,6 +50,7 @@ fn fork_usage_anchor_remains_readable_by_legacy_storage_readers() {
         ),
     );
     let json = serde_json::to_value(&stored).unwrap();
+    assert_eq!(json["format_version"], EVENT_FORMAT_VERSION);
     let legacy: LegacyStoredEvent = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(legacy.seq, 1);
     let LegacyPayload::SessionForked {
@@ -92,8 +93,10 @@ fn event_lifecycles_have_distinct_envelopes_and_wire_shapes() {
     let stored = StoredEvent::new(0, durable);
     let live = LiveEvent::session(
         session_id,
-        LiveEventPayload::CompactionCompleted {
-            messages_removed: 3,
+        LiveEventPayload::CompactionEnded {
+            outcome: crate::event::CompactionOutcome::Completed {
+                messages_removed: 3,
+            },
         },
     );
 
@@ -107,12 +110,29 @@ fn event_lifecycles_have_distinct_envelopes_and_wire_shapes() {
         "system"
     );
     assert!(live_json.get("seq").is_none());
-    assert_eq!(live_json["payload"]["type"], "compaction_completed");
-    assert_eq!(live_json["payload"]["messages_removed"], 3);
+    assert_eq!(live_json["payload"]["type"], "compaction_ended");
+    assert_eq!(live_json["payload"]["outcome"]["messages_removed"], 3);
 
     let decoded: StoredEvent =
         serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
     assert_eq!(decoded, stored);
+    let record = serde_json::to_value(&stored).unwrap();
+    assert_eq!(record["format_version"], EVENT_FORMAT_VERSION);
+    for version in [
+        None,
+        Some(serde_json::json!(1)),
+        Some(serde_json::json!(3)),
+        Some(serde_json::json!("2")),
+    ] {
+        let mut invalid = record.clone();
+        if let Some(version) = version {
+            invalid["format_version"] = version;
+        } else {
+            invalid.as_object_mut().unwrap().remove("format_version");
+        }
+        assert!(serde_json::from_value::<StoredEvent>(invalid).is_err());
+    }
+
 
     for event in [
         Event::from(StoredEvent::new(

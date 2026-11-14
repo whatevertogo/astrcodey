@@ -69,27 +69,26 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::SessionStarted(_) => "session_started",
         DurableEventPayload::ModelIdChanged { .. } => "model_id_changed",
         DurableEventPayload::SessionToolsConfigured { .. } => "session_tools_configured",
-        DurableEventPayload::SystemPromptConfigured { .. } => "system_prompt_configured",
+        DurableEventPayload::SystemPromptConfigured(_) => "system_prompt_configured",
         DurableEventPayload::AgentSessionSpawned { .. } => "agent_session_spawned",
-        DurableEventPayload::AgentSessionCompleted { .. } => "agent_session_completed",
-        DurableEventPayload::AgentSessionFailed { .. } => "agent_session_failed",
+        DurableEventPayload::AgentSessionSettled { .. } => "agent_session_settled",
         DurableEventPayload::AgentSessionRecycled { .. } => "agent_session_recycled",
         DurableEventPayload::TurnStarted => "turn_started",
         DurableEventPayload::StepStarted { .. } => "step_started",
-        DurableEventPayload::StepCompleted { .. } => "step_completed",
-        DurableEventPayload::TurnCompleted { .. } => "turn_completed",
+        DurableEventPayload::StepEnded { .. } => "step_ended",
+        DurableEventPayload::TurnEnded { .. } => "turn_ended",
         DurableEventPayload::TurnAbortedContext => "turn_aborted_context",
         DurableEventPayload::UserInputAccepted { .. } => "user_input_accepted",
+        DurableEventPayload::UserInputDiscarded { .. } => "user_input_discarded",
         DurableEventPayload::UserMessage { .. } => "user_message",
         DurableEventPayload::RecapGenerated { .. } => "recap_generated",
-        DurableEventPayload::AssistantMessageCompleted { .. } => "assistant_message_completed",
+        DurableEventPayload::AssistantMessage { .. } => "assistant_message",
+        DurableEventPayload::AssistantAttemptSettled { .. } => "assistant_attempt_settled",
         DurableEventPayload::TokenUsageRecorded { .. } => "token_usage_recorded",
         DurableEventPayload::ToolCallRequested { .. } => "tool_call_requested",
         DurableEventPayload::ToolApprovalRequested { .. } => "tool_approval_requested",
         DurableEventPayload::ToolApprovalResolved { .. } => "tool_approval_resolved",
-        DurableEventPayload::ToolCallCompleted { .. } => "tool_call_completed",
-        DurableEventPayload::ToolCallFailed { .. } => "tool_call_failed",
-        DurableEventPayload::ToolCallCancelled { .. } => "tool_call_cancelled",
+        DurableEventPayload::ToolCallSettled { .. } => "tool_call_settled",
         DurableEventPayload::TranscriptRewritten { .. } => "transcript_rewritten",
         DurableEventPayload::SessionForked { .. } => "session_forked",
         DurableEventPayload::ErrorOccurred { .. } => "error_occurred",
@@ -101,20 +100,18 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
 fn live_payload_type(payload: &LiveEventPayload) -> &'static str {
     match payload {
         LiveEventPayload::AgentRunStarted => "agent_run_started",
-        LiveEventPayload::AgentRunCompleted { .. } => "agent_run_completed",
+        LiveEventPayload::AgentRunEnded { .. } => "agent_run_ended",
         LiveEventPayload::LlmRetrying { .. } => "llm_retrying",
         LiveEventPayload::LlmRetryRecovered => "llm_retry_recovered",
+        LiveEventPayload::AssistantMessageDelta { .. } => "assistant_message_delta",
         LiveEventPayload::AssistantMessageStarted { .. } => "assistant_message_started",
-        LiveEventPayload::AssistantMessageReset { .. } => "assistant_message_reset",
-        LiveEventPayload::AssistantTextDelta { .. } => "assistant_text_delta",
-        LiveEventPayload::ThinkingDelta { .. } => "thinking_delta",
-        LiveEventPayload::ToolCallStarted { .. } => "tool_call_started",
+        LiveEventPayload::ToolCallPreviewStarted { .. } => "tool_call_preview_started",
+        LiveEventPayload::ToolExecutionStarted { .. } => "tool_execution_started",
+        LiveEventPayload::ToolCallPreviewDiscarded { .. } => "tool_call_preview_discarded",
         LiveEventPayload::ToolCallArgumentsDelta { .. } => "tool_call_arguments_delta",
         LiveEventPayload::ToolOutputDelta { .. } => "tool_output_delta",
+        LiveEventPayload::CompactionEnded { .. } => "compaction_ended",
         LiveEventPayload::CompactionStarted => "compaction_started",
-        LiveEventPayload::CompactionCompleted { .. } => "compaction_completed",
-        LiveEventPayload::CompactionSkipped { .. } => "compaction_skipped",
-        LiveEventPayload::CompactionFailed { .. } => "compaction_failed",
         LiveEventPayload::ErrorOccurred { .. } => "error_occurred",
         LiveEventPayload::CustomEvent(_) => "custom_event",
     }
@@ -146,40 +143,28 @@ fn durable_payload_details(payload: &DurableEventPayload) -> String {
             agent_name,
             ..
         } => format!("child={child_session_id} agent={agent_name}"),
-        DurableEventPayload::AgentSessionCompleted {
+        DurableEventPayload::AgentSessionSettled {
             child_session_id,
-            final_session_id,
-            ..
-        } => format!("child={child_session_id} final={final_session_id}"),
-        DurableEventPayload::AgentSessionFailed {
-            child_session_id,
-            final_session_id,
-            ..
-        } => format!("child={child_session_id} final={final_session_id}"),
+            outcome,
+        } => format!("child={child_session_id} outcome={outcome:?}"),
         DurableEventPayload::AgentSessionRecycled { child_session_id } => {
             format!("child={child_session_id}")
         },
         DurableEventPayload::ToolCallRequested {
             call_id, tool_name, ..
-        }
-        | DurableEventPayload::ToolCallCompleted {
-            call_id, tool_name, ..
-        }
-        | DurableEventPayload::ToolCallFailed {
-            call_id, tool_name, ..
-        }
-        | DurableEventPayload::ToolCallCancelled {
-            call_id, tool_name, ..
         } => {
             format!("tool={tool_name} call={call_id}")
         },
+        DurableEventPayload::ToolCallSettled {
+            call_id, outcome, ..
+        } => format!("call={call_id} outcome={outcome:?}"),
         DurableEventPayload::UserMessage { text, .. }
         | DurableEventPayload::RecapGenerated { text, .. }
-        | DurableEventPayload::AssistantMessageCompleted { text, .. } => {
+        | DurableEventPayload::AssistantMessage { text, .. } => {
             format!("bytes={}", text.len())
         },
-        DurableEventPayload::TurnCompleted { finish_reason } => {
-            format!("reason={finish_reason}")
+        DurableEventPayload::TurnEnded { reason } => {
+            format!("reason={reason:?}")
         },
         DurableEventPayload::TokenUsageRecorded {
             usage,
@@ -221,7 +206,9 @@ fn durable_payload_details(payload: &DurableEventPayload) -> String {
 #[cfg(debug_assertions)]
 fn live_payload_details(payload: &LiveEventPayload) -> String {
     match payload {
-        LiveEventPayload::ToolCallStarted { call_id, tool_name } => {
+        LiveEventPayload::ToolCallPreviewStarted {
+            call_id, tool_name, ..
+        } => {
             format!("tool={tool_name} call={call_id}")
         },
         LiveEventPayload::LlmRetrying {
@@ -240,18 +227,30 @@ fn live_payload_details(payload: &LiveEventPayload) -> String {
             stream,
             delta,
         } => format!("call={call_id} stream={stream:?} bytes={}", delta.len()),
-        LiveEventPayload::AssistantTextDelta { delta, .. }
-        | LiveEventPayload::ThinkingDelta { delta, .. }
+        LiveEventPayload::AssistantMessageDelta {
+            delta: astrcode_core::event::AssistantDelta::Text(delta),
+            ..
+        }
+        | LiveEventPayload::AssistantMessageDelta {
+            delta: astrcode_core::event::AssistantDelta::Reasoning(delta),
+            ..
+        }
         | LiveEventPayload::ToolCallArgumentsDelta { delta, .. } => {
             format!("bytes={}", delta.len())
         },
-        LiveEventPayload::AgentRunCompleted { reason }
-        | LiveEventPayload::CompactionSkipped { reason }
-        | LiveEventPayload::CompactionFailed { reason } => format!("reason={reason}"),
+        LiveEventPayload::AgentRunEnded { reason } => format!("reason={reason:?}"),
+        LiveEventPayload::CompactionEnded {
+            outcome: astrcode_core::event::CompactionOutcome::Skipped { reason },
+        }
+        | LiveEventPayload::CompactionEnded {
+            outcome: astrcode_core::event::CompactionOutcome::Failed { reason },
+        } => format!("reason={reason}"),
         LiveEventPayload::ErrorOccurred {
             code, recoverable, ..
         } => format!("code={code} recoverable={recoverable}"),
-        LiveEventPayload::CompactionCompleted { messages_removed } => {
+        LiveEventPayload::CompactionEnded {
+            outcome: astrcode_core::event::CompactionOutcome::Completed { messages_removed },
+        } => {
             format!("messages_removed={messages_removed}")
         },
         LiveEventPayload::CustomEvent(event) => {

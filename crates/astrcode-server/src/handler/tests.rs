@@ -1117,16 +1117,25 @@ fn compact_summary_text(current_work: &str) -> String {
     )
 }
 
+fn turn_finish_reason(reason: &astrcode_core::event::TurnEndReason) -> String {
+    match reason {
+        astrcode_core::event::TurnEndReason::Completed { finish_reason } => {
+            finish_reason.to_string()
+        },
+        astrcode_core::event::TurnEndReason::Failed { .. } => "error".into(),
+        astrcode_core::event::TurnEndReason::Cancelled { .. } => "aborted".into(),
+        astrcode_core::event::TurnEndReason::Interrupted { .. } => "interrupted".into(),
+    }
+}
+
 async fn wait_for_turn_completed(event_rx: &mut broadcast::Receiver<ClientNotification>) -> String {
     loop {
         let notification = recv_event(event_rx).await;
         let ClientNotification::Event(event) = notification else {
             continue;
         };
-        if let EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) =
-            event.payload
-        {
-            return finish_reason;
+        if let EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) = event.payload {
+            return turn_finish_reason(&reason);
         }
     }
 }
@@ -1171,10 +1180,11 @@ async fn append_user_assistant_pair(
         .append_event(DurableEvent::new(
             session_id.clone(),
             None,
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: new_message_id(),
                 text: assistant.into(),
                 reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
         ))
         .await
@@ -1194,13 +1204,13 @@ async fn collect_turn_ids_until_completed(
             EventPayload::Durable(
                 DurableEventPayload::TurnStarted
                 | DurableEventPayload::UserMessage { .. }
-                | DurableEventPayload::AssistantMessageCompleted { .. },
+                | DurableEventPayload::AssistantMessage { .. },
             ) => {
                 turn_ids.push(event.turn_id);
             },
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
+            EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) => {
                 turn_ids.push(event.turn_id);
-                return (finish_reason, turn_ids);
+                return (turn_finish_reason(&reason), turn_ids);
             },
             _ => {},
         }
@@ -1239,12 +1249,12 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     let event = DurableEvent::new(
         sid.clone(),
         None,
-        DurableEventPayload::SystemPromptConfigured {
+        DurableEventPayload::SystemPromptConfigured(astrcode_core::event::PersistedSystemPrompt {
             text: "ordered prompt".into(),
             fingerprint: "fingerprint".into(),
             extra_system_prompt: None,
             source: Default::default(),
-        },
+        }),
     );
     let event = runtime.event_store().append_event(event).await.unwrap();
     event_tx
@@ -1667,10 +1677,10 @@ async fn startup_repairs_stale_pending_tool_calls() {
             sid.clone(),
             Some("stale-turn".into()),
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "call-1".to_owned(),
                 call_id: "call-1".into(),
                 tool_name: "todoWrite".into(),
-                arguments: serde_json::json!({}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({})).to_string(),
             },
         ))
         .await
@@ -1740,10 +1750,10 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
             sid.clone(),
             Some("aborted-turn".into()),
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "call-abort".to_owned(),
                 call_id: "call-abort".into(),
                 tool_name: "shell".into(),
-                arguments: serde_json::json!({ "command": "sleep" }),
-                raw_arguments: None,
+                arguments: (serde_json::json!({ "command": "sleep" })).to_string(),
             },
         ))
         .await
@@ -1753,8 +1763,10 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
         .append_event(DurableEvent::new(
             sid.clone(),
             Some("aborted-turn".into()),
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "aborted".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Cancelled {
+                    reason: "turn aborted".into(),
+                },
             },
         ))
         .await
@@ -2104,13 +2116,11 @@ async fn read_before_edit_guard_survives_across_turns() {
     assert!(events.iter().any(|event| {
         matches!(
             &event.payload,
-            DurableEventPayload::ToolCallCompleted {
-                call_id,
-                tool_name,
-                result,
-                ..
-            } if call_id.as_str() == "edit-call"
-                && tool_name == "edit"
+            DurableEventPayload::ToolCallSettled {
+call_id,
+result,
+..
+} if events.iter().any(|intent| matches!(&intent.payload, DurableEventPayload::ToolCallRequested {call_id: declared, provider_call_id, ..} if declared == call_id && provider_call_id == "edit-call"))
                 && result.is_error
                 && result.metadata.get("errorCode")
                     == Some(&serde_json::json!(
@@ -2188,10 +2198,13 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
     let events = runtime.event_store().replay_events(&sid).await.unwrap();
     assert!(!events.iter().any(|event| {
         matches!(
-            &event.payload,
-            DurableEventPayload::AssistantMessageCompleted { text, .. }
-                if text.contains("late output")
-        )
+                    &event.payload,
+                    DurableEventPayload::AssistantMessage {
+        text,
+        ..
+        }
+                        if text.contains("late output")
+                )
     }));
 }
 
@@ -2772,10 +2785,11 @@ async fn auto_compact_applies_in_memory_during_turn() {
             .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                DurableEventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessage {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(20)),
                     reasoning_content: None,
+                    outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                 },
             ))
             .await
@@ -2800,8 +2814,8 @@ async fn auto_compact_applies_in_memory_during_turn() {
                 compaction_started_count += 1;
                 assert_eq!(event.session_id, session_id);
             },
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
-                assert_eq!(finish_reason, "stop");
+            EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) => {
+                assert_eq!(turn_finish_reason(&reason), "stop");
                 assert_eq!(
                     event.session_id, session_id,
                     "turn completes on same session"
@@ -2850,10 +2864,11 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
             .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                DurableEventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessage {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(20)),
                     reasoning_content: None,
+                    outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                 },
             ))
             .await
@@ -2876,12 +2891,12 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
             EventPayload::Live(LiveEventPayload::CompactionStarted) => {
                 saw_compaction_started += 1;
             },
-            EventPayload::Live(LiveEventPayload::CompactionCompleted { .. }) => {
+            EventPayload::Live(LiveEventPayload::CompactionEnded { .. }) => {
                 saw_compaction_completed += 1;
             },
-            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
-                text, ..
-            }) if text == "reactive retry succeeded" => {
+            EventPayload::Durable(DurableEventPayload::AssistantMessage { text, .. })
+                if text == "reactive retry succeeded" =>
+            {
                 break;
             },
             _ => {},
@@ -2940,7 +2955,7 @@ async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
             continue;
         };
         match event.payload {
-            EventPayload::Live(LiveEventPayload::CompactionCompleted { .. }) => {
+            EventPayload::Live(LiveEventPayload::CompactionEnded { .. }) => {
                 saw_compaction_completed = true;
             },
             EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
@@ -2948,8 +2963,8 @@ async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
                 saw_compact_exhausted =
                     message.contains("prompt is still too long after reactive compaction");
             },
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
-                assert_eq!(finish_reason, "error");
+            EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) => {
+                assert_eq!(turn_finish_reason(&reason), "error");
                 break;
             },
             _ => {},
@@ -3056,8 +3071,8 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
         };
         match event.payload {
             EventPayload::Live(LiveEventPayload::CompactionStarted) => first_compactions += 1,
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
-                assert_eq!(finish_reason, "stop");
+            EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) => {
+                assert_eq!(turn_finish_reason(&reason), "stop");
                 break;
             },
             _ => {},
@@ -3078,8 +3093,8 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
         };
         match event.payload {
             EventPayload::Live(LiveEventPayload::CompactionStarted) => second_compactions += 1,
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
-                assert_eq!(finish_reason, "stop");
+            EventPayload::Durable(DurableEventPayload::TurnEnded { reason }) => {
+                assert_eq!(turn_finish_reason(&reason), "stop");
                 break;
             },
             _ => {},
@@ -3113,10 +3128,10 @@ fn streaming_tool_call_llm() -> ScriptedLlm {
                 name: "read".into(),
                 arguments: serde_json::json!({ "path": "README.md" }).to_string(),
             },
-            LlmEvent::ToolCallCompleted {
+            LlmEvent::ToolCallArgumentsCompleted {
                 call_id: "stream-read-1".into(),
             },
-            LlmEvent::ToolCallCompleted {
+            LlmEvent::ToolCallArgumentsCompleted {
                 call_id: "stream-read-2".into(),
             },
             LlmEvent::Done {
@@ -3134,9 +3149,9 @@ fn streaming_tool_call_llm() -> ScriptedLlm {
     ])
 }
 
-/// 验证带 `ToolCallCompleted` 事件的流式工具调用能正确执行并提交结果。
+/// 参数完成通知只结束预览；持久意图先于实际执行，执行后再提交结果。
 #[tokio::test]
-async fn streaming_tool_call_completed_executes_tools() {
+async fn tool_arguments_completion_preserves_execution_event_order() {
     let workspace = unique_workspace("streaming-tool-call");
     fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
     fs::write(workspace.join("README.md"), "# test\n").unwrap();
@@ -3145,6 +3160,7 @@ async fn streaming_tool_call_completed_executes_tools() {
     let runtime = test_runtime_with_extensions(llm, vec![coding_extension()]).await;
     let event_tx = event_channel(128);
     let mut event_rx = event_tx.subscribe();
+    let mut lifecycle_rx = event_tx.subscribe();
     let handler = spawn_test_actor(runtime.clone(), event_tx);
 
     let sid = handler
@@ -3160,22 +3176,61 @@ async fn streaming_tool_call_completed_executes_tools() {
     let finish_reason = wait_for_turn_completed(&mut event_rx).await;
     assert_eq!(finish_reason, "stop");
 
-    // 验证两个工具调用都被执行并提交了 durable 事件
-    let events = runtime.event_store().replay_events(&sid).await.unwrap();
-    let completed_tool_calls: Vec<_> = events
+    let notifications = std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).collect::<Vec<_>>();
+    let calls = notifications
         .iter()
-        .filter(|event| {
-            matches!(
-                &event.payload,
-                DurableEventPayload::ToolCallCompleted { call_id, .. }
-                    if call_id.as_str() == "stream-read-1"
-                        || call_id.as_str() == "stream-read-2"
-            )
+        .filter_map(|notification| match notification {
+            ClientNotification::Event(event) => match &event.payload {
+                EventPayload::Durable(DurableEventPayload::ToolCallRequested {
+                    call_id,
+                    provider_call_id,
+                    ..
+                }) => {
+                    assert!(provider_call_id.starts_with("stream-read-"));
+                    Some(call_id)
+                },
+                _ => None,
+            },
+            _ => None,
         })
-        .collect();
-    assert_eq!(
-        completed_tool_calls.len(),
-        2,
-        "both streaming tool calls should be committed"
-    );
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for call_id in calls {
+        let position = |stage: u8| {
+            notifications
+                .iter()
+                .position(|notification| {
+                    let ClientNotification::Event(event) = notification else {
+                        return false;
+                    };
+                    match (&event.payload, stage) {
+                        (
+                            EventPayload::Durable(DurableEventPayload::ToolCallRequested {
+                                call_id: id,
+                                ..
+                            }),
+                            0,
+                        )
+                        | (
+                            EventPayload::Live(LiveEventPayload::ToolExecutionStarted {
+                                call_id: id,
+                                ..
+                            }),
+                            1,
+                        )
+                        | (
+                            EventPayload::Durable(DurableEventPayload::ToolCallSettled {
+                                call_id: id,
+                                ..
+                            }),
+                            2,
+                        ) => id == call_id,
+                        _ => false,
+                    }
+                })
+                .unwrap()
+        };
+        assert!(position(0) < position(1));
+        assert!(position(1) < position(2));
+    }
 }

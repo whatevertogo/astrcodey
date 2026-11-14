@@ -28,10 +28,11 @@ use astrcode_protocol::{
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
-        ConversationItemsPageResponseDto, ConversationSnapshotResponseDto,
-        ConversationStateResponseDto, CreateSessionResponseDto, CustomEventConsumerListResponseDto,
-        CustomEventConsumerStatusDto, PromptSubmitResponse, ProviderCatalogResponseDto,
-        SlashCommandListResponseDto, ToolSelectionDto,
+        ConversationErrorEnvelopeDto, ConversationItemsPageResponseDto,
+        ConversationSnapshotResponseDto, ConversationStateResponseDto, CreateSessionResponseDto,
+        CustomEventConsumerListResponseDto, CustomEventConsumerStatusDto, PromptSubmitResponse,
+        ProviderCatalogResponseDto, SessionListResponseDto, SlashCommandListResponseDto,
+        ToolSelectionDto,
     },
     wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -41,7 +42,7 @@ use astrcode_server::{
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, ServerRuntimeTestExt,
         SessionManager, TurnRegistry, TurnScheduler, assemble_server_runtime,
-        router_with_event_bus,
+        router_with_event_bus, session_started_event_for_test,
     },
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary};
@@ -1138,6 +1139,103 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 }
 
 #[tokio::test]
+async fn session_routes_distinguish_incompatible_corrupt_and_missing_event_logs() {
+    let temp = tempfile::tempdir().unwrap();
+    let projects_base = temp.path().join("projects");
+    let config_path = temp.path().join("config.toml");
+    let repository =
+        astrcode_storage::testing::filesystem_session_repository(projects_base.clone());
+    let healthy_id = SessionId::new("healthy-session");
+    let incompatible_id = SessionId::new("incompatible-session");
+    let corrupt_id = SessionId::new("corrupt-session");
+    for id in [&healthy_id, &incompatible_id, &corrupt_id] {
+        repository
+            .create_session(session_started_event_for_test(
+                id.clone(),
+                ".",
+                "mock-model",
+            ))
+            .await
+            .unwrap();
+    }
+
+    let session_log = async |id: &SessionId| {
+        let dir = repository.session_store_dir(id).await.unwrap().unwrap();
+        dir.join(format!("session-{id}.jsonl"))
+    };
+    let incompatible_log = session_log(&incompatible_id).await;
+    let corrupt_log = session_log(&corrupt_id).await;
+    drop(repository);
+    let current_log = fs::read_to_string(&incompatible_log).unwrap();
+    let mut first_record: serde_json::Value =
+        serde_json::from_str(current_log.lines().next().unwrap()).unwrap();
+    assert!(
+        first_record
+            .as_object_mut()
+            .unwrap()
+            .remove("format_version")
+            .is_some()
+    );
+    fs::write(&incompatible_log, format!("{first_record}\n")).unwrap();
+    fs::write(corrupt_log, "not JSON\n").unwrap();
+
+    let app = router(
+        runtime_with_event_store(
+            Arc::new(immediate_llm()),
+            Arc::new(astrcode_storage::testing::filesystem_session_repository(
+                projects_base,
+            )),
+            config_path,
+            Vec::new(),
+        )
+        .await,
+    )
+    .unwrap();
+    let listing = get_json::<SessionListResponseDto>(app.clone(), "/api/sessions").await;
+    assert_eq!(listing.unsupported_log_count, 1);
+    assert_eq!(listing.corrupt_log_count, 1);
+    assert_eq!(listing.sessions.len(), 1);
+    assert_eq!(listing.sessions[0].session_id, healthy_id.as_str());
+
+    for (id, status, code) in [
+        (
+            incompatible_id.as_str(),
+            StatusCode::CONFLICT,
+            "unsupported_session_log_format",
+        ),
+        (
+            corrupt_id.as_str(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_log_corrupt",
+        ),
+        (
+            "missing-session",
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+        ),
+    ] {
+        for suffix in [
+            "/conversation",
+            "/conversation/state",
+            "/conversation/items",
+            "/stream",
+        ] {
+            let uri = format!("/api/sessions/{id}{suffix}");
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri.as_str()).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+            let error: ConversationErrorEnvelopeDto =
+                serde_json::from_slice(&body_bytes(response).await).unwrap();
+            assert_eq!(error.code, code, "{uri}");
+            assert!(!error.message.contains("jsonl"), "{uri}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapshot_contract() {
     let runtime = runtime(Arc::new(immediate_llm())).await;
     let app = router(Arc::clone(&runtime)).unwrap();
@@ -1167,17 +1265,20 @@ async fn conversation_timeline_pages_history_without_expanding_the_legacy_snapsh
                 DurableEvent::turn(
                     session_id_value.clone(),
                     turn_id.clone(),
-                    DurableEventPayload::AssistantMessageCompleted {
+                    DurableEventPayload::AssistantMessage {
                         message_id: new_message_id(),
                         text: format!("assistant-{index}"),
                         reasoning_content: None,
+                        outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                     },
                 ),
                 DurableEvent::turn(
                     session_id_value.clone(),
                     turn_id,
-                    DurableEventPayload::TurnCompleted {
-                        finish_reason: "stop".into(),
+                    DurableEventPayload::TurnEnded {
+                        reason: astrcode_core::event::TurnEndReason::Completed {
+                            finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                        },
                     },
                 ),
             ])
@@ -1290,6 +1391,167 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let body = read_sse_until(stream_response.into_body(), r#""phase":"idle""#).await;
     assert!(body.contains(r#""canSubmitPrompt":true"#));
     assert!(body.contains(r#""canRequestCompact":true"#));
+}
+
+#[tokio::test]
+async fn replay_keeps_buffered_unfinished_output_and_discards_settled_text() {
+    let runtime = runtime(Arc::new(immediate_llm())).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
+    let sid = SessionId::from(session_id.clone());
+    runtime
+        .event_store()
+        .append_event(DurableEvent::new(
+            sid.clone(),
+            Some("old-turn".into()),
+            DurableEventPayload::AssistantMessage {
+                message_id: "settled-message".into(),
+                text: "durable answer".into(),
+                reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
+            },
+        ))
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    for (turn, payload) in [
+        (
+            "old-turn",
+            LiveEventPayload::AssistantMessageDelta {
+                message_id: "settled-message".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("stale duplicate".into()),
+            },
+        ),
+        (
+            "new-turn",
+            LiveEventPayload::AssistantMessageStarted {
+                message_id: "unfinished".into(),
+            },
+        ),
+        (
+            "new-turn",
+            LiveEventPayload::ToolCallPreviewStarted {
+                message_id: "unfinished".into(),
+                call_id: "runtime-preview".into(),
+                tool_name: "read".into(),
+            },
+        ),
+        (
+            "new-turn",
+            LiveEventPayload::ToolCallArgumentsDelta {
+                message_id: "unfinished".into(),
+                call_id: "runtime-preview".into(),
+                delta: "partial arguments".into(),
+            },
+        ),
+        (
+            "new-turn",
+            LiveEventPayload::AssistantMessageDelta {
+                message_id: "unfinished".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("ongoing output".into()),
+            },
+        ),
+    ] {
+        events.send_notification(ClientNotification::Event(
+            LiveEvent::new(sid.clone(), Some(turn.into()), payload).into(),
+        ));
+    }
+    let body = read_sse_until(response.into_body(), "ongoing output").await;
+    assert!(body.contains("durable answer"));
+    assert!(body.contains("runtime-preview"));
+    assert!(body.contains("partial arguments"));
+    assert!(!body.contains("stale duplicate"));
+}
+
+#[tokio::test]
+async fn stream_live_frame_keeps_replay_cursor_until_pending_durable_event_is_sent() {
+    let runtime = runtime(Arc::new(immediate_llm())).await;
+    let (app, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone()).await;
+    let sid = SessionId::from(session_id.clone());
+    let store = runtime.event_store();
+    let accepted = store
+        .append_event(DurableEvent::session(
+            sid.clone(),
+            DurableEventPayload::UserInputAccepted {
+                input: astrcode_core::user_input::UserInput::text_only("pending"),
+            },
+        ))
+        .await
+        .unwrap();
+    let request = |cursor| {
+        Request::builder()
+            .uri(format!("/api/sessions/{session_id}/stream?cursor={cursor}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request(0)).await.unwrap();
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::turn(
+            sid.clone(),
+            "active-turn".into(),
+            LiveEventPayload::AssistantMessageDelta {
+                message_id: "preview".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("live preview".into()),
+            },
+        )
+        .into(),
+    ));
+    let discarded = store
+        .append_event(DurableEvent::session(
+            sid.clone(),
+            DurableEventPayload::UserInputDiscarded {
+                accepted_seq: accepted.seq,
+                reason: "pending input rejected".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    events.send_notification(ClientNotification::Event(discarded.clone().into()));
+
+    let live = read_sse_until(response.into_body(), "live preview").await;
+    assert!(
+        live.contains(&format!(r#""cursor":{{"value":"{}"}}"#, accepted.seq)),
+        "{live}"
+    );
+    assert!(!live.contains("pending input rejected"));
+
+    let ended = store
+        .append_event(DurableEvent::turn(
+            sid,
+            "active-turn".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    let resumed = app.oneshot(request(accepted.seq)).await.unwrap();
+    let replay = read_sse_until(resumed.into_body(), r#""phase":"idle""#).await;
+    let deltas = replay
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|payload| serde_json::from_str::<serde_json::Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(deltas.len(), 3, "{replay}");
+    assert_eq!(
+        deltas[0]["delta"]["block"]["message"],
+        "pending input rejected"
+    );
+    assert_eq!(deltas[1]["delta"]["kind"], "clearTransientBlocks");
+    assert_eq!(deltas[1]["cursor"]["value"], discarded.seq.to_string());
+    assert_eq!(deltas[2]["cursor"]["value"], ended.seq.to_string());
 }
 
 #[tokio::test]
@@ -1610,10 +1872,11 @@ async fn stream_replays_events_after_snapshot_cursor() {
         .append_event(DurableEvent::new(
             SessionId::from(session_id.clone()),
             None,
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: "missed-assistant".into(),
                 text: "completed response after snapshot".into(),
                 reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
         ))
         .await
@@ -1698,8 +1961,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .append_event(DurableEvent::new(
             sid,
             None,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "error".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Failed {
+                    error: "test failure".into(),
+                },
             },
         ))
         .await
@@ -1908,9 +2173,11 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         LiveEvent::new(
             child_sid,
             None,
-            LiveEventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantMessageDelta {
                 message_id: "child-message".into(),
-                delta: "child live text must not leak".into(),
+                delta: astrcode_core::event::AssistantDelta::Text(
+                    "child live text must not leak".into(),
+                ),
             },
         )
         .into(),
@@ -2030,10 +2297,11 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
             .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                DurableEventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessage {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
+                    outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                 },
             ))
             .await
@@ -2084,10 +2352,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             sid.clone(),
             None,
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "read-call-1".to_owned(),
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
-                arguments: serde_json::json!({ "path": read_fixture }),
-                raw_arguments: None,
+                arguments: (serde_json::json!({ "path": read_fixture })).to_string(),
             },
         ))
         .await
@@ -2097,9 +2365,8 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            DurableEventPayload::ToolCallCompleted {
+            DurableEventPayload::ToolCallSettled {
                 call_id: "read-call-1".into(),
-                tool_name: "read".into(),
                 result: ToolResult {
                     content: "pub fn compact_restore_fixture() {}".into(),
                     is_error: false,
@@ -2107,8 +2374,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
                     metadata: BTreeMap::new(),
                     duration_ms: None,
                 },
-                arguments: String::new(),
-                arguments_json: None,
+                outcome: astrcode_core::event::ToolCallOutcome::Completed,
             },
         ))
         .await
@@ -2134,10 +2400,11 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                DurableEventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessage {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
+                    outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                 },
             ))
             .await

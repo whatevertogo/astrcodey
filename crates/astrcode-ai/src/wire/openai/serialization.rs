@@ -163,6 +163,7 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                         name,
                         arguments,
                         raw_arguments,
+                        ..
                     } => Some(serde_json::json!({
                         "id": call_id,
                         "type": "function",
@@ -262,6 +263,7 @@ pub(crate) fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Val
                     name,
                     arguments,
                     raw_arguments,
+                    ..
                 } = content
                 {
                     items.push(serde_json::json!({
@@ -363,6 +365,7 @@ mod tests {
                     text: "checking".into(),
                 },
                 LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_1".into(),
                     name: "read".into(),
                     arguments: serde_json::json!({"path": "a.rs"}),
@@ -388,12 +391,14 @@ mod tests {
             role: LlmRole::Assistant,
             content: vec![
                 LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_bad".into(),
                     name: "interact".into(),
                     arguments: serde_json::Value::String(raw.into()),
                     raw_arguments: Some(raw.into()),
                 },
                 LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_string".into(),
                     name: "echo".into(),
                     arguments: serde_json::Value::String("hello".into()),

@@ -5,4 +5,4 @@
  * 结果是否为错误属结果语义（见块文本/元数据），不体现在生命周期里。
  * `Failed` 表示执行基础设施失败，`Cancelled` 表示调用被取消。
  */
-export type ToolCallStatusDto = "streaming" | "complete" | "failed" | "cancelled";
+export type ToolCallStatusDto = "preparing" | "pending" | "running" | "complete" | "failed" | "cancelled" | "interrupted";

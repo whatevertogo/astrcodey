@@ -6,7 +6,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     event::{
-        CustomEventAudience, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
+        AssistantDelta, CustomEventAudience, DurableEventPayload, Event, EventPayload,
+        LiveEventPayload, Phase,
     },
     types::{MessageId, SessionId},
 };
@@ -312,20 +313,19 @@ pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, O
             DurableEventPayload::ToolCallRequested { tool_name, .. } => {
                 Some((Phase::CallingTool, Some(tool_name.clone())))
             },
-            DurableEventPayload::ToolCallCompleted { .. }
-            | DurableEventPayload::ToolCallFailed { .. }
-            | DurableEventPayload::ToolCallCancelled { .. } => Some((Phase::Thinking, None)),
-            DurableEventPayload::TurnCompleted { .. } => Some((Phase::Idle, None)),
+            DurableEventPayload::ToolCallSettled { .. } => Some((Phase::Thinking, None)),
+            DurableEventPayload::TurnEnded { .. } => Some((Phase::Idle, None)),
             DurableEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
             _ => None,
         },
         EventPayload::Live(payload) => match payload {
             LiveEventPayload::AgentRunStarted => Some((Phase::Thinking, None)),
             LiveEventPayload::AssistantMessageStarted { .. } => Some((Phase::Streaming, None)),
-            LiveEventPayload::ToolCallStarted { tool_name, .. } => {
+            LiveEventPayload::ToolCallPreviewStarted { .. } => Some((Phase::Streaming, None)),
+            LiveEventPayload::ToolExecutionStarted { tool_name, .. } => {
                 Some((Phase::CallingTool, Some(tool_name.clone())))
             },
-            LiveEventPayload::AgentRunCompleted { .. } => Some((Phase::Idle, None)),
+            LiveEventPayload::AgentRunEnded { .. } => Some((Phase::Idle, None)),
             LiveEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
             _ => None,
         },
@@ -344,22 +344,26 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
         EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
             *guard = Some((message_id.clone(), String::new(), String::new()));
         },
-        EventPayload::Live(LiveEventPayload::AssistantMessageReset { message_id }) => {
-            *guard = Some((message_id.clone(), String::new(), String::new()));
-        },
-        EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
+        EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
+            delta: AssistantDelta::Text(delta),
+            ..
+        }) => {
             if let Some((_, text, _)) = guard.as_mut() {
                 text.push_str(delta);
             }
         },
-        EventPayload::Live(LiveEventPayload::ThinkingDelta { delta, .. }) => {
+        EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
+            delta: AssistantDelta::Reasoning(delta),
+            ..
+        }) => {
             if let Some((_, _, reasoning)) = guard.as_mut() {
                 reasoning.push_str(delta);
             }
         },
         EventPayload::Durable(
-            DurableEventPayload::AssistantMessageCompleted { .. }
-            | DurableEventPayload::TurnCompleted { .. },
+            DurableEventPayload::AssistantMessage { .. }
+            | DurableEventPayload::AssistantAttemptSettled { .. }
+            | DurableEventPayload::TurnEnded { .. },
         ) => {
             *guard = None;
         },
@@ -517,9 +521,9 @@ mod tests {
         for _ in 0..=ServerEventBus::EVENT_CHANNEL_CAPACITY {
             bus.publish_event(live(
                 child.clone(),
-                LiveEventPayload::AssistantTextDelta {
+                LiveEventPayload::AssistantMessageDelta {
                     message_id: "message-1".into(),
-                    delta: "token".into(),
+                    delta: astrcode_core::event::AssistantDelta::Text("token".into()),
                 },
             ));
         }
@@ -527,7 +531,8 @@ mod tests {
 
         bus.publish_event(live(
             child.clone(),
-            LiveEventPayload::ToolCallStarted {
+            LiveEventPayload::ToolCallPreviewStarted {
+                message_id: "message".into(),
                 call_id: "tool-1".into(),
                 tool_name: "read".into(),
             },

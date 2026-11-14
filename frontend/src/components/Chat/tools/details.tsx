@@ -1,3 +1,4 @@
+import { toolCallIsTerminal } from '../../../services/types'
 import {
   useElapsedSeconds,
   runningElapsedLabel,
@@ -158,7 +159,7 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const stderrBytes = numberValue(meta, 'stderrBytes')
   const stdin = stringValue(args, 'stdin')
   const invocation = command || (shellId ? `poll ${shellId}` : '')
-  const streaming = block.status === 'streaming'
+  const streaming = !toolCallIsTerminal(block.status)
   const elapsed = useElapsedSeconds(streaming && !block.text)
   const output =
     block.text ||

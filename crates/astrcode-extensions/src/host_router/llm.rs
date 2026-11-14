@@ -128,7 +128,7 @@ impl LlmGroup {
                             },
                             false,
                         ),
-                        LlmEvent::ToolCallCompleted { call_id } => (
+                        LlmEvent::ToolCallArgumentsCompleted { call_id } => (
                             ModelStreamEvent::ToolCallCompleted {
                                 tool_call_id: call_id,
                             },
@@ -248,14 +248,15 @@ fn parse_llm_request(input: Value, model_label: &'static str) -> Result<LlmReque
             "maxOutputTokens must be greater than zero",
         ));
     }
-    Ok(LlmRequest {
-        messages: llm_messages_from_wire(request.messages)
+    let mut mapped = LlmRequest::new(
+        llm_messages_from_wire(request.messages)
             .into_iter()
             .map(std::sync::Arc::new)
             .collect(),
-        tools: vec![],
-        max_output_tokens: request.max_output_tokens,
-    })
+        vec![],
+    );
+    mapped.max_output_tokens = request.max_output_tokens;
+    Ok(mapped)
 }
 
 async fn run_host_llm_chat(

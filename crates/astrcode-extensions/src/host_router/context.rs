@@ -156,7 +156,7 @@ async fn emit_event(
     .map_err(event_emit_error)?;
     Ok(match receipt {
         EventDeliveryReceipt::Accepted => HostEventEmitOutput::Accepted,
-        EventDeliveryReceipt::LivePublished { event_id } => HostEventEmitOutput::LivePublished {
+        EventDeliveryReceipt::LiveAccepted { event_id } => HostEventEmitOutput::LiveAccepted {
             event_id: event_id.into_string(),
         },
         EventDeliveryReceipt::Persisted { event_id, seq } => HostEventEmitOutput::Persisted {

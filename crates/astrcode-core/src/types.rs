@@ -136,6 +136,10 @@ pub fn new_message_id() -> MessageId {
     MessageId::new(uuid::Uuid::new_v4().to_string())
 }
 
+pub fn new_tool_call_id() -> ToolCallId {
+    ToolCallId::new(uuid::Uuid::new_v4().to_string())
+}
+
 /// 从工作目录路径派生可读的稳定项目标识符。
 ///
 /// 目录名不能直接包含 Windows 路径中的 `:` 和 `\` 等字符。路径分隔符会转换为

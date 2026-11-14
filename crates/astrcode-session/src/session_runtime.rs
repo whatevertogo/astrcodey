@@ -70,7 +70,7 @@ impl EventPublisher for SessionScopedEventPublisher {
                 })
             },
             EventPayload::Live(payload) => {
-                // 与 `session.rs` 的 `emit_live_required` 平行：`LivePublished`
+                // 与 `session.rs` 的 `emit_live_required` 平行：`LiveAccepted`
                 // 只表示事件已进入有序 lane，observer 派发是异步的。
                 let event = LiveEvent::new(self.session_id.clone(), self.turn_id.clone(), payload);
                 let event_id = event.id.clone();
@@ -78,7 +78,7 @@ impl EventPublisher for SessionScopedEventPublisher {
                     .publish_live_required(self.store.clone(), event)
                     .await
                     .map_err(map_event_publish_error)?;
-                Ok(EventDeliveryReceipt::LivePublished { event_id })
+                Ok(EventDeliveryReceipt::LiveAccepted { event_id })
             },
         }
     }

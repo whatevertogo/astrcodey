@@ -20,7 +20,62 @@ use super::{PreparedProjectionBatch, ProjectionError, SessionReadModelProjection
 use crate::{AgentSessionStatus, SessionArtifactView, SessionReadModel};
 
 #[test]
-fn fork_replay_accepts_legacy_events_and_validates_usage_anchor() {
+fn a_pending_input_can_only_be_settled_once_in_a_batch_or_on_replay() {
+    let sid = SessionId::new("input-settlement");
+    let initial = started(0, &sid);
+    let model = replay(sid.clone(), std::slice::from_ref(&initial)).unwrap();
+    let accepted = event(
+        1,
+        &sid,
+        DurableEventPayload::UserInputAccepted {
+            input: astrcode_core::user_input::UserInput::text_only("pending"),
+        },
+    );
+    let discarded = event(
+        2,
+        &sid,
+        DurableEventPayload::UserInputDiscarded {
+            accepted_seq: 1,
+            reason: "blocked".into(),
+        },
+    );
+    let consumed = turn_event(
+        3,
+        &sid,
+        &TurnId::from("later-turn"),
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: "changed by hook".into(),
+            attachments: vec![],
+            accepted_seq: Some(1),
+        },
+    );
+    let batch = vec![accepted.event.clone(), discarded.event.clone()];
+    let mut next = model.clone();
+    PreparedProjectionBatch::prepare(&model, batch.clone())
+        .unwrap()
+        .apply_to_model(&mut next);
+    assert!(next.execution.pending_inputs.is_empty());
+    assert!(next.model_context.messages.is_empty());
+
+    let expected = ProjectionError::InputNotPending {
+        seq: 3,
+        accepted_seq: 1,
+    };
+    let mut batch = batch;
+    batch.push(consumed.event.clone());
+    assert_eq!(
+        PreparedProjectionBatch::prepare(&model, batch).err(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        replay(sid, &[initial, accepted, discarded, consumed]).err(),
+        Some(expected)
+    );
+}
+
+#[test]
+fn fork_replay_accepts_missing_usage_and_validates_present_anchor() {
     let sid = SessionId::new("fork-usage");
     let legacy = serde_json::json!({
         "type": "session_forked",
@@ -100,6 +155,124 @@ fn started(seq: u64, session_id: &SessionId) -> StoredEvent {
             },
         }),
     )
+}
+
+#[test]
+fn tool_settlement_validates_outcome_and_preserves_raw_request_on_replay() {
+    use astrcode_core::event::ToolCallOutcome;
+
+    let session_id = SessionId::new("settlement-contract");
+    let raw = r#"{"path":"original",}"#;
+    for (outcome, result, valid) in [
+        (ToolCallOutcome::Completed, ToolResult::success("ok"), true),
+        (
+            ToolCallOutcome::Completed,
+            ToolResult::error("business error"),
+            true,
+        ),
+        (
+            ToolCallOutcome::Failed,
+            ToolResult::error("executor failed"),
+            true,
+        ),
+        (
+            ToolCallOutcome::Cancelled,
+            ToolResult::error("cancelled"),
+            true,
+        ),
+        (
+            ToolCallOutcome::Interrupted,
+            ToolResult::error("process interrupted"),
+            true,
+        ),
+        (
+            ToolCallOutcome::Failed,
+            ToolResult::success("invalid"),
+            false,
+        ),
+        (
+            ToolCallOutcome::Cancelled,
+            ToolResult::success("invalid"),
+            false,
+        ),
+        (
+            ToolCallOutcome::Interrupted,
+            ToolResult::success("invalid"),
+            false,
+        ),
+    ] {
+        let mut projection = SessionReadModelProjection::new(session_id.clone());
+        projection.apply(&started(0, &session_id)).unwrap();
+        projection
+            .apply(&event(
+                1,
+                &session_id,
+                DurableEventPayload::ToolCallRequested {
+                    provider_call_id: "call".to_owned(),
+                    call_id: "call".into(),
+                    tool_name: "read".into(),
+                    arguments: raw.into(),
+                },
+            ))
+            .unwrap();
+        let before = projection.snapshot().unwrap();
+        let applied = projection.apply(&event(
+            2,
+            &session_id,
+            DurableEventPayload::ToolCallSettled {
+                call_id: "call".into(),
+                outcome,
+                result,
+            },
+        ));
+        if valid {
+            applied.unwrap();
+            let model = projection.snapshot().unwrap();
+            assert!(model.execution.pending_tool_calls.is_empty());
+            let astrcode_core::llm::LlmContent::ToolCall {
+                arguments,
+                raw_arguments,
+                ..
+            } = &model.model_context.messages[0].message.content[0]
+            else {
+                panic!("missing request")
+            };
+            assert_eq!(arguments["path"], "original");
+            assert_eq!(raw_arguments.as_deref(), Some(raw));
+            let settlement = event(
+                2,
+                &session_id,
+                DurableEventPayload::ToolCallSettled {
+                    call_id: "call".into(),
+                    outcome: ToolCallOutcome::Completed,
+                    result: ToolResult::success("result"),
+                },
+            )
+            .event;
+            assert!(matches!(
+                PreparedProjectionBatch::prepare(&before, vec![settlement.clone(), settlement]),
+                Err(ProjectionError::UnmatchedToolCallSettlement(3))
+            ));
+            for call_id in ["call", "unknown"] {
+                assert_eq!(
+                    projection.apply(&event(
+                        3,
+                        &session_id,
+                        DurableEventPayload::ToolCallSettled {
+                            call_id: call_id.into(),
+                            outcome: ToolCallOutcome::Completed,
+                            result: ToolResult::success("duplicate or orphan"),
+                        },
+                    )),
+                    Err(ProjectionError::UnmatchedToolCallSettlement(3))
+                );
+                assert_eq!(projection.snapshot().unwrap(), model);
+            }
+        } else {
+            assert_eq!(applied, Err(ProjectionError::InvalidToolCallSettlement(2)));
+            assert_eq!(projection.snapshot().unwrap(), before);
+        }
+    }
 }
 
 #[test]
@@ -298,31 +471,30 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         event(
             2,
             &session_id,
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: new_message_id(),
                 text: "checking".into(),
                 reasoning_content: Some("reasoning".into()),
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
         ),
         event(
             3,
             &session_id,
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "provider-call".to_owned(),
                 call_id: call_id.clone(),
                 tool_name: "read".into(),
-                arguments: serde_json::json!({"path": "README.md"}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({"path": "README.md"})).to_string(),
             },
         ),
         event(
             4,
             &session_id,
-            DurableEventPayload::ToolCallCompleted {
+            DurableEventPayload::ToolCallSettled {
                 call_id,
-                tool_name: "read".into(),
                 result: ToolResult::success("contents"),
-                arguments: r#"{"path":"README.md"}"#.into(),
-                arguments_json: Some(serde_json::json!({"path": "README.md"})),
+                outcome: astrcode_core::event::ToolCallOutcome::Completed,
             },
         ),
         event(
@@ -336,8 +508,10 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         event(
             6,
             &session_id,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
         ),
         event(
@@ -545,12 +719,14 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
         event(
             3,
             &session_id,
-            DurableEventPayload::SystemPromptConfigured {
-                text: "replacement system".into(),
-                fingerprint: "replacement fingerprint".into(),
-                extra_system_prompt: None,
-                source: SystemPromptSource::Inherited,
-            },
+            DurableEventPayload::SystemPromptConfigured(
+                astrcode_core::event::PersistedSystemPrompt {
+                    text: "replacement system".into(),
+                    fingerprint: "replacement fingerprint".into(),
+                    extra_system_prompt: None,
+                    source: SystemPromptSource::Inherited,
+                },
+            ),
         ),
         event(
             4,
@@ -566,10 +742,11 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
         event(
             5,
             &session_id,
-            DurableEventPayload::AgentSessionCompleted {
+            DurableEventPayload::AgentSessionSettled {
                 child_session_id: completed_child_id.clone(),
-                final_session_id: completed_child_id.clone(),
-                summary: "done".into(),
+                outcome: astrcode_core::event::AgentSessionOutcome::Completed {
+                    summary: "done".into(),
+                },
             },
         ),
         event(
@@ -586,10 +763,11 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
         event(
             7,
             &session_id,
-            DurableEventPayload::AgentSessionFailed {
+            DurableEventPayload::AgentSessionSettled {
                 child_session_id: failed_child_id.clone(),
-                final_session_id: failed_child_id.clone(),
-                error: "failed".into(),
+                outcome: astrcode_core::event::AgentSessionOutcome::Failed {
+                    error: "failed".into(),
+                },
             },
         ),
         turn_event(8, &session_id, &turn_id, DurableEventPayload::TurnStarted),
@@ -608,10 +786,11 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             10,
             &session_id,
             &turn_id,
-            DurableEventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessage {
                 message_id: new_message_id(),
                 text: "running tools".into(),
                 reasoning_content: None,
+                outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
             },
         ),
         turn_event(
@@ -619,10 +798,10 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             &session_id,
             &turn_id,
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "provider-call".to_owned(),
                 call_id: first_call_id.clone(),
                 tool_name: "read-b".into(),
-                arguments: serde_json::json!({}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({})).to_string(),
             },
         ),
         turn_event(
@@ -630,10 +809,10 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             &session_id,
             &turn_id,
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "provider-call".to_owned(),
                 call_id: second_call_id.clone(),
                 tool_name: "read-a".into(),
-                arguments: serde_json::json!({}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({})).to_string(),
             },
         ),
         turn_event(
@@ -708,27 +887,26 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             15,
             &session_id,
             &turn_id,
-            DurableEventPayload::ToolCallFailed {
+            DurableEventPayload::ToolCallSettled {
                 call_id: first_call_id,
-                tool_name: "read-b".into(),
-                error: "read failed".into(),
-                metadata: Default::default(),
-                duration_ms: Some(1),
-                arguments: "{}".into(),
-                arguments_json: Some(serde_json::json!({})),
+                outcome: astrcode_core::event::ToolCallOutcome::Failed,
+                result: astrcode_core::tool::ToolResult::error("read failed")
+                    .with_metadata(Default::default())
+                    .with_duration_ms(Some(1)),
             },
         ),
         turn_event(
             16,
             &session_id,
             &turn_id,
-            DurableEventPayload::ToolCallCancelled {
+            DurableEventPayload::ToolCallSettled {
                 call_id: second_call_id,
-                tool_name: "read-a".into(),
-                reason: "interrupted".into(),
-                duration_ms: Some(2),
-                arguments: "{}".into(),
-                arguments_json: Some(serde_json::json!({})),
+                outcome: astrcode_core::event::ToolCallOutcome::Cancelled,
+                result: astrcode_core::tool::ToolResult::error(format!(
+                    "Tool cancelled: {}",
+                    "interrupted".to_owned()
+                ))
+                .with_duration_ms(Some(2)),
             },
         ),
         turn_event(
@@ -741,8 +919,10 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             18,
             &session_id,
             &other_turn_id,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stale".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
         ),
     ];
@@ -808,8 +988,10 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
             19,
             &session_id,
             &turn_id,
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
         ))
         .unwrap();
@@ -1015,10 +1197,11 @@ fn assistant_message(seq: u64, session_id: &SessionId, text: &str) -> StoredEven
     event(
         seq,
         session_id,
-        DurableEventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessage {
             message_id: new_message_id(),
             text: text.into(),
             reasoning_content: None,
+            outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
         },
     )
 }

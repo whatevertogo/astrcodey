@@ -90,11 +90,14 @@ fn render_notification(
 
     match notification {
         ClientNotification::Event(core_event) => match &core_event.payload {
-            EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
+            EventPayload::Live(LiveEventPayload::AssistantMessageDelta {
+                delta: astrcode_core::event::AssistantDelta::Text(delta),
+                ..
+            }) => {
                 write!(out, "{delta}")?;
                 Ok(NotificationAction::Continue)
             },
-            EventPayload::Durable(DurableEventPayload::TurnCompleted { .. }) => {
+            EventPayload::Durable(DurableEventPayload::TurnEnded { .. }) => {
                 writeln!(out)?;
                 Ok(NotificationAction::Finish)
             },
@@ -123,8 +126,7 @@ fn notification_action(notification: &ClientNotification) -> NotificationAction 
     match notification {
         ClientNotification::Event(core_event) => match core_event.payload {
             EventPayload::Durable(
-                DurableEventPayload::TurnCompleted { .. }
-                | DurableEventPayload::ErrorOccurred { .. },
+                DurableEventPayload::TurnEnded { .. } | DurableEventPayload::ErrorOccurred { .. },
             )
             | EventPayload::Live(LiveEventPayload::ErrorOccurred { .. }) => {
                 NotificationAction::Finish
@@ -164,10 +166,12 @@ mod tests {
 
     #[test]
     fn jsonl_output_includes_streaming_delta() {
-        let notification = notification(EventPayload::Live(LiveEventPayload::AssistantTextDelta {
-            message_id: "message-1".into(),
-            delta: "hello".into(),
-        }));
+        let notification = notification(EventPayload::Live(
+            LiveEventPayload::AssistantMessageDelta {
+                message_id: "message-1".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("hello".into()),
+            },
+        ));
         let mut out = Vec::new();
         let mut err = Vec::new();
 
@@ -175,35 +179,38 @@ mod tests {
 
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(line["event"], "event");
-        assert_eq!(line["data"]["payload"]["type"], "assistant_text_delta");
-        assert_eq!(line["data"]["payload"]["delta"], "hello");
+        assert_eq!(line["data"]["payload"]["type"], "assistant_message_delta");
+        assert_eq!(line["data"]["payload"]["delta"]["delta"], "hello");
         assert!(err.is_empty());
         assert_eq!(action, NotificationAction::Continue);
     }
 
     #[test]
     fn jsonl_output_includes_turn_completion_before_finishing() {
-        let notification =
-            notification(EventPayload::Durable(DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
-            }));
+        let notification = notification(EventPayload::Durable(DurableEventPayload::TurnEnded {
+            reason: astrcode_core::event::TurnEndReason::Completed {
+                finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+            },
+        }));
         let mut out = Vec::new();
         let mut err = Vec::new();
 
         let action = render_notification(&notification, true, &mut out, &mut err).unwrap();
 
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(line["data"]["payload"]["type"], "turn_completed");
+        assert_eq!(line["data"]["payload"]["type"], "turn_ended");
         assert!(err.is_empty());
         assert_eq!(action, NotificationAction::Finish);
     }
 
     #[test]
     fn text_output_keeps_plain_transcript_behavior() {
-        let notification = notification(EventPayload::Live(LiveEventPayload::AssistantTextDelta {
-            message_id: "message-1".into(),
-            delta: "hello".into(),
-        }));
+        let notification = notification(EventPayload::Live(
+            LiveEventPayload::AssistantMessageDelta {
+                message_id: "message-1".into(),
+                delta: astrcode_core::event::AssistantDelta::Text("hello".into()),
+            },
+        ));
         let mut out = Vec::new();
         let mut err = Vec::new();
 

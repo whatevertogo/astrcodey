@@ -825,6 +825,7 @@ mod tests {
                     filename: Some("image.png".into()),
                 },
                 HostLlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call-1".into(),
                     name: "read".into(),
                     arguments: json!({ "path": "notes.txt" }),

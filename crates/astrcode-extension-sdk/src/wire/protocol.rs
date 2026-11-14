@@ -340,6 +340,7 @@ pub enum ModelStreamEvent {
         tool_call_id: String,
         delta: String,
     },
+    /// The model has finished streaming this call’s arguments.
     ToolCallCompleted {
         tool_call_id: String,
     },

@@ -34,6 +34,7 @@ use super::super::{
         session_title_from_working_dir,
         snapshot::{conversation_state_to_dto, conversation_to_dto, decorate_timeline_items},
     },
+    session_read_error_response,
 };
 use crate::{
     protocol_mapping::{command_info_to_dto, keybinding_to_dto, status_item_to_dto},
@@ -121,9 +122,11 @@ fn normalized_tool_names(names: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {
-    match state.app.runtime().session_manager().list_summaries().await {
-        Ok(summaries) => Json(SessionListResponseDto {
-            sessions: summaries.into_iter().map(summary_to_dto).collect(),
+    match state.app.runtime().session_manager().list_catalog().await {
+        Ok(catalog) => Json(SessionListResponseDto {
+            sessions: catalog.summaries.into_iter().map(summary_to_dto).collect(),
+            unsupported_log_count: catalog.unsupported_log_count,
+            corrupt_log_count: catalog.corrupt_log_count,
         })
         .into_response(),
         Err(error) => internal_error_response("list_failed", error),
@@ -146,7 +149,7 @@ pub(in crate::http) async fn conversation_snapshot(
             let streaming = state.app.event_bus().streaming_snapshot(&session_id);
             Json(conversation_to_dto(&snapshot, streaming.as_ref())).into_response()
         },
-        Err(error) => not_found_response("session_not_found", error),
+        Err(error) => session_read_error_response(error),
     }
 }
 
@@ -166,7 +169,7 @@ pub(in crate::http) async fn conversation_state(
             let streaming = state.app.event_bus().streaming_snapshot(&session_id);
             Json(conversation_state_to_dto(&snapshot, streaming.as_ref())).into_response()
         },
-        Err(error) => not_found_response("session_not_found", error),
+        Err(error) => session_read_error_response(error),
     }
 }
 
@@ -188,7 +191,7 @@ pub(in crate::http) async fn conversation_items(
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(error) => return not_found_response("session_not_found", error),
+        Err(error) => return session_read_error_response(error),
     };
     let mut page = match state
         .conversation_timeline
@@ -212,9 +215,9 @@ pub(in crate::http) async fn conversation_items(
                 "invalid conversation timeline cursor",
             );
         },
-        Err(ConversationTimelineError::Storage(astrcode_storage::StorageError::NotFound(
-            error,
-        ))) => return not_found_response("session_not_found", error),
+        Err(ConversationTimelineError::Storage(error)) => {
+            return session_read_error_response(error.into());
+        },
         Err(error) => return internal_error_response("conversation_timeline_failed", error),
     };
     decorate_timeline_items(&mut page.items, &snapshot, before.is_none());

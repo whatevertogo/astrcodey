@@ -1,7 +1,7 @@
 //! 父 session 可见的 child-agent 链接与终态投影。
 
 use astrcode_core::{
-    event::{DurableEventPayload, StoredEvent},
+    event::{AgentSessionOutcome, DurableEventPayload, StoredEvent},
     types::{SessionId, ToolCallId},
 };
 use serde::{Deserialize, Serialize};
@@ -49,26 +49,24 @@ pub(crate) fn apply_event(event: &StoredEvent, links: &mut Vec<AgentSessionLinkV
             summary: None,
             error: None,
         }),
-        DurableEventPayload::AgentSessionCompleted {
+        DurableEventPayload::AgentSessionSettled {
             child_session_id,
-            final_session_id,
-            summary,
+            outcome: AgentSessionOutcome::Completed { summary },
         } => {
             if let Some(link) = find_link(links, child_session_id) {
                 link.status = AgentSessionStatus::Completed;
-                link.final_session_id = Some(final_session_id.clone());
+                link.final_session_id = Some(child_session_id.clone());
                 link.summary = Some(summary.clone());
                 link.error = None;
             }
         },
-        DurableEventPayload::AgentSessionFailed {
+        DurableEventPayload::AgentSessionSettled {
             child_session_id,
-            final_session_id,
-            error,
+            outcome: AgentSessionOutcome::Failed { error },
         } => {
             if let Some(link) = find_link(links, child_session_id) {
                 link.status = AgentSessionStatus::Failed;
-                link.final_session_id = Some(final_session_id.clone());
+                link.final_session_id = Some(child_session_id.clone());
                 link.error = Some(error.clone());
                 link.summary = None;
             }

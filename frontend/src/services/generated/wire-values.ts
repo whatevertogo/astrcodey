@@ -17,5 +17,5 @@ export const AGENT_SESSION_STATUSES = ["running","completed","failed"] as const
 export const EXTENSION_CAPABILITIES = ["session_control","session_command","session_inspect","public_http","authenticated_http","public_http_dispatch","main_model","small_model","session_history","emit_custom_events","consume_custom_events","workspace_read","workspace_write","workspace_sensitive_paths","tool_result_read","process_spawn","network_client","provider_request","input_delivery","tool_intercept","turn_continuation_control","live_conversation"] as const
 export const TOOL_ORIGINS = ["bundled","extension"] as const
 export const EXECUTION_MODES = ["sequential","parallel"] as const
-export const BLOCK_STATUSES = ["streaming","complete","error"] as const
-export const TOOL_CALL_STATUSES = ["streaming","complete","failed","cancelled"] as const
+export const BLOCK_STATUSES = ["streaming","complete","error","cancelled"] as const
+export const TOOL_CALL_STATUSES = ["preparing","pending","running","complete","failed","cancelled","interrupted"] as const

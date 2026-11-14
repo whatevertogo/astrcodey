@@ -171,7 +171,7 @@ pub fn scrollback_entry_to_lines(
         ScrollbackEntry::StreamText { role, text } => {
             stream_text_to_lines(role, text, width, theme)
         },
-        ScrollbackEntry::AssistantStreamHeader { .. } => vec![Line::from("")],
+        ScrollbackEntry::AssistantStreamHeader => vec![Line::from("")],
         ScrollbackEntry::AssistantStreamText { text, .. } => {
             stream_text_to_lines(&MessageRole::Assistant, text, width, theme)
         },

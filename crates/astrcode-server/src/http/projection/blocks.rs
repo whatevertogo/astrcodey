@@ -4,19 +4,26 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_context::is_synthetic_context_message;
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, TranscriptRewriteReason},
+    event::{
+        AssistantAttemptOutcome, DurableEventPayload, Event, EventPayload, LiveEventPayload,
+        ToolCallOutcome, TranscriptRewriteReason,
+    },
     llm::{
         LlmContent, LlmMessage, LlmRole, TranscriptMessage, TranscriptMessageOrigin,
         attachments_from_user_message,
     },
+    tool::ToolResult,
     types::ToolCallId,
 };
 use astrcode_protocol::http::{
-    ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
+    ConversationBlockDto, ConversationBlockStatusDto, ConversationDeltaDto, ToolCallStatusDto,
 };
 use astrcode_session_projection::{CompactionView, SequencedLlmMessage, SessionArtifactView};
 
-use super::{args::format_args_inline, non_empty_metadata};
+use super::{
+    args::{format_args_inline, project_tool_arguments},
+    non_empty_metadata,
+};
 
 /// 对话 UI 中 compact 卡片的稳定 block id（多次 compact 时 upsert / 刷新替换）。
 pub(in crate::http) const COMPACT_SUMMARY_BLOCK_ID: &str = "compact-current";
@@ -55,18 +62,18 @@ pub(in crate::http) fn streaming_assistant_block(
     }
 }
 
-/// 构建 live、replay 和 snapshot 共用的流式工具调用 block。
-pub(in crate::http) fn streaming_tool_call_block(
+pub(in crate::http) fn tool_call_block(
     id: String,
     name: &str,
     arguments: Option<&serde_json::Value>,
+    status: ToolCallStatusDto,
 ) -> ConversationBlockDto {
     ConversationBlockDto::ToolCall {
         id,
         name: name.to_owned(),
         arguments: arguments.map_or_else(String::new, format_args_inline),
         text: String::new(),
-        status: ToolCallStatusDto::Streaming,
+        status,
         metadata: None,
         approval: None,
         arguments_json: arguments.cloned().map(Box::new),
@@ -96,67 +103,38 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             text: text.clone(),
             attachments: attachments.iter().cloned().map(Into::into).collect(),
         }),
-        DurableEventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessage {
             message_id,
             text,
             reasoning_content,
+            outcome,
+            ..
         } => Some(ConversationBlockDto::Assistant {
             id: message_id.to_string(),
             text: text.clone(),
             reasoning_content: reasoning_content.clone(),
             storage_seq: event.seq,
-            status: ConversationBlockStatusDto::Complete,
+            status: match outcome {
+                AssistantAttemptOutcome::Completed => ConversationBlockStatusDto::Complete,
+                AssistantAttemptOutcome::Failed { .. } => ConversationBlockStatusDto::Error,
+                AssistantAttemptOutcome::Cancelled => ConversationBlockStatusDto::Cancelled,
+            },
         }),
-        DurableEventPayload::ToolCallCompleted {
+        DurableEventPayload::ToolCallRequested {
             call_id,
             tool_name,
-            result,
             arguments,
-            arguments_json,
             ..
-        } => Some(tool_call_terminal_block(
-            call_id,
+        } => Some(tool_call_block(
+            call_id.to_string(),
             tool_name,
-            arguments,
-            arguments_json.as_ref(),
-            result.content.clone(),
-            ToolCallStatusDto::Complete,
-            tool_terminal_metadata(&result.metadata, result.duration_ms),
+            Some(&project_tool_arguments(arguments)),
+            ToolCallStatusDto::Pending,
         )),
-        DurableEventPayload::ToolCallFailed {
-            call_id,
-            tool_name,
-            error,
-            metadata,
-            duration_ms,
-            arguments,
-            arguments_json,
-        } => Some(tool_call_terminal_block(
-            call_id,
-            tool_name,
-            arguments,
-            arguments_json.as_ref(),
-            error.clone(),
-            ToolCallStatusDto::Failed,
-            tool_terminal_metadata(metadata, *duration_ms),
-        )),
-        DurableEventPayload::ToolCallCancelled {
-            call_id,
-            tool_name,
-            reason,
-            duration_ms,
-            arguments,
-            arguments_json,
-        } => Some(tool_call_terminal_block(
-            call_id,
-            tool_name,
-            arguments,
-            arguments_json.as_ref(),
-            format!("Tool cancelled: {reason}"),
-            ToolCallStatusDto::Cancelled,
-            tool_terminal_metadata(&BTreeMap::new(), *duration_ms),
-        )),
-        DurableEventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
+        DurableEventPayload::ErrorOccurred { message, .. }
+        | DurableEventPayload::UserInputDiscarded {
+            reason: message, ..
+        } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
             message: message.clone(),
         }),
@@ -180,25 +158,25 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
     }
 }
 
-/// 构造工具终态（completed/failed/cancelled）的 ToolCall block。
-fn tool_call_terminal_block(
+pub(in crate::http) fn tool_call_status(outcome: ToolCallOutcome) -> ToolCallStatusDto {
+    match outcome {
+        ToolCallOutcome::Completed => ToolCallStatusDto::Complete,
+        ToolCallOutcome::Failed => ToolCallStatusDto::Failed,
+        ToolCallOutcome::Cancelled => ToolCallStatusDto::Cancelled,
+        ToolCallOutcome::Interrupted => ToolCallStatusDto::Interrupted,
+    }
+}
+
+pub(super) fn tool_settlement_delta(
     call_id: &ToolCallId,
-    tool_name: &str,
-    arguments: &str,
-    arguments_json: Option<&serde_json::Value>,
-    text: String,
-    status: ToolCallStatusDto,
-    metadata: Option<serde_json::Value>,
-) -> ConversationBlockDto {
-    ConversationBlockDto::ToolCall {
-        id: call_id.to_string(),
-        name: tool_name.to_owned(),
-        arguments: arguments.to_owned(),
-        text,
-        status,
-        metadata,
-        approval: None,
-        arguments_json: arguments_json.cloned().map(Box::new),
+    outcome: ToolCallOutcome,
+    result: &ToolResult,
+) -> ConversationDeltaDto {
+    ConversationDeltaDto::ToolCallSettled {
+        call_id: call_id.to_string(),
+        status: tool_call_status(outcome),
+        text: result.content.clone(),
+        metadata: tool_terminal_metadata(&result.metadata, result.duration_ms),
     }
 }
 
@@ -276,7 +254,15 @@ fn sequenced_message_blocks(
                             storage_seq: forkable_after_seq
                                 .is_none_or(|seq| seq_msg.updated_seq > seq)
                                 .then_some(seq_msg.updated_seq),
-                            status: ConversationBlockStatusDto::Complete,
+                            status: match origin {
+                                Some(TranscriptMessageOrigin::AssistantFailed) => {
+                                    ConversationBlockStatusDto::Error
+                                },
+                                Some(TranscriptMessageOrigin::AssistantCancelled) => {
+                                    ConversationBlockStatusDto::Cancelled
+                                },
+                                _ => ConversationBlockStatusDto::Complete,
+                            },
                         },
                     });
                 }
@@ -285,7 +271,7 @@ fn sequenced_message_blocks(
                         call_id,
                         name,
                         arguments,
-                        raw_arguments,
+                        ..
                     } = content
                     else {
                         continue;
@@ -293,10 +279,11 @@ fn sequenced_message_blocks(
                     let block_index = blocks.len();
                     blocks.push(SequencedConversationBlock {
                         seq: seq_msg.updated_seq,
-                        block: streaming_tool_call_block(
+                        block: tool_call_block(
                             call_id.clone(),
                             name,
-                            raw_arguments.is_none().then_some(arguments),
+                            Some(arguments),
+                            ToolCallStatusDto::Pending,
                         ),
                     });
                     tool_block_indices.insert(call_id.clone(), block_index);
@@ -410,12 +397,13 @@ fn tool_status_from_message(origin: Option<TranscriptMessageOrigin>) -> ToolCall
     match origin {
         Some(TranscriptMessageOrigin::ToolCallFailed) => ToolCallStatusDto::Failed,
         Some(TranscriptMessageOrigin::ToolCallCancelled) => ToolCallStatusDto::Cancelled,
+        Some(TranscriptMessageOrigin::ToolCallInterrupted) => ToolCallStatusDto::Interrupted,
         // `ToolResult.is_error` describes result semantics, not tool-call lifecycle.
         _ => ToolCallStatusDto::Complete,
     }
 }
 
-fn tool_terminal_metadata(
+pub(in crate::http) fn tool_terminal_metadata(
     metadata: &BTreeMap<String, serde_json::Value>,
     duration_ms: Option<u64>,
 ) -> Option<serde_json::Value> {
@@ -516,6 +504,7 @@ mod tests {
                 content: cases
                     .iter()
                     .map(|(call_id, ..)| LlmContent::ToolCall {
+                        provider_call_id: None,
                         call_id: (*call_id).into(),
                         name: "probe".into(),
                         arguments: serde_json::json!({}),
@@ -558,6 +547,25 @@ mod tests {
                 .map(|(_, _, _, status)| status)
                 .collect::<Vec<_>>()
         );
+        for (origin, expected_status) in [
+            (
+                TranscriptMessageOrigin::AssistantFailed,
+                ConversationBlockStatusDto::Error,
+            ),
+            (
+                TranscriptMessageOrigin::AssistantCancelled,
+                ConversationBlockStatusDto::Cancelled,
+            ),
+        ] {
+            let messages = [SequencedLlmMessage {
+                message: Arc::new(LlmMessage::assistant("partial answer")),
+                updated_seq: 1,
+                origin: Some(origin),
+            }];
+            assert!(
+                matches!(transcript_blocks(&messages, &[], None).as_slice(), [ConversationBlockDto::Assistant { status, text, .. }] if *status == expected_status && text == "partial answer")
+            );
+        }
     }
 
     #[test]

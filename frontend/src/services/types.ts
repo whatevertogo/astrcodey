@@ -75,11 +75,16 @@ export type ApprovalDecision = ApprovalDecisionDto
 export type ToolApproval = ToolApprovalDto
 
 export function toolCallHasError(status: ToolCallStatus): boolean {
-  return status === 'failed'
+  return status === 'failed' || status === 'interrupted'
 }
 
 export function toolCallIsTerminal(status: ToolCallStatus): boolean {
-  return status !== 'streaming'
+  return (
+    status === 'complete' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  )
 }
 
 export type {
@@ -250,6 +255,16 @@ export interface PendingAskUserQuestionsResponse {
 }
 
 export type ConversationDelta =
+  | { kind: 'toolArgumentsDelta'; callId: string; delta: string }
+  | { kind: 'toolExecutionStarted'; callId: string }
+  | { kind: 'toolCallPreviewDiscarded'; callId: string }
+  | {
+      kind: 'toolCallSettled'
+      callId: string
+      status: ToolCallStatus
+      text: string
+      metadata?: Record<string, unknown>
+    }
   | { kind: 'appendBlock'; block: ConversationBlock }
   | {
       kind: 'appendTransientBlock'
@@ -258,7 +273,6 @@ export type ConversationDelta =
     }
   | { kind: 'clearTransientBlocks'; turnId: string }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
-  | { kind: 'resetBlock'; blockId: string }
   | { kind: 'finalizeBlock'; block: ConversationBlock }
   | { kind: 'updateControlState'; control: ConversationControlState }
   | { kind: 'rehydrateRequired' }

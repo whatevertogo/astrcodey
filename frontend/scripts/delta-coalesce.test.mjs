@@ -53,54 +53,6 @@ assert.deepEqual(
   'orphan patches must not manufacture blocks without a start or durable request'
 )
 
-const retriedAssistant = reduceConversationDeltas(
-  {
-    blocks: [
-      {
-        kind: 'assistant',
-        id: 'assistant-retry',
-        text: 'stale',
-        reasoningContent: 'stale reasoning',
-        status: 'streaming',
-      },
-    ],
-    transientBlockOwners: { 'assistant-retry': 'turn-retry' },
-    control: null,
-    cursor: '1',
-    compactSubmitting: false,
-    agentSessions: [],
-    statusItems: {},
-    statusItemRevisions: {},
-    pendingAskUserQuestions: {},
-    resolvedAskUserCallIds: {},
-    pendingAskUserRefreshInFlight: false,
-    askUserEventRevision: 0,
-    transientHint: null,
-  },
-  [
-    { kind: 'resetBlock', blockId: 'assistant-retry' },
-    {
-      kind: 'thinkingDelta',
-      blockId: 'assistant-retry',
-      delta: 'fresh reasoning',
-    },
-    {
-      kind: 'patchBlock',
-      blockId: 'assistant-retry',
-      textDelta: 'fresh',
-    },
-  ],
-  '2'
-)
-
-assert.deepEqual(retriedAssistant.blocks?.[0], {
-  kind: 'assistant',
-  id: 'assistant-retry',
-  text: 'fresh',
-  reasoningContent: 'fresh reasoning',
-  status: 'streaming',
-})
-
 const patchedCreatedTool = applyCoalescedDeltas(
   [],
   [
@@ -160,7 +112,7 @@ const transientLifecycle = reduceConversationDeltas(
         name: 'read',
         arguments: '',
         text: '',
-        status: 'streaming',
+        status: 'preparing',
       },
     },
     {
@@ -171,7 +123,7 @@ const transientLifecycle = reduceConversationDeltas(
         name: 'read',
         arguments: 'README.md',
         text: '',
-        status: 'streaming',
+        status: 'pending',
       },
     },
     { kind: 'clearTransientBlocks', turnId: 'turn-1' },
@@ -187,7 +139,7 @@ assert.deepEqual(transientLifecycle.blocks, [
     name: 'read',
     arguments: 'README.md',
     text: '',
-    status: 'streaming',
+    status: 'pending',
   },
 ])
 
@@ -307,7 +259,7 @@ const approvalState = {
       name: 'shell',
       arguments: 'git push',
       text: '',
-      status: 'streaming',
+      status: 'pending',
     },
   ],
 }
@@ -676,3 +628,90 @@ assert.deepEqual(
 )
 
 console.log('delta coalescing tests passed')
+
+// Runtime call identities separate repeated provider IDs; late preview frames cannot undo settlement.
+const priorTool = {
+  kind: 'toolCall',
+  id: 'runtime-old',
+  name: 'shell',
+  arguments: 'echo old',
+  text: 'old result',
+  status: 'complete',
+}
+let lifecycle = { ...frameState, blocks: [priorTool], transientBlockOwners: {} }
+const applyLifecycle = (deltas) => {
+  lifecycle = { ...lifecycle, ...reduceConversationDeltas(lifecycle, deltas) }
+}
+applyLifecycle([
+  {
+    kind: 'appendTransientBlock',
+    turnId: 'new-turn',
+    block: {
+      kind: 'toolCall',
+      id: 'runtime-new',
+      name: 'shell',
+      arguments: '',
+      text: '',
+      status: 'preparing',
+    },
+  },
+])
+applyLifecycle([
+  { kind: 'toolArgumentsDelta', callId: 'runtime-new', delta: '{"command":' },
+  { kind: 'toolArgumentsDelta', callId: 'runtime-new', delta: '"echo new"}' },
+])
+assert.equal(lifecycle.blocks[1].arguments, '{"command":"echo new"}')
+assert.equal(lifecycle.blocks[1].status, 'preparing')
+applyLifecycle([
+  { kind: 'appendBlock', block: { ...lifecycle.blocks[1], status: 'pending' } },
+])
+assert.equal(lifecycle.blocks[1].status, 'pending')
+applyLifecycle([{ kind: 'toolExecutionStarted', callId: 'runtime-new' }])
+assert.equal(lifecycle.blocks[1].status, 'running')
+applyLifecycle([
+  {
+    kind: 'toolCallSettled',
+    callId: 'runtime-new',
+    status: 'interrupted',
+    text: 'process stopped',
+  },
+])
+applyLifecycle([
+  { kind: 'toolArgumentsDelta', callId: 'runtime-new', delta: 'stale' },
+  { kind: 'toolExecutionStarted', callId: 'runtime-new' },
+  {
+    kind: 'toolOutput',
+    callId: 'runtime-new',
+    stream: 'stdout',
+    delta: 'stale output',
+  },
+  {
+    kind: 'appendTransientBlock',
+    turnId: 'new-turn',
+    block: { ...lifecycle.blocks[1], status: 'preparing' },
+  },
+  { kind: 'toolCallPreviewDiscarded', callId: 'runtime-new' },
+])
+assert.equal(lifecycle.blocks[1].status, 'interrupted')
+assert.equal(lifecycle.blocks[1].text, 'process stopped')
+assert.deepEqual(lifecycle.blocks[0], priorTool)
+applyLifecycle([
+  {
+    kind: 'appendTransientBlock',
+    turnId: 'new-turn',
+    block: {
+      kind: 'toolCall',
+      id: 'runtime-cancelled',
+      name: 'shell',
+      arguments: '',
+      text: '',
+      status: 'preparing',
+    },
+  },
+])
+applyLifecycle([
+  { kind: 'toolCallPreviewDiscarded', callId: 'runtime-cancelled' },
+  { kind: 'clearTransientBlocks', turnId: 'new-turn' },
+])
+assert.equal(lifecycle.blocks.length, 2)
+assert.deepEqual(lifecycle.blocks[0], priorTool)

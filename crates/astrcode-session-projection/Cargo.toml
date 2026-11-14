@@ -6,11 +6,11 @@ license.workspace = true
 description = "Pure session read-model projection derived from AstrCode events"
 
 [dependencies]
+serde_json = { workspace = true }
 astrcode-core = { path = "../astrcode-core" }
 chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,4 +1,8 @@
-import type { ConversationBlock, ToolCallStatus } from '../../../services/types'
+import {
+  toolCallIsTerminal,
+  type ConversationBlock,
+  type ToolCallStatus,
+} from '../../../services/types'
 
 export type ToolCall = Extract<ConversationBlock, { kind: 'toolCall' }>
 export type JsonRecord = Record<string, unknown>
@@ -11,8 +15,14 @@ export function statusLabel(status: ToolCallStatus): string {
       return '执行失败'
     case 'cancelled':
       return '已取消'
-    case 'streaming':
+    case 'preparing':
+      return '准备中'
+    case 'pending':
+      return '等待结果'
+    case 'running':
       return '运行中'
+    case 'interrupted':
+      return '执行中断'
   }
 }
 
@@ -137,7 +147,7 @@ export function toolMeta(block: ToolCall): JsonRecord {
 }
 
 export function defaultToolResultText(block: ToolCall): string {
-  return block.text || (block.status === 'streaming' ? '等待输出...' : '')
+  return block.text || (!toolCallIsTerminal(block.status) ? '等待输出...' : '')
 }
 
 export function pathFor(block: ToolCall): string {

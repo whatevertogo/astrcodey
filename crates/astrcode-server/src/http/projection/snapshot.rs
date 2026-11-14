@@ -134,10 +134,10 @@ fn finalize_orphaned_tool_blocks(blocks: &mut [ConversationBlockDto]) {
         let ConversationBlockDto::ToolCall { text, status, .. } = block else {
             continue;
         };
-        if *status != ToolCallStatusDto::Streaming {
+        if *status != ToolCallStatusDto::Pending {
             continue;
         }
-        *status = ToolCallStatusDto::Failed;
+        *status = ToolCallStatusDto::Interrupted;
         if text.is_empty() {
             *text = "tool execution interrupted before completion".into();
         }
@@ -160,11 +160,12 @@ fn apply_pending_tool_approvals(
         let Some(approval) = approvals.get(id.as_str()) else {
             continue;
         };
-        *block_approval = Some(ToolApprovalDto {
+        *block_approval = Some(Box::new(ToolApprovalDto {
             call_id: id.clone(),
+            effective_arguments: approval.effective_arguments.clone(),
             prompt: approval.prompt.clone(),
             rule_key: approval.rule_key.clone(),
-        });
+        }));
     }
 }
 
@@ -228,6 +229,7 @@ mod tests {
                 message: std::sync::Arc::new(LlmMessage {
                     role: LlmRole::Assistant,
                     content: vec![LlmContent::ToolCall {
+                        provider_call_id: None,
                         call_id: call_id.into(),
                         name: name.into(),
                         arguments,
@@ -257,7 +259,7 @@ mod tests {
         assert!(matches!(
             dto.blocks.as_slice(),
             [ConversationBlockDto::ToolCall { status, text, .. }]
-                if *status == ToolCallStatusDto::Failed
+                if *status == ToolCallStatusDto::Interrupted
                     && text == "tool execution interrupted before completion"
         ));
     }
@@ -357,6 +359,7 @@ mod tests {
         session.execution.pending_tool_approvals.insert(
             "tool-approval".into(),
             astrcode_session_projection::PendingToolApprovalView {
+                effective_arguments: serde_json::json!({"command": "git push --dry-run"}),
                 prompt: "Run shell command?".into(),
                 rule_key: Some("shell:write".into()),
             },
@@ -369,6 +372,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(approval.call_id, "tool-approval");
+                assert_eq!(
+                    approval.effective_arguments,
+                    serde_json::json!({"command": "git push --dry-run"})
+                );
                 assert_eq!(approval.prompt, "Run shell command?");
                 assert_eq!(approval.rule_key.as_deref(), Some("shell:write"));
             },

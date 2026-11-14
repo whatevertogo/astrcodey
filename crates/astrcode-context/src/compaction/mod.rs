@@ -504,6 +504,7 @@ mod tests {
         LlmMessage {
             role: LlmRole::Assistant,
             content: vec![LlmContent::ToolCall {
+                provider_call_id: None,
                 call_id: call_id.into(),
                 name: name.into(),
                 arguments,
@@ -819,6 +820,7 @@ scratchpad that should not survive
             LlmMessage {
                 role: LlmRole::Assistant,
                 content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call-read".into(),
                     name: "read".into(),
                     arguments: serde_json::json!({ "path": "src/lib.rs" }),

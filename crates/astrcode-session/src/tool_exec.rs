@@ -263,11 +263,28 @@ async fn execute_tool_call_blocking(
     }
 
     let outcome = tokio::select! {
+        biased;
         _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(
             "tool execution cancelled",
             Some(started_at.elapsed().as_millis() as u64),
         ),
-        result = tool_registry.execute(&tool_name, tool_input, &tool_ctx) => {
+        result = async {
+            if let Some(sender) = &turn.shared.turn_event_sender {
+                sender
+                    .event_tx()
+                    .send(astrcode_core::event::EventPayload::Live(
+                        astrcode_core::event::LiveEventPayload::ToolExecutionStarted {
+                            call_id: call_id.clone().into(),
+                            tool_name: tool_name.clone(),
+                        },
+                    ))
+                    .inspect_err(
+                        |error| tracing::warn!(%error, %call_id, "could not publish tool execution start"),
+                    )
+                    .ok();
+            }
+            tool_registry.execute(&tool_name, tool_input, &tool_ctx).await
+        } => {
             match result {
                 Ok(mut result) => {
                     result.result_mut().duration_ms =

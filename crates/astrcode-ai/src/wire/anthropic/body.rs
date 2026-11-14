@@ -241,6 +241,7 @@ impl AnthropicMapper {
                     name,
                     arguments,
                     raw_arguments,
+                    ..
                 } => Some(Self::tool_call(
                     call_id,
                     name,
@@ -273,10 +274,14 @@ impl AnthropicMapper {
         arguments: &serde_json::Value,
         raw_arguments: Option<&str>,
     ) -> serde_json::Value {
-        // Anthropic requires `input` to be JSON. Keep malformed provider text
-        // in the durable model, but replay a protocol-valid placeholder next
-        // to the paired error result.
-        let input = raw_arguments.map_or_else(|| arguments.clone(), |_| serde_json::json!({}));
+        let empty_input = serde_json::json!({});
+        // Unparseable arguments are stored as a string equal to the original
+        // text. Replay an empty object alongside their error result.
+        let input = if raw_arguments.is_some_and(|raw| arguments.as_str() == Some(raw)) {
+            &empty_input
+        } else {
+            arguments
+        };
         serde_json::json!({
             "type": "tool_use",
             "id": call_id,
@@ -374,7 +379,7 @@ fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole, thinking::ThinkingConfig},
-        tool::{ToolDefinition, ToolOrigin},
+        tool::{ToolDefinition, ToolOrigin, parse_tool_arguments},
     };
 
     use super::*;
@@ -390,32 +395,42 @@ mod tests {
 
     #[test]
     fn assistant_message_converts_tool_call() {
-        let msg = LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![
-                LlmContent::ToolCall {
+        for (raw, expected) in [
+            (
+                Some(r#"{ "path": "foo.rs" }"#),
+                serde_json::json!({"path": "foo.rs"}),
+            ),
+            (
+                Some(r#"{"path":"repaired.rs",}"#),
+                serde_json::json!({"path": "repaired.rs"}),
+            ),
+            (Some(r#""foo.rs""#), serde_json::json!("foo.rs")),
+            (Some(r#"{"path":"#), serde_json::json!({})),
+            (None, serde_json::json!({"path": "synthetic.rs"})),
+        ] {
+            let arguments = match raw {
+                Some(raw) => parse_tool_arguments(raw).unwrap_or_else(|_| serde_json::json!(raw)),
+                None => expected.clone(),
+            };
+            let msg = LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    provider_call_id: None,
                     call_id: "call_1".into(),
                     name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                    raw_arguments: None,
-                },
-                LlmContent::ToolCall {
-                    call_id: "call_bad".into(),
-                    name: "read".into(),
-                    arguments: serde_json::Value::String(r#"{"path":"#.into()),
-                    raw_arguments: Some(r#"{"path":"#.into()),
-                },
-            ],
-            name: None,
-            reasoning_content: None,
-        };
-        let json = AnthropicMapper::map_assistant(&msg);
-        let block = &json["content"][0];
-        assert_eq!(block["type"], "tool_use");
-        assert_eq!(block["id"], "call_1");
-        assert_eq!(block["name"], "read");
-        assert_eq!(block["input"]["path"], "foo.rs");
-        assert_eq!(json["content"][1]["input"], serde_json::json!({}));
+                    arguments,
+                    raw_arguments: raw.map(str::to_owned),
+                }],
+                name: None,
+                reasoning_content: None,
+            };
+            let json = AnthropicMapper::map_assistant(&msg);
+            let block = &json["content"][0];
+            assert_eq!(block["type"], "tool_use");
+            assert_eq!(block["id"], "call_1");
+            assert_eq!(block["name"], "read");
+            assert_eq!(block["input"], expected, "raw arguments: {raw:?}");
+        }
     }
 
     #[test]

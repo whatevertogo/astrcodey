@@ -6,7 +6,7 @@ import {
 } from '../../../services/api'
 import type { ToolApproval } from '../../../services/types'
 import { useAppStore } from '../../../store/conversation'
-import { stringValue, type JsonRecord } from './helpers'
+import { asRecord, stringValue, type JsonRecord } from './helpers'
 
 function commandFromPrompt(prompt?: string): string | undefined {
   if (!prompt) return undefined
@@ -45,12 +45,10 @@ export function ToolApprovalCard({
   sessionId,
   toolName,
   approval,
-  args = {},
 }: {
   sessionId: string
   toolName: string
   approval: ToolApproval
-  args?: JsonRecord
 }) {
   const refreshConversationSnapshot = useAppStore(
     (state) => state.refreshConversationSnapshot
@@ -58,6 +56,7 @@ export function ToolApprovalCard({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const args = asRecord(approval.effectiveArguments)
   const command = resolveCommand(args, approval.prompt)
   const intent = resolveIntent(args)
   const headline = approvalHeadline(toolName, approval.prompt)

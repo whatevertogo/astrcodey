@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, LiveEventPayload, Phase},
+    event::{DurableEventPayload, LiveEventPayload, Phase, ToolCallOutcome, TurnEndReason},
     llm::{LlmRole, TranscriptMessageOrigin},
     message_attachment::MessageAttachment,
     tool::SessionToolSelection,
@@ -23,10 +23,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    payload::{
-        JSON_RPC_INTERNAL_ERROR, TURN_FINISH_ABORTED, TURN_FINISH_ERROR,
-        agent_run_completed_payload, turn_completed_payload,
-    },
+    payload::{JSON_RPC_INTERNAL_ERROR, agent_run_completed_payload, turn_ended_payload},
     runtime_stability::RuntimeStabilityBudget,
     session::Session,
     session_error::SessionError,
@@ -220,7 +217,7 @@ impl Session {
                     session_id = %session.id(),
                     turn_id = %turn_id,
                     %error,
-                    finish_reason = %result.finalization.finish_reason,
+                    reason = ?result.finalization.reason,
                     "failed to persist turn finalization; registry must retain ownership for retry"
                 );
             },
@@ -279,9 +276,25 @@ impl Session {
             &cancellation_token,
             &runtime_generation,
         );
-        let text = self
+        let text = match self
             .apply_user_message_envelope(&runtime_view, text, &attachments, envelope_call)
-            .await?;
+            .await
+        {
+            Err(TurnError::InputBlocked { reason }) => {
+                if let Some(accepted_seq) = accepted_seq {
+                    self.emit_durable(
+                        None,
+                        DurableEventPayload::UserInputDiscarded {
+                            accepted_seq,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                return Err(TurnError::InputBlocked { reason });
+            },
+            result => result?,
+        };
         self.emit_turn_start_events(&text, &attachments, &turn_id, accepted_seq)
             .await?;
         let agent = match self
@@ -351,7 +364,12 @@ impl Session {
             );
         }
         if let Err(persist_error) = self
-            .emit_durable(Some(turn_id), turn_completed_payload(TURN_FINISH_ERROR))
+            .emit_durable(
+                Some(turn_id),
+                turn_ended_payload(TurnEndReason::Failed {
+                    error: error.to_string(),
+                }),
+            )
             .await
         {
             tracing::error!(
@@ -363,7 +381,9 @@ impl Session {
         }
         self.emit_live(
             Some(turn_id),
-            agent_run_completed_payload(TURN_FINISH_ERROR),
+            agent_run_completed_payload(&TurnEndReason::Failed {
+                error: error.to_string(),
+            }),
         );
     }
 }
@@ -391,7 +411,14 @@ pub async fn finalize_aborted_turn(
     if !has_aborted_context {
         emit_turn_aborted_context(session, Some(turn_id)).await?;
     }
-    emit_turn_completed(session, turn_id, TURN_FINISH_ABORTED).await
+    emit_turn_ended(
+        session,
+        turn_id,
+        &TurnEndReason::Cancelled {
+            reason: "turn aborted".into(),
+        },
+    )
+    .await
 }
 
 pub async fn finalize_turn(
@@ -399,7 +426,7 @@ pub async fn finalize_turn(
     turn_id: &TurnId,
     finalization: &TurnFinalization,
 ) -> Result<(), SessionError> {
-    if finalization.aborted {
+    if matches!(finalization.reason, TurnEndReason::Cancelled { .. }) {
         return finalize_aborted_turn(session, turn_id).await;
     }
 
@@ -421,14 +448,14 @@ pub async fn finalize_turn(
             )
             .await?;
     }
-    emit_turn_completed(session, turn_id, &finalization.finish_reason).await
+    emit_turn_ended(session, turn_id, &finalization.reason).await
 }
 
 /// 持久化 turn 完成事件并发送对应 live 事件。
-async fn emit_turn_completed(
+async fn emit_turn_ended(
     session: &Session,
     turn_id: &TurnId,
-    finish_reason: &str,
+    reason: &TurnEndReason,
 ) -> Result<(), SessionError> {
     let unsettled = session
         .read_model()
@@ -444,9 +471,9 @@ async fn emit_turn_completed(
         });
     }
     session
-        .emit_durable(Some(turn_id), turn_completed_payload(finish_reason))
+        .emit_durable(Some(turn_id), turn_ended_payload(reason.clone()))
         .await?;
-    session.emit_live(Some(turn_id), agent_run_completed_payload(finish_reason));
+    session.emit_live(Some(turn_id), agent_run_completed_payload(reason));
     Ok(())
 }
 
@@ -464,24 +491,22 @@ pub async fn emit_interrupted_tool_results(
 ) -> Result<usize, SessionError> {
     let mut emitted = 0;
     for pending in state.tool_calls_needing_interruption() {
-        let payload = match outcome {
-            InterruptedToolOutcome::Failed => DurableEventPayload::ToolCallFailed {
-                call_id: pending.call_id.into(),
-                tool_name: pending.tool_name,
-                error: "tool execution interrupted before completion".into(),
-                metadata: Default::default(),
-                duration_ms: None,
-                arguments: String::new(),
-                arguments_json: None,
-            },
-            InterruptedToolOutcome::Cancelled => DurableEventPayload::ToolCallCancelled {
-                call_id: pending.call_id.into(),
-                tool_name: pending.tool_name,
-                reason: "turn aborted".into(),
-                duration_ms: None,
-                arguments: String::new(),
-                arguments_json: None,
-            },
+        let (outcome, result) = match outcome {
+            InterruptedToolOutcome::Failed => (
+                ToolCallOutcome::Interrupted,
+                astrcode_core::tool::ToolResult::error(
+                    "tool execution interrupted before completion",
+                ),
+            ),
+            InterruptedToolOutcome::Cancelled => (
+                ToolCallOutcome::Cancelled,
+                astrcode_core::tool::ToolResult::error("Tool cancelled: turn aborted"),
+            ),
+        };
+        let payload = DurableEventPayload::ToolCallSettled {
+            call_id: pending.call_id.into(),
+            outcome,
+            result,
         };
         session.emit_durable(turn_id, payload).await?;
         emitted += 1;

@@ -26,7 +26,7 @@ pub struct HostEventEmitRequest {
 )]
 pub enum HostEventEmitOutput {
     Accepted,
-    LivePublished { event_id: String },
+    LiveAccepted { event_id: String },
     Persisted { event_id: String, seq: u64 },
 }
 

@@ -74,7 +74,7 @@ const transientTool = decodeConversationDelta({
     name: 'read',
     arguments: '',
     text: '',
-    status: 'streaming',
+    status: 'preparing',
   },
 })
 assert.equal(transientTool.kind, 'appendTransientBlock')
@@ -155,6 +155,7 @@ const approvalRequested = decodeConversationStreamEnvelope({
     kind: 'toolApprovalRequested',
     approval: {
       callId: 'tool-approval',
+      effectiveArguments: { command: 'git status' },
       prompt: 'Run shell command?',
       ruleKey: 'shell:write',
     },
@@ -269,9 +270,10 @@ const toolWithApproval = decodeConversationBlock({
   name: 'shell',
   arguments: 'git push',
   text: '',
-  status: 'streaming',
+  status: 'pending',
   approval: {
     callId: 'tool-approval',
+    effectiveArguments: { command: 'git status' },
     prompt: 'Run shell command?',
     ruleKey: 'shell:write',
   },
@@ -428,8 +430,3 @@ for (const [description, decode] of [
 ]) {
   assert.throws(decode, ProtocolDecodeError, description)
 }
-
-assert.deepEqual(
-  decodeConversationDelta({ kind: 'resetBlock', blockId: 'assistant-1' }),
-  { kind: 'resetBlock', blockId: 'assistant-1' }
-)

@@ -284,14 +284,12 @@ fn record_compaction_event(
 ) {
     match payload {
         EventPayload::Live(LiveEventPayload::CompactionStarted) => *started += 1,
-        EventPayload::Live(LiveEventPayload::CompactionCompleted { .. }) => {
-            terminals.push("completed");
-        },
-        EventPayload::Live(LiveEventPayload::CompactionSkipped { .. }) => {
-            terminals.push("skipped");
-        },
-        EventPayload::Live(LiveEventPayload::CompactionFailed { .. }) => {
-            terminals.push("failed");
+        EventPayload::Live(LiveEventPayload::CompactionEnded { outcome }) => {
+            terminals.push(match outcome {
+                astrcode_core::event::CompactionOutcome::Completed { .. } => "completed",
+                astrcode_core::event::CompactionOutcome::Skipped { .. } => "skipped",
+                astrcode_core::event::CompactionOutcome::Failed { .. } => "failed",
+            })
         },
         _ => {},
     }
@@ -348,10 +346,11 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
             session
                 .emit_durable(
                     None,
-                    DurableEventPayload::AssistantMessageCompleted {
+                    DurableEventPayload::AssistantMessage {
                         message_id: new_message_id(),
                         text: format!("old answer {index}"),
                         reasoning_content: None,
+                        outcome: astrcode_core::event::AssistantAttemptOutcome::Completed,
                     },
                 )
                 .await

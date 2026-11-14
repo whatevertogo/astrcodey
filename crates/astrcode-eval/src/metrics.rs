@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_core::event::{DurableEventPayload, StoredEvent};
+use astrcode_core::event::{DurableEventPayload, StoredEvent, ToolCallOutcome, TurnEndReason};
 use serde::{Deserialize, Serialize};
 
 /// 从 session event log 自动提取的统计指标。
@@ -28,6 +28,7 @@ impl Metrics {
         let mut metrics = Self::default();
         let mut first_turn_ts = None;
         let mut last_turn_ts = None;
+        let mut calls = BTreeMap::new();
 
         for event in events {
             match &event.payload {
@@ -37,19 +38,32 @@ impl Metrics {
                         first_turn_ts = Some(event.timestamp);
                     }
                 },
-                DurableEventPayload::TurnCompleted { finish_reason } => {
+                DurableEventPayload::TurnEnded { reason } => {
                     last_turn_ts = Some(event.timestamp);
-                    metrics.finish_reason = finish_reason.clone();
+                    metrics.finish_reason = match reason {
+                        TurnEndReason::Completed { finish_reason } => finish_reason.to_string(),
+                        TurnEndReason::Failed { .. } => "error".into(),
+                        TurnEndReason::Cancelled { .. } => "aborted".into(),
+                        TurnEndReason::Interrupted { .. } => "interrupted".into(),
+                    };
                 },
-                DurableEventPayload::ToolCallCompleted { tool_name, .. } => {
-                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
+                DurableEventPayload::ToolCallRequested {
+                    call_id, tool_name, ..
+                } => {
+                    calls.insert(call_id.clone(), tool_name.clone());
                 },
-                DurableEventPayload::ToolCallFailed { tool_name, .. } => {
-                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
-                    metrics.errors += 1;
-                },
-                DurableEventPayload::ToolCallCancelled { tool_name, .. } => {
-                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
+                DurableEventPayload::ToolCallSettled {
+                    call_id, outcome, ..
+                } => {
+                    if let Some(tool_name) = calls.remove(call_id) {
+                        *metrics.tool_calls.entry(tool_name).or_default() += 1;
+                    }
+                    if matches!(
+                        outcome,
+                        ToolCallOutcome::Failed | ToolCallOutcome::Interrupted
+                    ) {
+                        metrics.errors += 1;
+                    }
                 },
                 DurableEventPayload::ErrorOccurred { .. } => {
                     metrics.errors += 1;

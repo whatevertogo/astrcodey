@@ -412,7 +412,7 @@ impl StandardAccumulator {
                     );
                 }
                 partial.completed = true;
-                send_event(tx, LlmEvent::ToolCallCompleted { call_id });
+                send_event(tx, LlmEvent::ToolCallArgumentsCompleted { call_id });
             },
             "response.completed" if !self.done.sent() => {
                 self.emit_pending_tool_completions(tx);
@@ -440,7 +440,9 @@ impl StandardAccumulator {
                     .clone()
                     .or_else(|| partial.id.clone())
                     .unwrap_or_default();
-                if !call_id.is_empty() && !send_event(tx, LlmEvent::ToolCallCompleted { call_id }) {
+                if !call_id.is_empty()
+                    && !send_event(tx, LlmEvent::ToolCallArgumentsCompleted { call_id })
+                {
                     return;
                 }
                 partial.completed = true;
@@ -449,7 +451,7 @@ impl StandardAccumulator {
         for (item_id, partial) in &mut self.response_tool_items {
             if partial.started && !partial.completed {
                 let call_id = partial.call_id.clone().unwrap_or_else(|| item_id.clone());
-                if !send_event(tx, LlmEvent::ToolCallCompleted { call_id }) {
+                if !send_event(tx, LlmEvent::ToolCallArgumentsCompleted { call_id }) {
                     return;
                 }
                 partial.completed = true;
@@ -668,7 +670,7 @@ mod fixture_tests {
                 LlmEvent::ToolCallStart { call_id, name, .. },
                 LlmEvent::ToolCallDelta { call_id: delta_call_id, delta: first_delta },
                 LlmEvent::ToolCallDelta { call_id: second_delta_call_id, delta: second_delta },
-                LlmEvent::ToolCallCompleted { call_id: completed_call_id },
+                LlmEvent::ToolCallArgumentsCompleted { call_id: completed_call_id },
                 LlmEvent::Done { finish_reason },
             ]
             if delta == "I will inspect it."
@@ -716,7 +718,7 @@ mod fixture_tests {
                 LlmEvent::ContentDelta { delta },
                 LlmEvent::ToolCallStart { call_id, name, .. },
                 LlmEvent::ToolCallDelta { call_id: delta_call_id, delta: arguments_delta },
-                LlmEvent::ToolCallCompleted { call_id: completed_call_id },
+                LlmEvent::ToolCallArgumentsCompleted { call_id: completed_call_id },
                 LlmEvent::Usage { usage },
                 LlmEvent::Done { finish_reason },
             ]
@@ -1187,7 +1189,7 @@ mod accumulator_tests {
         let completed_count = drain_events(&mut rx)
             .into_iter()
             .filter(
-                |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "c1"),
+                |event| matches!(event, LlmEvent::ToolCallArgumentsCompleted { call_id } if call_id == "c1"),
             )
             .count();
         assert_eq!(completed_count, 1);
@@ -1209,7 +1211,7 @@ mod accumulator_tests {
 
         let events = drain_events(&mut rx);
         assert!(events.iter().any(|event| {
-            matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "c1")
+            matches!(event, LlmEvent::ToolCallArgumentsCompleted { call_id } if call_id == "c1")
         }));
         assert!(
             events

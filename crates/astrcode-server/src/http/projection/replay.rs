@@ -4,7 +4,7 @@ use astrcode_core::event::{DurableEventPayload, Event, Phase};
 use astrcode_protocol::http::{ConversationDeltaDto, ToolApprovalDto};
 
 use super::{
-    blocks::{block_from_payload, streaming_tool_call_block},
+    blocks::{block_from_payload, tool_settlement_delta},
     live::{control_from_phase, custom_event_delta},
 };
 
@@ -25,28 +25,20 @@ pub(in crate::http) fn event_to_replay_deltas(
     if let Some(block) = block_from_payload(event) {
         return vec![ConversationDeltaDto::AppendBlock { block }];
     }
-    if let DurableEventPayload::ToolCallRequested {
-        call_id,
-        tool_name,
-        arguments,
-        raw_arguments,
-    } = payload
-    {
-        return vec![ConversationDeltaDto::AppendBlock {
-            block: streaming_tool_call_block(
-                call_id.to_string(),
-                tool_name,
-                raw_arguments.is_none().then_some(arguments),
-            ),
-        }];
-    }
     match payload {
+        DurableEventPayload::ToolCallSettled {
+            call_id,
+            outcome,
+            result,
+        } => {
+            vec![tool_settlement_delta(call_id, *outcome, result)]
+        },
         DurableEventPayload::TurnStarted => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_phase(Phase::Thinking, has_messages),
             }]
         },
-        DurableEventPayload::TurnCompleted { .. } => {
+        DurableEventPayload::TurnEnded { .. } => {
             let mut deltas = event
                 .turn_id
                 .as_ref()
@@ -62,12 +54,14 @@ pub(in crate::http) fn event_to_replay_deltas(
         },
         DurableEventPayload::ToolApprovalRequested {
             call_id,
+            arguments,
             prompt,
             rule_key,
             ..
         } => vec![ConversationDeltaDto::ToolApprovalRequested {
             approval: ToolApprovalDto {
                 call_id: call_id.to_string(),
+                effective_arguments: arguments.clone(),
                 prompt: prompt.clone(),
                 rule_key: rule_key.clone(),
             },
@@ -149,18 +143,17 @@ mod tests {
         match payload {
             // 结构性改写，无法增量重放 → 客户端必须重拉快照。
             TranscriptRewritten { .. } | SessionForked { .. } => ReplayExpectation::Rehydrate,
-            TurnStarted | TurnCompleted { .. } => ReplayExpectation::ControlState,
+            TurnStarted | TurnEnded { .. } => ReplayExpectation::ControlState,
             ToolApprovalRequested { .. } | ToolApprovalResolved { .. } => {
                 ReplayExpectation::Approval
             },
             CustomEvent(_) => ReplayExpectation::CustomEvent,
             // 经 block_from_payload 委托，或 ToolCallRequested 的流式 block 分支产出可见 block。
             UserMessage { .. }
-            | AssistantMessageCompleted { .. }
-            | ToolCallCompleted { .. }
-            | ToolCallFailed { .. }
-            | ToolCallCancelled { .. }
+            | AssistantMessage { .. }
+            | ToolCallSettled { .. }
             | ErrorOccurred { .. }
+            | UserInputDiscarded { .. }
             | RecapGenerated { .. }
             | ToolCallRequested { .. } => ReplayExpectation::AppendBlock,
             // 重放时不产出 delta 的载荷。SessionStarted 是首事件，cursor 之后不会出现。
@@ -168,15 +161,15 @@ mod tests {
             SessionStarted(_)
             | ModelIdChanged { .. }
             | SessionToolsConfigured { .. }
-            | SystemPromptConfigured { .. }
+            | SystemPromptConfigured(_)
             | StepStarted { .. }
-            | StepCompleted { .. }
+            | StepEnded { .. }
             | TurnAbortedContext
             | UserInputAccepted { .. }
+            | AssistantAttemptSettled { .. }
             | TokenUsageRecorded { .. }
             | AgentSessionSpawned { .. }
-            | AgentSessionCompleted { .. }
-            | AgentSessionFailed { .. }
+            | AgentSessionSettled { .. }
             | AgentSessionRecycled { .. } => ReplayExpectation::Empty,
         }
     }
@@ -209,8 +202,10 @@ mod tests {
                 messages: Vec::new(),
             },
             // 控制态切换
-            DurableEventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+            DurableEventPayload::TurnEnded {
+                reason: astrcode_core::event::TurnEndReason::Completed {
+                    finish_reason: astrcode_core::event::TurnCompletionReason::Stop,
+                },
             },
             DurableEventPayload::TurnStarted,
             DurableEventPayload::ToolApprovalRequested {
@@ -244,10 +239,10 @@ mod tests {
             },
             // 绕过 block_from_payload 的特殊 AppendBlock（流式工具调用 block）
             DurableEventPayload::ToolCallRequested {
+                provider_call_id: "call-1".to_owned(),
                 call_id: ToolCallId::new("call-1"),
                 tool_name: "read".into(),
-                arguments: serde_json::json!({"path": "README.md"}),
-                raw_arguments: None,
+                arguments: (serde_json::json!({"path": "README.md"})).to_string(),
             },
             // 无操作
             DurableEventPayload::ModelIdChanged {

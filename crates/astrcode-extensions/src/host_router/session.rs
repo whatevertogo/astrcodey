@@ -612,6 +612,11 @@ pub(super) fn message_origin_dto(origin: TranscriptMessageOrigin) -> SessionMess
         TranscriptMessageOrigin::TurnAborted => SessionMessageOriginDto::TurnAborted,
         TranscriptMessageOrigin::ToolCallFailed => SessionMessageOriginDto::ToolCallFailed,
         TranscriptMessageOrigin::ToolCallCancelled => SessionMessageOriginDto::ToolCallCancelled,
+        TranscriptMessageOrigin::ToolCallInterrupted => {
+            SessionMessageOriginDto::ToolCallInterrupted
+        },
+        TranscriptMessageOrigin::AssistantFailed => SessionMessageOriginDto::AssistantFailed,
+        TranscriptMessageOrigin::AssistantCancelled => SessionMessageOriginDto::AssistantCancelled,
     }
 }
 
@@ -850,7 +855,7 @@ fn required_extension_id(ctx: &InvokeContext) -> Result<&str, ErrorPayload> {
 }
 
 fn host_session_event(stored: StoredEvent) -> Result<HostSessionEvent, ErrorPayload> {
-    let StoredEvent { seq, event } = stored;
+    let StoredEvent { seq, event, .. } = stored;
     let timestamp = serde_json::to_value(event.timestamp).map_err(|error| {
         ErrorPayload::new(
             WireErrorCode::SerializationFailed,

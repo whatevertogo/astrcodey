@@ -20,7 +20,7 @@ use astrcode_session::{
     SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
 };
 use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
-use astrcode_storage::{SessionStore, StorageError};
+use astrcode_storage::{SessionCatalog, SessionStore, StorageError};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -298,7 +298,7 @@ impl SessionManager {
         let events = self.event_store.replay_events(session_id).await?;
         Ok(events.iter().any(|event| {
             event.turn_id.as_ref() == Some(turn_id)
-                && matches!(event.payload, DurableEventPayload::TurnCompleted { .. })
+                && matches!(event.payload, DurableEventPayload::TurnEnded { .. })
         }))
     }
 
@@ -325,6 +325,13 @@ impl SessionManager {
     pub(crate) async fn list_summaries(&self) -> Result<Vec<SessionSummary>, SessionManagerError> {
         self.event_store
             .list_session_summaries()
+            .await
+            .map_err(SessionManagerError::from)
+    }
+
+    pub(crate) async fn list_catalog(&self) -> Result<SessionCatalog, SessionManagerError> {
+        self.event_store
+            .list_session_catalog()
             .await
             .map_err(SessionManagerError::from)
     }

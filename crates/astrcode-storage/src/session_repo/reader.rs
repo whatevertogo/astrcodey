@@ -1,10 +1,14 @@
 //! 读端口实现:[`EventReader`] 与 [`SessionReader`]。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use astrcode_core::{
     event::StoredEvent,
-    types::{Cursor, SessionId},
+    types::{Cursor, SessionId, ToolCallId},
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary, replay};
 use tokio::sync::Semaphore;
@@ -12,7 +16,7 @@ use tokio::sync::Semaphore;
 use super::{
     FileSystemSessionRepository, corrupt_projection, parse_cursor, validate_storage_session_id,
 };
-use crate::{EventReader, SessionReader, StorageError, event_log::EventLog};
+use crate::{EventReader, SessionCatalog, SessionReader, StorageError, event_log::EventLog};
 
 /// 冷会话摘要读取的并发上限:每次读取伴随一次 fsync,并发不能无界。
 const SUMMARY_READ_CONCURRENCY: usize = 8;
@@ -77,6 +81,20 @@ impl EventReader for FileSystemSessionRepository {
         let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let before_seq = before.map(parse_cursor).transpose()?;
         meta.log.replay_before_limited(before_seq, max_events).await
+    }
+
+    async fn tool_settlements_after(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        call_ids: HashSet<ToolCallId>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        if call_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        meta.log.tool_settlements_after(after_seq, call_ids).await
     }
 
     async fn replay_events_active_or_recycled(
@@ -175,13 +193,17 @@ impl SessionReader for FileSystemSessionRepository {
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        Ok(self.list_session_catalog().await?.summaries)
+    }
+
+    async fn list_session_catalog(&self) -> Result<SessionCatalog, StorageError> {
         let locations = self.list_root_session_locations().await;
-        self.summaries_for_locations(locations).await
+        self.catalog_for_locations(locations).await
     }
 
     async fn list_all_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         let locations = self.list_all_session_locations().await?;
-        self.summaries_for_locations(locations).await
+        Ok(self.catalog_for_locations(locations).await?.summaries)
     }
 }
 
@@ -198,22 +220,29 @@ impl FileSystemSessionRepository {
         EventLog::replay_read_only(Self::event_log_path(&recycled_dir, session_id)).await
     }
 
-    async fn summaries_for_locations(
+    async fn catalog_for_locations(
         &self,
         locations: BTreeMap<SessionId, PathBuf>,
-    ) -> Result<Vec<SessionSummary>, StorageError> {
-        let mut summaries = Vec::with_capacity(locations.len());
+    ) -> Result<SessionCatalog, StorageError> {
+        let mut catalog = SessionCatalog {
+            summaries: Vec::with_capacity(locations.len()),
+            ..SessionCatalog::default()
+        };
         let mut cold = Vec::new();
         for (session_id, session_dir) in locations {
             match self.sessions.read().await.get(&session_id).cloned() {
                 // 已打开的会话直接使用内存中的投影
-                Some(meta) => summaries.push(meta.projection.snapshot().await.to_summary()),
+                Some(meta) => catalog
+                    .summaries
+                    .push(meta.projection.snapshot().await.to_summary()),
                 None => cold.push((session_id, session_dir)),
             }
         }
-        summaries.extend(read_summaries_from_logs(cold).await?);
-        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-        Ok(summaries)
+        read_summaries_from_logs(cold, &mut catalog).await?;
+        catalog
+            .summaries
+            .sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(catalog)
     }
 }
 
@@ -224,7 +253,8 @@ impl FileSystemSessionRepository {
 /// IO/durability 错误必须传播:跳过会把未确认的写入伪装成会话不存在。
 async fn read_summaries_from_logs(
     cold: Vec<(SessionId, PathBuf)>,
-) -> Result<Vec<SessionSummary>, StorageError> {
+    catalog: &mut SessionCatalog,
+) -> Result<(), StorageError> {
     let concurrency = Arc::new(Semaphore::new(SUMMARY_READ_CONCURRENCY));
     let mut tasks = tokio::task::JoinSet::new();
     for (session_id, session_dir) in cold {
@@ -239,7 +269,6 @@ async fn read_summaries_from_logs(
         });
     }
 
-    let mut summaries = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         let outcome = joined.map_err(|error| {
             StorageError::Io(std::io::Error::other(format!(
@@ -247,13 +276,18 @@ async fn read_summaries_from_logs(
             )))
         })?;
         match outcome {
-            Ok(Some(summary)) => summaries.push(summary),
+            Ok(Some(summary)) => catalog.summaries.push(summary),
             Ok(None) => {},
+            Err(error @ StorageError::UnsupportedEventFormat { .. }) => {
+                catalog.unsupported_log_count += 1;
+                tracing::warn!(%error, "skipping unsupported session event log during listing");
+            },
             Err(error @ (StorageError::CorruptLog(_) | StorageError::Serialization(_))) => {
-                tracing::warn!(%error, "skipping undecodable session event log during listing");
+                catalog.corrupt_log_count += 1;
+                tracing::warn!(%error, "skipping corrupt session event log during listing");
             },
             Err(error) => return Err(error),
         }
     }
-    Ok(summaries)
+    Ok(())
 }
