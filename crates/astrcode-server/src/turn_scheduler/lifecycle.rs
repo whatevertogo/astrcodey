@@ -778,17 +778,6 @@ impl TurnScheduler {
         }
         Ok((session, state))
     }
-
-    pub(crate) fn needs_stale_repair(state: &SessionReadModel) -> bool {
-        !matches!(state.execution.phase, Phase::Idle | Phase::Error)
-            || state.execution.active_step.is_some()
-            || !state.tool_calls_needing_interruption().is_empty()
-            || state
-                .agent_sessions
-                .iter()
-                .any(|link| link.status == AgentSessionStatus::Running)
-            || !state.execution.pending_inputs.is_empty()
-    }
 }
 
 async fn wait_for_close_owner(

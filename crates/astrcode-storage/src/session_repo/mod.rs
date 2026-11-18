@@ -20,6 +20,7 @@ mod owner_lease;
 mod projection;
 mod reader;
 mod session_id;
+mod settled_session;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -240,8 +241,15 @@ impl FileSystemSessionRepository {
         // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
         let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
-        let (log, events) = EventLog::open(Self::event_log_path(&dir, session_id)).await?;
+        let log_path = Self::event_log_path(&dir, session_id);
+        let stamp = settled_session::capture_log_stamp(&log_path).await;
+        let (log, events) = EventLog::open(log_path.clone()).await?;
         let projection = replay(session_id.clone(), &events).map_err(corrupt_projection)?;
+        if let Some(stamp) = stamp
+            && !projection.needs_startup_repair()
+        {
+            settled_session::record(&dir, log_path, stamp, projection.to_summary()).await;
+        }
         let opened = Arc::new(SessionMeta::new(dir, owner_lease, log, projection).await?);
 
         let mut sessions = self.sessions.write().await;

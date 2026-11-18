@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentSessionLinkView, SessionExecutionState, SessionModelContext, SessionPresentation,
-    SessionSystemPrompt, UnansweredToolCall,
+    AgentSessionLinkView, AgentSessionStatus, SessionExecutionState, SessionModelContext,
+    SessionPresentation, SessionSystemPrompt, UnansweredToolCall,
 };
 
 /// 创建 fork session 时记录的来源位置。
@@ -123,6 +123,17 @@ impl SessionReadModel {
         }
     }
 
+    pub fn needs_startup_repair(&self) -> bool {
+        !matches!(self.execution.phase, Phase::Idle | Phase::Error)
+            || self.execution.active_step.is_some()
+            || !self.tool_calls_needing_interruption().is_empty()
+            || self
+                .agent_sessions
+                .iter()
+                .any(|link| link.status == AgentSessionStatus::Running)
+            || !self.execution.pending_inputs.is_empty()
+    }
+
     /// 返回 abort / repair 时必须补齐的 tool call。
     pub fn tool_calls_needing_interruption(&self) -> Vec<UnansweredToolCall> {
         let mut calls = self
@@ -143,7 +154,7 @@ impl SessionReadModel {
 }
 
 /// 会话列表摘要读模型。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: SessionId,
     pub created_at: String,

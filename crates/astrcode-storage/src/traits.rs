@@ -350,6 +350,16 @@ pub trait SessionReader: Send + Sync {
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
 
+    /// Root sessions whose current log revision still needs startup inspection.
+    async fn sessions_to_inspect_on_startup(&self) -> Result<Vec<SessionId>, StorageError> {
+        Ok(self
+            .list_session_summaries()
+            .await?
+            .into_iter()
+            .map(|summary| summary.session_id)
+            .collect())
+    }
+
     async fn list_session_catalog(&self) -> Result<SessionCatalog, StorageError> {
         Ok(SessionCatalog {
             summaries: self.list_session_summaries().await?,
