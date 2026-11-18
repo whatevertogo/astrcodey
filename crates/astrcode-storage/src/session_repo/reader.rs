@@ -14,9 +14,13 @@ use astrcode_session_projection::{SessionReadModel, SessionSummary, replay};
 use tokio::sync::Semaphore;
 
 use super::{
-    FileSystemSessionRepository, corrupt_projection, parse_cursor, validate_storage_session_id,
+    FileSystemSessionRepository, corrupt_projection, parse_cursor, settled_session,
+    validate_storage_session_id,
 };
-use crate::{EventReader, SessionCatalog, SessionReader, StorageError, event_log::EventLog};
+use crate::{
+    EventReader, SessionCatalog, SessionReader, StorageError,
+    durable_write::spawn_blocking_storage, event_log::EventLog,
+};
 
 /// 冷会话摘要读取的并发上限:每次读取伴随一次 fsync,并发不能无界。
 const SUMMARY_READ_CONCURRENCY: usize = 8;
@@ -200,6 +204,22 @@ impl SessionReader for FileSystemSessionRepository {
         Ok(self.list_session_catalog().await?.summaries)
     }
 
+    async fn sessions_to_inspect_on_startup(&self) -> Result<Vec<SessionId>, StorageError> {
+        let locations = self.list_root_session_locations().await;
+        spawn_blocking_storage("startup session inspection", move || {
+            Ok(locations
+                .into_iter()
+                .filter_map(|(id, dir)| {
+                    let log_path = Self::event_log_path(&dir, &id);
+                    settled_session::read(&dir, &log_path, &id)
+                        .is_none()
+                        .then_some(id)
+                })
+                .collect())
+        })
+        .await
+    }
+
     async fn list_session_catalog(&self) -> Result<SessionCatalog, StorageError> {
         let locations = self.list_root_session_locations().await;
         self.catalog_for_locations(locations).await
@@ -268,8 +288,15 @@ async fn read_summaries_from_logs(
                 .acquire_owned()
                 .await
                 .map_err(|_| StorageError::Io(std::io::Error::other("summary read lane closed")))?;
-            let log_path = FileSystemSessionRepository::event_log_path(&session_dir, &session_id);
-            EventLog::read_summary(&log_path, session_id).await
+            spawn_blocking_storage("session summary", move || {
+                let log_path =
+                    FileSystemSessionRepository::event_log_path(&session_dir, &session_id);
+                match settled_session::read(&session_dir, &log_path, &session_id) {
+                    Some(summary) => Ok(Some(summary)),
+                    None => EventLog::read_summary(&log_path, session_id),
+                }
+            })
+            .await
         });
     }
 

@@ -9,7 +9,6 @@ use crate::{
     handler::{CommandHandle, CommandHandler},
     server_event_bus::ServerEventBus,
     session_command_service::SessionCommandService,
-    session_manager::SessionManagerError,
     turn_scheduler::TurnScheduler,
 };
 
@@ -81,40 +80,40 @@ impl ServerApp {
         if let Err(error) = self
             .initialized
             .get_or_try_init(|| async {
-                let summaries = self.runtime.session_manager().list_summaries().await?;
-                for summary in summaries {
-                    let state = match self
-                        .runtime
-                        .session_manager()
-                        .read_model(&summary.session_id)
-                        .await
-                    {
+                let sessions = self.runtime.session_manager();
+                for session_id in self
+                    .runtime
+                    .event_store()
+                    .sessions_to_inspect_on_startup()
+                    .await?
+                {
+                    let state = match sessions.read_model(&session_id).await {
                         Ok(state) => state,
                         Err(error) => {
                             tracing::warn!(
-                                session_id = %summary.session_id,
+                                %session_id,
                                 %error,
                                 "failed to inspect session during startup repair"
                             );
                             continue;
                         },
                     };
-                    if !TurnScheduler::needs_stale_repair(&state) {
+                    if !state.needs_startup_repair() {
                         continue;
                     }
                     if let Err(error) = self
                         .session_commands
-                        .repair_stale_session(&summary.session_id)
+                        .repair_stale_session(&session_id)
                         .await
                     {
                         tracing::warn!(
-                            session_id = %summary.session_id,
+                            %session_id,
                             %error,
                             "failed to repair stale session during startup"
                         );
                     }
                 }
-                Ok::<(), SessionManagerError>(())
+                Ok::<(), astrcode_storage::StorageError>(())
             })
             .await
         {

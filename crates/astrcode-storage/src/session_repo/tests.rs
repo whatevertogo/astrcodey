@@ -566,6 +566,90 @@ async fn filesystem_repository_cold_and_hot_summaries_are_equivalent() {
     assert_eq!(cold, hot);
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn settled_history_skips_startup_replay_until_its_cache_or_log_changes() {
+    let dir = tempdir().unwrap();
+    let settled = SessionId::new("settled");
+    let unfinished = SessionId::new("unfinished");
+    let new_repo = || FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let repo = new_repo();
+    for id in [&settled, &unfinished] {
+        repo.create_session(started_event(id)).await.unwrap();
+    }
+    repo.append_events_and_sync(vec![DurableEvent::session(
+        settled.clone(),
+        DurableEventPayload::ModelIdChanged {
+            model_id: "old-model".into(),
+        },
+    )])
+    .await
+    .unwrap();
+    repo.append_events_and_sync(vec![DurableEvent::turn(
+        unfinished.clone(),
+        TurnId::new("interrupted-turn"),
+        DurableEventPayload::TurnStarted,
+    )])
+    .await
+    .unwrap();
+    let session_dir = repo.find_session_dir(&settled).await.unwrap();
+    let log_path = FileSystemSessionRepository::event_log_path(&session_dir, &settled);
+    let cache_path = session_dir.join(super::settled_session::FILE_NAME);
+    let expected = repo.list_session_summaries().await.unwrap();
+    drop(repo);
+
+    let reopened = new_repo();
+    let both = vec![settled.clone(), unfinished.clone()];
+    for id in &both {
+        reopened.session_read_model(id).await.unwrap();
+    }
+    drop(reopened);
+
+    let reopened = new_repo();
+    assert_eq!(
+        reopened.sessions_to_inspect_on_startup().await.unwrap(),
+        vec![unfinished.clone()]
+    );
+    EventLog::fail_next_open_sync_for_testing(log_path.clone());
+    assert_eq!(reopened.list_session_summaries().await.unwrap(), expected);
+    assert!(matches!(
+        reopened.session_read_model(&settled).await,
+        Err(StorageError::Io(_))
+    ));
+
+    std::fs::write(&cache_path, b"truncated cache").unwrap();
+    assert_eq!(
+        reopened.sessions_to_inspect_on_startup().await.unwrap(),
+        both
+    );
+    assert_eq!(reopened.list_session_summaries().await.unwrap(), expected);
+    reopened.session_read_model(&settled).await.unwrap();
+    drop(reopened);
+
+    // Restoring the original mtime and length cannot make rewritten bytes match the cache.
+    let metadata = std::fs::metadata(&log_path).unwrap();
+    let rewritten = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .replace("old-model", "new-model");
+    assert_eq!(rewritten.len() as u64, metadata.len());
+    std::fs::write(&log_path, rewritten).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&log_path)
+        .unwrap()
+        .set_modified(metadata.modified().unwrap())
+        .unwrap();
+    let reopened = new_repo();
+    assert_eq!(
+        reopened.sessions_to_inspect_on_startup().await.unwrap(),
+        both
+    );
+    assert_eq!(
+        reopened.list_session_summaries().await.unwrap()[0].model_id,
+        "new-model"
+    );
+}
+
 #[tokio::test]
 async fn all_session_summaries_include_nested_lineage_while_catalog_stays_root_only() {
     let dir = tempdir().unwrap();
