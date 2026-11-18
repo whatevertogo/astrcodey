@@ -10,12 +10,19 @@ use astrcode_core::{
 };
 use astrcode_session_projection::SessionSummary;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::durable_write::spawn_blocking_storage;
 
 pub(super) const FILE_NAME: &str = "settled-session.json";
 // Bump when summary projection or startup settlement rules change.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct CacheRecord {
+    session: SettledSession,
+    checksum: String,
+}
 
 #[derive(Serialize, Deserialize)]
 struct SettledSession {
@@ -23,6 +30,12 @@ struct SettledSession {
     event_format_version: u32,
     log: LogStamp,
     summary: SessionSummary,
+}
+
+impl SettledSession {
+    fn checksum(&self) -> Result<String, serde_json::Error> {
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)))
+    }
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
@@ -110,13 +123,14 @@ impl LogStamp {
 }
 
 fn load(path: &Path, session_id: &SessionId) -> Option<SettledSession> {
-    let entry: SettledSession = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (entry.version == VERSION
-        && entry.event_format_version == EVENT_FORMAT_VERSION
-        && &entry.summary.session_id == session_id
-        && matches!(entry.summary.phase, Phase::Idle | Phase::Error)
-        && entry.summary.latest_cursor.parse::<u64>().is_ok())
-    .then_some(entry)
+    let CacheRecord { session, checksum } = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    (session.version == VERSION
+        && session.event_format_version == EVENT_FORMAT_VERSION
+        && &session.summary.session_id == session_id
+        && matches!(session.summary.phase, Phase::Idle | Phase::Error)
+        && session.summary.latest_cursor.parse::<u64>().is_ok()
+        && session.checksum().ok()? == checksum)
+        .then_some(session)
 }
 
 pub(super) fn read(dir: &Path, log_path: &Path, session_id: &SessionId) -> Option<SessionSummary> {
@@ -148,11 +162,15 @@ pub(super) async fn record(
         if load(&path, &summary.session_id).is_some_and(|entry| entry.log == before_replay) {
             return Ok(());
         }
-        let entry = SettledSession {
+        let session = SettledSession {
             version: VERSION,
             event_format_version: EVENT_FORMAT_VERSION,
             log: before_replay,
             summary,
+        };
+        let entry = CacheRecord {
+            checksum: session.checksum()?,
+            session,
         };
         // This cache is rebuildable; the log was already synced before replay.
         let mut temporary = tempfile::NamedTempFile::new_in(dir)?;

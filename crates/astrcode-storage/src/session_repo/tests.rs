@@ -617,7 +617,10 @@ async fn settled_history_skips_startup_replay_until_its_cache_or_log_changes() {
         Err(StorageError::Io(_))
     ));
 
-    std::fs::write(&cache_path, b"truncated cache").unwrap();
+    let corrupted_summary = std::fs::read_to_string(&cache_path)
+        .unwrap()
+        .replace("old-model", "bad-model");
+    std::fs::write(&cache_path, corrupted_summary).unwrap();
     assert_eq!(
         reopened.sessions_to_inspect_on_startup().await.unwrap(),
         both
