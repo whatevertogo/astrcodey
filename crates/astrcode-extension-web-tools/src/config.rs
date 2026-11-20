@@ -20,6 +20,7 @@ pub(crate) struct WebToolsConfig {
 pub(crate) enum SearchProvider {
     #[default]
     DuckDuckGo,
+    DeepSeek,
     Brave,
     Serper,
 }
@@ -29,6 +30,8 @@ pub(crate) enum SearchProvider {
 pub(crate) struct SearchConfig {
     #[serde(default)]
     pub(crate) provider: SearchProvider,
+    pub(crate) deepseek_api_key: Option<String>,
+    pub(crate) deepseek_api_key_env: Option<String>,
     pub(crate) brave_api_key: Option<String>,
     pub(crate) brave_api_key_env: Option<String>,
     pub(crate) serper_api_key: Option<String>,
@@ -43,6 +46,8 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             provider: SearchProvider::default(),
+            deepseek_api_key: None,
+            deepseek_api_key_env: None,
             brave_api_key: None,
             brave_api_key_env: None,
             serper_api_key: None,

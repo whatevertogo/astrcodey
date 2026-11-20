@@ -203,14 +203,14 @@ allowedChatIds = ["123456789"]
 | **Goal** | `astrcode-extension-goal` | Codex 风格会话目标、Token 预算、自动延续 |
 | **Memory** | `astrcode-extension-memory` | 项目作用域的 Markdown 记忆存储（默认关闭） |
 | **Channels** | `astrcode-extension-channels` | Telegram 通道桥接，可从外部聊天使用 AstrCode（默认关闭） |
-| **Web Tools** | `astrcode-extension-web-tools` | 内置 `web-search` 与 `fetch-url` 工具（默认 DuckDuckGo；可选 Brave/Serper） |
+| **Web Tools** | `astrcode-extension-web-tools` | 内置 `web-search` 与 `fetch-url` 工具（默认 DuckDuckGo；可选 Brave/Serper/DeepSeek） |
 
 Web Tools 在 `extensions.astrcode-web-tools` 下配置（默认启用）：
 
 ```toml
 [extensions.astrcode-web-tools.search]
-provider = "duckduckgo"
-braveApiKeyEnv = "BRAVE_API_KEY"
+provider = "deepseek"
+deepseekApiKeyEnv = "DEEPSEEK_API_KEY"
 ```
 
 完整选项见[配置指南](docs/configuration.md#web-tools-extension)。

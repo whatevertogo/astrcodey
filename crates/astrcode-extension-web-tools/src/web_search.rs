@@ -18,13 +18,15 @@ use crate::{
 const MAX_RESULTS_LIMIT: usize = 20;
 const MIN_QUERY_LEN: usize = 2;
 const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
+const DEEPSEEK_SEARCH_URL: &str = "https://api.deepseek.com/v1/tools/search";
+const DEEPSEEK_MAX_QUERY_CHARS: usize = 128;
 const SERPER_SEARCH_URL: &str = "https://google.serper.dev/search";
 const DUCKDUCKGO_HTML_URL: &str = "https://html.duckduckgo.com/html/";
 const HTML_SEARCH_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
                                       AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 \
                                       Safari/537.36";
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchHit {
     pub(crate) title: String,
@@ -36,6 +38,8 @@ pub(crate) struct SearchHit {
 pub(crate) enum SearchError {
     #[error("search query must be at least {MIN_QUERY_LEN} characters")]
     QueryTooShort,
+    #[error("DeepSeek search queries must be at most {DEEPSEEK_MAX_QUERY_CHARS} characters")]
+    DeepSeekQueryTooLong,
     #[error("cannot specify both allowedDomains and blockedDomains")]
     ConflictingDomainFilters,
     #[error("search provider `{0}` requires an API key in extension config")]
@@ -83,6 +87,7 @@ pub(crate) async fn run_web_search(
     };
 
     let mut hits = match effective_provider(config) {
+        SearchProvider::DeepSeek => search_deepseek(&backend, config, &query, max_results).await?,
         SearchProvider::Brave => search_brave(&backend, config, &query, max_results).await?,
         SearchProvider::Serper => search_serper(&backend, config, &query, max_results).await?,
         SearchProvider::DuckDuckGo => search_duckduckgo(&backend, &query, max_results).await?,
@@ -165,8 +170,59 @@ fn effective_provider(config: &SearchConfig) -> SearchProvider {
             SearchProvider::Serper
         },
         SearchProvider::Brave | SearchProvider::Serper => SearchProvider::DuckDuckGo,
-        SearchProvider::DuckDuckGo => SearchProvider::DuckDuckGo,
+        SearchProvider::DuckDuckGo | SearchProvider::DeepSeek => config.provider,
     }
+}
+
+async fn search_deepseek(
+    backend: &SearchNetworkBackend<'_>,
+    config: &SearchConfig,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchHit>, SearchError> {
+    if query.chars().count() > DEEPSEEK_MAX_QUERY_CHARS {
+        return Err(SearchError::DeepSeekQueryTooLong);
+    }
+    let key = resolve_api_key(
+        config.deepseek_api_key.as_deref(),
+        Some(
+            config
+                .deepseek_api_key_env
+                .as_deref()
+                .unwrap_or("DEEPSEEK_API_KEY"),
+        ),
+    )
+    .ok_or(SearchError::MissingApiKey("deepseek"))?;
+    let body = serde_json::to_vec(&serde_json::json!({ "query": query, "count": max_results }))
+        .map_err(|error| SearchError::Parse(error.to_string()))?;
+    let response = backend
+        .send(
+            "POST",
+            DEEPSEEK_SEARCH_URL.into(),
+            BTreeMap::from([
+                ("authorization".into(), format!("Bearer {key}")),
+                ("content-type".into(), "application/json".into()),
+            ]),
+            body,
+            HostNetworkRedirectPolicy::Manual,
+        )
+        .await?;
+    if response.status != 200 {
+        return Err(SearchError::Http(format!(
+            "DeepSeek search returned HTTP {}",
+            response.status
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct SearchResponse {
+        results: Vec<SearchHit>,
+    }
+    let mut payload: SearchResponse = serde_json::from_slice(&response.body)
+        .map_err(|error| SearchError::Parse(error.to_string()))?;
+    payload.results.retain(|hit| !hit.url.trim().is_empty());
+    payload.results.truncate(max_results);
+    Ok(payload.results)
 }
 
 async fn search_brave(
@@ -448,6 +504,98 @@ mod tests {
             ..SearchConfig::default()
         };
         assert_eq!(effective_provider(&config), SearchProvider::DuckDuckGo);
+    }
+
+    #[tokio::test]
+    async fn deepseek_uses_its_search_contract_and_respects_tool_filters() {
+        use std::sync::Arc;
+
+        use astrcode_extension_sdk::{
+            extension::ExtensionCapability,
+            host::{
+                HostError, HostOperation,
+                internal::{HostInvoker, HostScope, extension_host},
+            },
+        };
+        use serde_json::{Value, json};
+
+        struct SearchHost;
+
+        #[async_trait::async_trait]
+        impl HostInvoker for SearchHost {
+            async fn invoke(
+                &self,
+                operation: HostOperation,
+                input: Value,
+            ) -> Result<Value, HostError> {
+                assert_eq!(operation, HostOperation::NetworkClient);
+                let request: HostNetworkRequest = serde_json::from_value(input).unwrap();
+                assert_eq!(request.url, "https://api.deepseek.com/v1/tools/search");
+                assert_eq!(request.method, "POST");
+                assert_eq!(request.headers["authorization"], "Bearer test-only");
+                assert_eq!(request.headers["content-type"], "application/json");
+                assert_eq!(request.redirect_policy, HostNetworkRedirectPolicy::Manual);
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body, json!({"query": "深".repeat(128), "count": 2}));
+                let results = json!({"results": [
+                    {"title": "Other", "url": "https://example.org/", "snippet": "Other page"},
+                    {"title": "Docs", "url": "https://docs.example.com/", "snippet": "A summary"}
+                ]});
+                Ok(json!(HostNetworkResponse {
+                    final_url: request.url,
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: serde_json::to_vec(&results).unwrap(),
+                }))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let host = extension_host(
+            Arc::new(SearchHost),
+            HostScope::new(
+                [ExtensionCapability::NetworkClient],
+                [HostOperation::NetworkClient],
+                true,
+                true,
+            ),
+        );
+        let config: SearchConfig = serde_json::from_value(json!({
+            "provider": "deepseek", "deepseekApiKey": "test-only"
+        }))
+        .unwrap();
+        let args = |query| WebSearchArgs {
+            query,
+            max_results: Some(2),
+            allowed_domains: Some(vec!["example.com".into()]),
+            blocked_domains: None,
+        };
+        let result = run_web_search(&config, host.network().unwrap(), args("深".repeat(128)))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.hits,
+            vec![SearchHit {
+                title: "Docs".into(),
+                url: "https://docs.example.com/".into(),
+                snippet: "A summary".into()
+            }]
+        );
+        assert!(matches!(
+            run_web_search(&config, host.network().unwrap(), args("深".repeat(129))).await,
+            Err(SearchError::DeepSeekQueryTooLong)
+        ));
+        let missing = SearchConfig {
+            deepseek_api_key: None,
+            deepseek_api_key_env: Some("ASTRCODE_TEST_UNSET_DEEPSEEK_SEARCH_KEY".into()),
+            ..config
+        };
+        assert!(matches!(
+            run_web_search(&missing, host.network().unwrap(), args("search".into())).await,
+            Err(SearchError::MissingApiKey("deepseek"))
+        ));
     }
 
     #[test]

@@ -321,11 +321,14 @@ shellTimeoutSecs = 180
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `provider` | `duckduckgo` | `duckduckgo` / `brave` / `serper` |
+| `provider` | `duckduckgo` | `duckduckgo` / `brave` / `serper` / `deepseek` |
 | `braveApiKey` / `braveApiKeyEnv` | — | Brave 密钥或环境变量名 |
 | `serperApiKey` / `serperApiKeyEnv` | — | Serper 同上 |
+| `deepseekApiKey` / `deepseekApiKeyEnv` | 环境变量 `DEEPSEEK_API_KEY` | DeepSeek 搜索密钥或环境变量名，显式密钥优先 |
 | `defaultMaxResults` | `5` | 默认条数 |
 | `requestTimeoutSecs` | `30` | 请求超时 |
+
+选用 `provider = "deepseek"` 时，`web-search` 通过独立搜索 API 获取标题、链接和摘要，可搭配任意聊天模型。缺少密钥时工具会报错。成功返回非空结果的请求按次计费。[DeepSeek 官方说明](https://api-docs.deepseek.com/zh-cn/guides/search/)
 
 **`fetch`**
 
