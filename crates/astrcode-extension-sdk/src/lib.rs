@@ -8,7 +8,7 @@ pub mod extension;
 
 // Shared primitives moved to astrcode-core (both the host runtime and
 // bundled extensions consume them); re-exported here to keep the SDK path stable.
-pub use astrcode_core::{discovery, frontmatter, hostpaths, shell};
+pub use astrcode_core::{discovery, frontmatter, hostpaths, shell, time};
 
 pub mod config {
     pub use astrcode_core::config::ModelSelection;

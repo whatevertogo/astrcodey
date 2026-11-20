@@ -31,7 +31,7 @@ crossterm = { workspace = true }
 unicode-width = { workspace = true }
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }

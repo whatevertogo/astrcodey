@@ -5,6 +5,7 @@ use std::{future::Future, sync::Arc};
 use astrcode_core::{
     compaction::CompactStrategy,
     llm::{LlmContent, LlmMessage},
+    time::format_rfc3339,
     types::SessionId,
 };
 use astrcode_extension_sdk::{
@@ -183,8 +184,8 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
                 )
             })
             .collect(),
-        created_at: stats.created_at.to_rfc3339(),
-        updated_at: stats.updated_at.to_rfc3339(),
+        created_at: format_rfc3339(stats.created_at),
+        updated_at: format_rfc3339(stats.updated_at),
         parent_session_id: identity.parent.map(|parent| parent.session_id.to_string()),
         tool_selection: Some(tool_selection_to_dto(identity.tool_selection)),
         source_extension: identity.source_extension,

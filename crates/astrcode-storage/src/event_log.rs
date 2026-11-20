@@ -46,7 +46,7 @@ fn validate_event(
     if event.session_id.as_str().is_empty() {
         return Err(corrupt_log(path, line_number, "event has empty session_id"));
     }
-    if event.timestamp.timestamp() == 0 {
+    if (0..1_000_000_000).contains(&event.timestamp.as_nanosecond()) {
         tracing::warn!(
             "Event at {}:{} has epoch-zero timestamp; may indicate corruption",
             path.display(),

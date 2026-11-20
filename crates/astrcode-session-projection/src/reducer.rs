@@ -7,6 +7,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     event::{CustomEventAudience, DurableEvent, DurableEventPayload, StoredEvent},
+    time::format_rfc3339,
     types::SessionId,
 };
 
@@ -254,7 +255,7 @@ impl SessionSummaryProjection {
             } => summary.first_user_message = first_user_message.clone(),
             _ => {},
         }
-        summary.updated_at = event.timestamp.to_rfc3339();
+        summary.updated_at = format_rfc3339(event.timestamp);
         summary.latest_cursor = event.seq.to_string();
         summary.phase = self.execution.phase;
         self.last_seq = event.seq;

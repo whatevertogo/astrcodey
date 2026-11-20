@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use astrcode_core::types::SessionId;
-use chrono::Utc;
+use astrcode_core::{time::format_rfc3339, types::SessionId};
+use jiff::Timestamp;
 use uuid::Uuid;
 
 use super::{
@@ -270,10 +270,10 @@ impl SessionStore for FileSystemSessionRepository {
         let dir = meta.dir.join("compact-snapshots");
         tokio::fs::create_dir_all(&dir).await?;
 
-        let created_at = Utc::now();
+        let created_at = Timestamp::now();
         let path = dir.join(format!(
             "compact-{}-{}.jsonl",
-            created_at.timestamp_millis(),
+            created_at.as_millisecond(),
             Uuid::new_v4()
         ));
 
@@ -283,7 +283,7 @@ impl SessionStore for FileSystemSessionRepository {
                 "type": "metadata",
                 "session_id": session_id,
                 "trigger": snapshot.trigger,
-                "created_at": created_at.to_rfc3339(),
+                "created_at": format_rfc3339(created_at),
                 "model_id": snapshot.model_id,
                 "working_dir": snapshot.working_dir,
                 "system_prompt": snapshot.system_prompt,

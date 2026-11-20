@@ -2,7 +2,7 @@
 
 use std::ops::Deref;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::{
@@ -40,7 +40,7 @@ pub struct EventEnvelope<P> {
     pub session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub payload: P,
 }
 
@@ -50,7 +50,7 @@ impl<P> EventEnvelope<P> {
             id: new_event_id(),
             session_id,
             turn_id,
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             payload,
         }
     }
@@ -170,7 +170,7 @@ pub struct Event {
     pub session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub payload: EventPayload,
 }
 
@@ -218,7 +218,7 @@ impl<'de> Deserialize<'de> for Event {
             id: EventId,
             session_id: SessionId,
             turn_id: Option<TurnId>,
-            timestamp: DateTime<Utc>,
+            timestamp: Timestamp,
             payload: serde_json::Value,
         }
 

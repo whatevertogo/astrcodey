@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use astrcode_extension_sdk::hostpaths;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 const GOAL_STATE_FILE: &str = "goal-state.json";
@@ -74,8 +74,8 @@ pub(crate) struct GoalState {
     pub token_budget: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage_baseline: Option<u64>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub continuation_prompt_pending: Option<String>,
     pub budget_limit_prompt_pending: Option<String>,
     #[serde(default)]
@@ -88,7 +88,7 @@ impl GoalState {
         token_budget: Option<u64>,
         token_usage_baseline: Option<u64>,
     ) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             schema_version: GOAL_SCHEMA_VERSION,
             revision: 1,
@@ -106,15 +106,15 @@ impl GoalState {
     }
 
     pub(crate) fn elapsed_seconds(&self) -> u64 {
-        Utc::now()
-            .signed_duration_since(self.created_at)
-            .num_seconds()
+        Timestamp::now()
+            .duration_since(self.created_at)
+            .as_secs()
             .max(0) as u64
     }
 
     pub(crate) fn touch(&mut self) {
         self.revision = self.revision.saturating_add(1);
-        self.updated_at = Utc::now();
+        self.updated_at = Timestamp::now();
     }
 
     pub(crate) fn mark_continuation_pending(&mut self) {

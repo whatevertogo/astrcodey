@@ -4,10 +4,11 @@ use std::collections::HashSet;
 
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted},
+    time::format_rfc3339,
     tool::SessionToolSelection,
     types::{Cursor, SessionId},
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -51,8 +52,8 @@ pub struct SessionIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionEventStats {
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub last_seq: u64,
     pub event_count: usize,
 }
@@ -61,7 +62,7 @@ impl SessionReadModel {
     pub(super) fn from_started(
         session_id: SessionId,
         started: &SessionStarted,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
     ) -> Self {
         Self {
             identity: SessionIdentity {
@@ -107,8 +108,8 @@ impl SessionReadModel {
     pub fn to_summary(&self) -> SessionSummary {
         SessionSummary {
             session_id: self.identity.session_id.clone(),
-            created_at: self.stats.created_at.to_rfc3339(),
-            updated_at: self.stats.updated_at.to_rfc3339(),
+            created_at: format_rfc3339(self.stats.created_at),
+            updated_at: format_rfc3339(self.stats.updated_at),
             working_dir: self.identity.working_dir.clone(),
             model_id: self.identity.model_id.clone(),
             parent_session_id: self

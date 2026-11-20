@@ -73,7 +73,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `permission`：权限审批模式和审批结果等通用类型。
 - `message_attachment`：消息附件契约；read 工具图片和 artifact 读取契约位于 `tool`。
 
-依赖边界：无 workspace 内部依赖，只依赖 serde、tokio、uuid、chrono、thiserror、tracing 等基础库。它是 workspace 的根契约层，下游应通过完整模块路径导入，例如 `astrcode_core::event::EventPayload`。
+依赖边界：无 workspace 内部依赖，只依赖 serde、tokio、uuid、jiff、thiserror、tracing 等基础库。它是 workspace 的根契约层，下游应通过完整模块路径导入，例如 `astrcode_core::event::EventPayload`。
 
 测试线索：主要是模块内单元测试。改动这里影响面最大，通常需要按受影响契约跑对应下游 crate 测试，必要时跑全 workspace clippy/test。
 
@@ -744,6 +744,8 @@ Feature：
 依赖边界：依赖 `astrcode-core` 的领域类型和 `astrcode-protocol` 的 typed wire
 契约；它是协议消费者，不定义或复制服务端 DTO。`astrcode-cli` 通过 `dev-mode`
 feature 可选依赖它。
+
+使用 `astrcode eval --swe` 读取本地或远程 Parquet 时，请先激活 Python 虚拟环境并运行 `python -m pip install pyarrow`。运行评测或该模块测试时保持虚拟环境激活。读取器通过 PATH 查找 Unix 的 `python3` 或 Windows 的 `python`；JSON 和 JSONL 输入由 Rust 直接读取。
 
 测试线索：评测 fixture 位于 `eval-tasks/fixtures/*`，包含 `buggy-rust`、`implement-trie` 等独立项目。
 

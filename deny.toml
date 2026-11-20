@@ -7,9 +7,6 @@ exclude = ["astrcode-desktop"]
 
 [advisories]
 version = 2
-ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "parquet 59 depends on paste; no safe upstream upgrade is available yet" },
-]
 
 [licenses]
 version = 2

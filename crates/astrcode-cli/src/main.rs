@@ -163,7 +163,8 @@ enum Commands {
         /// eval case 目录路径
         #[arg(long, default_value = "eval-tasks")]
         cases: std::path::PathBuf,
-        /// SWE-bench 数据文件、目录或 URL（json/jsonl/parquet）。设置后覆盖 --cases。
+        /// SWE-bench 数据文件、目录或 URL（JSON/JSONL/Parquet）。Parquet 需要 Python +
+        /// PyArrow。设置后覆盖 --cases。
         #[arg(long)]
         swe: Option<String>,
         // TODO: Add --limit/--sample before encouraging full SWE-bench runs. Full datasets are
