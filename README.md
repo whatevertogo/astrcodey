@@ -205,7 +205,7 @@ First-party extensions are wired through [`astrcode-bundled-extensions`](crates/
 | **Channels** | `astrcode-extension-channels` | Telegram channel bridge for using AstrCode from an external chat (disabled by default) |
 | **Web Tools** | `astrcode-extension-web-tools` | Built-in `web-search` and `fetch-url` tools (DuckDuckGo default; Brave/Serper/DeepSeek optional) |
 
-Configure Web Tools under `extensions.astrcode-web-tools` (enabled by default):
+Web Tools use DuckDuckGo by default. To select DeepSeek, which bills per successful search with results, configure the extension as follows.
 
 ```toml
 [extensions.astrcode-web-tools.search]

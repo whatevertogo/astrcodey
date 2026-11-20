@@ -205,7 +205,7 @@ allowedChatIds = ["123456789"]
 | **Channels** | `astrcode-extension-channels` | Telegram 通道桥接，可从外部聊天使用 AstrCode（默认关闭） |
 | **Web Tools** | `astrcode-extension-web-tools` | 内置 `web-search` 与 `fetch-url` 工具（默认 DuckDuckGo；可选 Brave/Serper/DeepSeek） |
 
-Web Tools 在 `extensions.astrcode-web-tools` 下配置（默认启用）：
+Web Tools 默认使用 DuckDuckGo。以下配置会切换到 DeepSeek，成功返回非空结果的搜索按次计费。
 
 ```toml
 [extensions.astrcode-web-tools.search]
