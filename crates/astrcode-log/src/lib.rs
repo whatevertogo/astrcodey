@@ -36,7 +36,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 use tracing_subscriber::{
     Layer, Registry, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt,
 };
@@ -156,7 +156,8 @@ pub fn init_with(opts: LogOptions) -> tracing_appender::non_blocking::WorkerGuar
 }
 
 fn next_log_path(log_dir: &Path) -> PathBuf {
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+    let now = ZonedDateTime::now();
+    let timestamp = now.strftime("%Y%m%d-%H%M%S");
     let stem = format!("{LOG_FILE_PREFIX}{timestamp}-{}", std::process::id());
     let mut path = log_dir.join(format!("{stem}.{LOG_FILE_EXTENSION}"));
     let mut suffix = 1;

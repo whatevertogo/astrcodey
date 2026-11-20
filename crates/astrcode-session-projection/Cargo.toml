@@ -8,7 +8,7 @@ description = "Pure session read-model projection derived from AstrCode events"
 [dependencies]
 serde_json = { workspace = true }
 astrcode-core = { path = "../astrcode-core" }
-chrono = { workspace = true }
+jiff = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

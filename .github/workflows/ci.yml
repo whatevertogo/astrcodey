@@ -60,6 +60,11 @@ jobs:
           cargo run -p astrcode-s5r-runtime --features conformance --bin s5r-conformance --
           --extension-id s5r-guest-demo --
           crates/astrcode-extensions/tests/s5r-guest/target/release/s5r_guest_demo
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install Parquet reader for SWE-bench tests
+        run: python -m pip install pyarrow
       - run: cargo test --workspace --all-features
 
   audit:

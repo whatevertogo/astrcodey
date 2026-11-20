@@ -749,7 +749,7 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
                 theme.dim,
             )));
         }
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         for i in window_start..window_end {
             let entry = &picker.items[i];
             let marker = if i == selected { "▸" } else { " " };

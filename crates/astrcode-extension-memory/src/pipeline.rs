@@ -8,7 +8,7 @@ use astrcode_extension_sdk::{
         SessionInspectContent, SessionInspectListItem, SessionInspectReadModel,
     },
 };
-use chrono::{DateTime, Local, Utc};
+use jiff::{Timestamp, ZonedDateTime};
 use serde::Deserialize;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
 #[derive(Clone)]
 struct Candidate {
     summary: SessionInspectListItem,
-    updated_at: DateTime<Utc>,
+    updated_at: Timestamp,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,10 +153,10 @@ async fn find_changed_candidates(
             if processed.get(s.session_id.as_str()) == Some(&s.updated_at) {
                 return None;
             }
-            let updated = DateTime::parse_from_rfc3339(&s.updated_at).ok()?;
+            let updated = s.updated_at.parse::<Timestamp>().ok()?;
             Some(Candidate {
                 summary: s,
-                updated_at: updated.with_timezone(&Utc),
+                updated_at: updated,
             })
         })
         .collect();
@@ -200,7 +200,7 @@ async fn extract_batch(
         return Ok(Vec::new());
     }
 
-    let current_date = Local::now().format("%Y-%m-%d").to_string();
+    let current_date = ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
     let user_prompt =
         prompts::batch_user_prompt(&blocks.join("\n\n"), &current_date, existing_memories);
     let messages = vec![

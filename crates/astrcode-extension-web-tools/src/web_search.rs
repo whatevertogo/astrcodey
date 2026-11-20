@@ -487,7 +487,7 @@ pub(crate) fn render_search_results(outcome: &WebSearchOutcome) -> String {
 }
 
 pub(crate) fn current_month_year() -> String {
-    chrono::Local::now().format("%B %Y").to_string()
+    jiff::ZonedDateTime::now().strftime("%B %Y").to_string()
 }
 
 #[cfg(test)]

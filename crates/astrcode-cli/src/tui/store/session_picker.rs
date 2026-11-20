@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 /// 将工作目录路径规范化以用于会话过滤比较。
 ///
@@ -29,14 +29,14 @@ pub fn canonicalize_working_dir(path: &str) -> String {
 ///
 /// 示例输出：`now`、`5m`、`2h`、`3d`、`2w`、`6mo`、`1y`。
 /// 解析失败时返回空字符串，调用方可据此决定是否展示。
-pub fn format_relative_time(timestamp: &str, now: DateTime<Utc>) -> String {
-    let parsed = match DateTime::parse_from_rfc3339(timestamp) {
-        Ok(t) => t.with_timezone(&Utc),
+pub fn format_relative_time(timestamp: &str, now: Timestamp) -> String {
+    let parsed = match timestamp.parse::<Timestamp>() {
+        Ok(t) => t,
         Err(_) => return String::new(),
     };
-    let delta = now.signed_duration_since(parsed);
+    let delta = now.duration_since(parsed);
     // 未来时间（时钟漂移）按 now 处理。
-    let secs = delta.num_seconds().max(0);
+    let secs = delta.as_secs().max(0);
 
     if secs < 60 {
         "now".into()
@@ -57,27 +57,27 @@ pub fn format_relative_time(timestamp: &str, now: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use jiff::SignedDuration;
 
     use super::*;
 
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap()
+    fn now() -> Timestamp {
+        "2026-05-21T12:00:00Z".parse().unwrap()
     }
 
     #[test]
     fn formats_each_relative_time_bucket() {
         for (duration, expected) in [
-            (chrono::Duration::seconds(30), "now"),
-            (chrono::Duration::minutes(5), "5m"),
-            (chrono::Duration::hours(3), "3h"),
-            (chrono::Duration::days(2), "2d"),
-            (chrono::Duration::days(10), "1w"),
-            (chrono::Duration::days(60), "2mo"),
-            (chrono::Duration::days(400), "1y"),
+            (SignedDuration::from_secs(30), "now"),
+            (SignedDuration::from_mins(5), "5m"),
+            (SignedDuration::from_hours(3), "3h"),
+            (SignedDuration::from_hours(24 * 2), "2d"),
+            (SignedDuration::from_hours(24 * 10), "1w"),
+            (SignedDuration::from_hours(24 * 60), "2mo"),
+            (SignedDuration::from_hours(24 * 400), "1y"),
         ] {
             assert_eq!(
-                format_relative_time(&(now() - duration).to_rfc3339(), now()),
+                format_relative_time(&(now() - duration).to_string(), now()),
                 expected
             );
         }
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn handles_future_timestamps_as_now() {
-        let ts = (now() + chrono::Duration::minutes(10)).to_rfc3339();
+        let ts = (now() + SignedDuration::from_mins(10)).to_string();
         assert_eq!(format_relative_time(&ts, now()), "now");
     }
 

@@ -6,16 +6,12 @@
 use std::{
     ffi::OsStr,
     fs,
-    fs::File,
+    io::{BufReader, Seek},
     path::{Path, PathBuf},
+    process::Command,
 };
 
-use parquet::{
-    file::reader::{FileReader, SerializedFileReader},
-    record::{Field, Row},
-};
 use serde::Deserialize;
-use serde_json::{Map, Number, Value};
 use walkdir::WalkDir;
 
 use crate::{
@@ -238,123 +234,44 @@ fn load_swe_case_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
 }
 
 fn load_swe_parquet_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
-    let file = File::open(path).map_err(|e| {
-        EvalError::CaseLoad(format!(
-            "failed to open SWE parquet {}: {e}",
-            path.display()
-        ))
-    })?;
-    let reader = SerializedFileReader::new(file).map_err(|e| {
-        EvalError::CaseLoad(format!(
-            "failed to read SWE parquet {}: {e}",
-            path.display()
-        ))
-    })?;
-    let rows = reader.get_row_iter(None).map_err(|e| {
-        EvalError::CaseLoad(format!(
-            "failed to iterate SWE parquet rows {}: {e}",
-            path.display()
-        ))
-    })?;
-
-    let mut records = Vec::new();
-    for (index, row) in rows.enumerate() {
-        let row = row.map_err(|e| {
+    // Spool the projected rows so a failed decoder never yields partial cases
+    // and a large dataset does not require a second copy in memory.
+    let mut rows = tempfile::tempfile()?;
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let output = Command::new(python)
+        .args(["-I", "-c", include_str!("swe_parquet.py")])
+        .arg(path)
+        .stdout(rows.try_clone()?)
+        .output()
+        .map_err(|e| {
             EvalError::CaseLoad(format!(
-                "failed to read SWE parquet row {}:{}: {e}",
-                path.display(),
-                index + 1
+                "cannot start {python} to read SWE parquet {}: {e}. Activate a Python environment \
+                 with pyarrow installed",
+                path.display()
             ))
         })?;
-        let value = parquet_row_to_json(row);
-        let record = serde_json::from_value::<SweBenchRecord>(value).map_err(|e| {
-            EvalError::CaseLoad(format!(
-                "invalid SWE parquet row {}:{}: {e}",
-                path.display(),
-                index + 1
-            ))
-        })?;
-        records.push(record);
+    if !output.status.success() {
+        return Err(EvalError::CaseLoad(format!(
+            "failed to read SWE parquet {} ({}): {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
-    Ok(records)
-}
-
-fn parquet_row_to_json(row: Row) -> Value {
-    Value::Object(
-        row.into_columns()
-            .into_iter()
-            .map(|(name, field)| (name, parquet_field_to_json(field)))
-            .collect::<Map<_, _>>(),
-    )
-}
-
-fn parquet_field_to_json(field: Field) -> Value {
-    match field {
-        Field::Null => Value::Null,
-        Field::Bool(value) => Value::Bool(value),
-        Field::Byte(value) => Number::from(value).into(),
-        Field::Short(value) => Number::from(value).into(),
-        Field::Int(value) => Number::from(value).into(),
-        Field::Long(value) => Number::from(value).into(),
-        Field::UByte(value) => Number::from(value).into(),
-        Field::UShort(value) => Number::from(value).into(),
-        Field::UInt(value) => Number::from(value).into(),
-        Field::ULong(value) => Number::from(value).into(),
-        Field::Float16(value) => Number::from_f64(value.to_f32() as f64)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        Field::Float(value) => Number::from_f64(value as f64)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        Field::Double(value) => Number::from_f64(value)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        Field::Decimal(value) => Value::String(format!("{value:?}")),
-        Field::Str(value) => Value::String(value),
-        Field::Bytes(value) => Value::String(
-            value
-                .as_utf8()
-                .map(str::to_string)
-                .unwrap_or_else(|_| String::from_utf8_lossy(value.data()).into_owned()),
-        ),
-        Field::Date(value) => Number::from(value).into(),
-        Field::TimeMillis(value) => Number::from(value).into(),
-        Field::TimeMicros(value) => Number::from(value).into(),
-        Field::TimestampMillis(value) => Number::from(value).into(),
-        Field::TimestampMicros(value) => Number::from(value).into(),
-        Field::Group(value) => parquet_row_to_json(value),
-        Field::ListInternal(value) => Value::Array(
-            value
-                .elements()
-                .iter()
-                .cloned()
-                .map(parquet_field_to_json)
-                .collect(),
-        ),
-        Field::MapInternal(value) => Value::Object(
-            value
-                .entries()
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        parquet_field_to_map_key(key),
-                        parquet_field_to_json(value.clone()),
-                    )
-                })
-                .collect::<Map<_, _>>(),
-        ),
-    }
-}
-
-fn parquet_field_to_map_key(field: &Field) -> String {
-    match field {
-        Field::Str(value) => value.clone(),
-        Field::Bytes(value) => value
-            .as_utf8()
-            .map(str::to_string)
-            .unwrap_or_else(|_| String::from_utf8_lossy(value.data()).into_owned()),
-        _ => field.to_string(),
-    }
+    rows.rewind()?;
+    serde_json::Deserializer::from_reader(BufReader::new(rows))
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            row.map_err(|e| {
+                EvalError::CaseLoad(format!(
+                    "invalid SWE parquet row {}:{}: {e}",
+                    path.display(),
+                    index + 1
+                ))
+            })
+        })
+        .collect()
 }
 
 fn map_records_to_cases(path: &Path, records: Vec<SweBenchRecord>) -> Vec<EvalCase> {
@@ -562,11 +479,16 @@ mod tests {
 
     #[test]
     fn parquet_input_loads_official_swe_bench_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test-00000-of-00001.parquet");
-        write_single_swe_parquet_record(&path);
-
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/swe-cases.parquet");
         let records = load_swe_case_file(&path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].tags.as_deref().unwrap(),
+            ["regression", "unicode-中文"]
+        );
+        assert_eq!(records[0].timeout_secs, Some(120));
+        assert!(records[1].tags.is_none());
+        assert!(records[1].timeout_secs.is_none());
         let case = map_swe_record_to_case(records.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(case.id, "django__django-12345");
@@ -575,58 +497,5 @@ mod tests {
             case.judges.as_slice(),
             [JudgeConfig::SweBenchPatch { instance_id }] if instance_id == "django__django-12345"
         ));
-    }
-
-    fn write_single_swe_parquet_record(path: &Path) {
-        use std::sync::Arc;
-
-        use parquet::{
-            data_type::{ByteArray, ByteArrayType},
-            file::{properties::WriterProperties, writer::SerializedFileWriter},
-            schema::parser::parse_message_type,
-        };
-
-        let schema = Arc::new(
-            parse_message_type(
-                r#"
-                message swe_bench {
-                    REQUIRED BINARY instance_id (UTF8);
-                    REQUIRED BINARY repo (UTF8);
-                    REQUIRED BINARY base_commit (UTF8);
-                    REQUIRED BINARY problem_statement (UTF8);
-                    REQUIRED BINARY hints_text (UTF8);
-                    REQUIRED BINARY FAIL_TO_PASS (UTF8);
-                    REQUIRED BINARY PASS_TO_PASS (UTF8);
-                    REQUIRED BINARY test_patch (UTF8);
-                }
-                "#,
-            )
-            .unwrap(),
-        );
-        let props = Arc::new(WriterProperties::builder().build());
-        let file = std::fs::File::create(path).unwrap();
-        let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
-        let mut row_group = writer.next_row_group().unwrap();
-
-        for value in [
-            "django__django-12345",
-            "django/django",
-            "abc123",
-            "Fix the issue.",
-            "Look at the parser.",
-            "[\"tests.test_parser\"]",
-            "[]",
-            "diff --git a/tests.py b/tests.py",
-        ] {
-            let mut column = row_group.next_column().unwrap().unwrap();
-            column
-                .typed::<ByteArrayType>()
-                .write_batch(&[ByteArray::from(value)], None, None)
-                .unwrap();
-            column.close().unwrap();
-        }
-
-        row_group.close().unwrap();
-        writer.close().unwrap();
     }
 }
