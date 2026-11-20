@@ -8,7 +8,7 @@ description = "Codex-style session goal extension"
 [dependencies]
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 async-trait = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

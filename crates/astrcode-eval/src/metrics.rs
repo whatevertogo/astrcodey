@@ -76,7 +76,7 @@ impl Metrics {
         }
 
         if let (Some(first), Some(last)) = (first_turn_ts, last_turn_ts) {
-            metrics.total_duration_ms = (last - first).num_milliseconds().max(0) as u64;
+            metrics.total_duration_ms = (last - first).as_millis().max(0) as u64;
         }
 
         metrics

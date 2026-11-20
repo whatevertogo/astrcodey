@@ -5,7 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::Utc;
+use astrcode_extension_sdk::time::format_rfc3339;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -230,7 +231,7 @@ impl MemoryIndex {
         }
 
         let mut index = self.load_index()?;
-        let now = Utc::now().to_rfc3339();
+        let now = format_rfc3339(Timestamp::now());
 
         let similar_idx = replaces
             .and_then(|p| Self::find_by_substring(&index.records, p))

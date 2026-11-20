@@ -11,6 +11,7 @@ use astrcode_extension_sdk::{
         ProviderContributionHandler, ProviderContributionId, ProviderSettlementContext, Registrar,
         ToolContext, ToolHandler, ToolPlanContext,
     },
+    time::format_rfc3339,
     tool::{
         HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata, ToolPromptTag,
         ToolResult, tool_metadata,
@@ -534,7 +535,7 @@ fn needs_verification_nudge(items: &[ProgressItem]) -> bool {
 }
 
 fn now_utc() -> String {
-    chrono::Utc::now().to_rfc3339()
+    format_rfc3339(jiff::Timestamp::now())
 }
 
 fn status_label(status: ProgressStatus) -> &'static str {
