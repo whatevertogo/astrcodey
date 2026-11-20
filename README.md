@@ -203,14 +203,14 @@ First-party extensions are wired through [`astrcode-bundled-extensions`](crates/
 | **Goal** | `astrcode-extension-goal` | Codex-style session goal tracking, token budgets, and automatic continuation |
 | **Memory** | `astrcode-extension-memory` | Project-scoped markdown memory storage (disabled by default) |
 | **Channels** | `astrcode-extension-channels` | Telegram channel bridge for using AstrCode from an external chat (disabled by default) |
-| **Web Tools** | `astrcode-extension-web-tools` | Built-in `web-search` and `fetch-url` tools (DuckDuckGo default; Brave/Serper optional) |
+| **Web Tools** | `astrcode-extension-web-tools` | Built-in `web-search` and `fetch-url` tools (DuckDuckGo default; Brave/Serper/DeepSeek optional) |
 
-Configure Web Tools under `extensions.astrcode-web-tools` (enabled by default):
+Web Tools use DuckDuckGo by default. To select DeepSeek, which bills per successful search with results, configure the extension as follows.
 
 ```toml
 [extensions.astrcode-web-tools.search]
-provider = "duckduckgo"
-braveApiKeyEnv = "BRAVE_API_KEY"
+provider = "deepseek"
+deepseekApiKeyEnv = "DEEPSEEK_API_KEY"
 ```
 
 See [Configuration Guide](docs/configuration.md#web-tools-extension) for full options.
