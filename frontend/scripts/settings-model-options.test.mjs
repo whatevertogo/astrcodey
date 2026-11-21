@@ -4,6 +4,8 @@ import {
   thinkingFormToRequest,
   effortOptions,
   isToggleOnlyThinking,
+  webSearchFormFromConfig,
+  webSearchFormToRequest,
 } from '../../target/frontend-settings-model-options/settingsSupport.js'
 
 // ── deriveThinkingFormValue ──
@@ -361,6 +363,74 @@ import {
       budgetMax: null,
     }),
     true
+  )
+}
+
+// ── webSearchFormFromConfig / webSearchFormToRequest ──
+
+{
+  const form = webSearchFormFromConfig({
+    provider: 'deepseek',
+    hasDeepseekApiKey: true,
+    deepseekApiKeyEnv: 'CUSTOM_DEEPSEEK_KEY',
+    hasBraveApiKey: false,
+    braveApiKeyEnv: null,
+    hasSerperApiKey: false,
+    serperApiKeyEnv: null,
+    defaultMaxResults: 8,
+    requestTimeoutSecs: 45,
+  })
+  assert.deepEqual(form, {
+    provider: 'deepseek',
+    deepseekApiKey: '',
+    clearDeepseekApiKey: false,
+    deepseekApiKeyEnv: 'CUSTOM_DEEPSEEK_KEY',
+    braveApiKey: '',
+    clearBraveApiKey: false,
+    braveApiKeyEnv: '',
+    serperApiKey: '',
+    clearSerperApiKey: false,
+    serperApiKeyEnv: '',
+    defaultMaxResults: '8',
+    requestTimeoutSecs: '45',
+  })
+
+  const req = webSearchFormToRequest({
+    ...form,
+    deepseekApiKey: '  sk-deepseek-search  ',
+  })
+  assert.deepEqual(req, {
+    provider: 'deepseek',
+    deepseekApiKey: 'sk-deepseek-search',
+    clearDeepseekApiKey: undefined,
+    deepseekApiKeyEnv: 'CUSTOM_DEEPSEEK_KEY',
+    braveApiKey: undefined,
+    clearBraveApiKey: undefined,
+    braveApiKeyEnv: '',
+    serperApiKey: undefined,
+    clearSerperApiKey: undefined,
+    serperApiKeyEnv: '',
+    defaultMaxResults: 8,
+    requestTimeoutSecs: 45,
+  })
+}
+
+{
+  assert.throws(
+    () =>
+      webSearchFormToRequest({
+        ...webSearchFormFromConfig(null),
+        defaultMaxResults: '25',
+      }),
+    /1 到 20 之间的整数/
+  )
+  assert.throws(
+    () =>
+      webSearchFormToRequest({
+        ...webSearchFormFromConfig(null),
+        requestTimeoutSecs: '0',
+      }),
+    /正整数/
   )
 }
 

@@ -215,6 +215,23 @@ impl_bidirectional_wire_conversion!(ApprovalMode => ApprovalModeDto { Manual, Yo
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchProviderDto {
+    DuckDuckGo,
+    DeepSeek,
+    Brave,
+    Serper,
+}
+
+impl_wire_values!(WebSearchProviderDto {
+    DuckDuckGo,
+    DeepSeek,
+    Brave,
+    Serper,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderWireFormatDto {
     #[serde(rename = "openai_chat_completions")]
     OpenAiChatCompletions,
@@ -411,6 +428,10 @@ mod tests {
         );
         assert_wire_values(ApprovalModeDto::ALL, &["manual", "yolo"]);
         assert!(serde_json::from_str::<ApprovalModeDto>(r#""future_mode""#).is_err());
+        assert_wire_values(
+            WebSearchProviderDto::ALL,
+            &["duckduckgo", "deepseek", "brave", "serper"],
+        );
         assert_wire_values(
             CommandAvailabilityDto::ALL,
             &["all_transports", "interactive_only"],

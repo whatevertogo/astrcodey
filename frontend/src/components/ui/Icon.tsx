@@ -21,6 +21,7 @@ export type IconName =
   | 'monitor'
   | 'branch'
   | 'spark'
+  | 'globe'
 
 type IconProps = SVGProps<SVGSVGElement> & {
   name: IconName
@@ -183,6 +184,14 @@ const icons: Record<
       />
       <path d="m9 9 2.8 3L9 15" strokeWidth="1.8" />
       <path d="M13.5 15H16" strokeWidth="1.8" />
+    </svg>
+  ),
+  globe: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="12" cy="12" r="9" strokeWidth="2" />
+      <path d="M3.6 9h16.8" strokeWidth="2" />
+      <path d="M3.6 15h16.8" strokeWidth="2" />
+      <path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18Z" strokeWidth="2" />
     </svg>
   ),
 }

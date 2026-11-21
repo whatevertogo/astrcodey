@@ -4,6 +4,7 @@ export const PHASES = ["idle","thinking","streaming","calling_tool","compacting"
 export const TOOL_OUTPUT_STREAMS = ["stdout","stderr"] as const
 export const APPROVAL_DECISIONS = ["allow_once","deny_once","allow_always","deny_always"] as const
 export const APPROVAL_MODES = ["manual","yolo"] as const
+export const WEB_SEARCH_PROVIDERS = ["duckduckgo","deepseek","brave","serper"] as const
 export const COMMAND_AVAILABILITIES = ["all_transports","interactive_only"] as const
 export const SESSION_COMMAND_KINDS = ["compact_session","select_model"] as const
 export const EXTENSION_SOURCES = ["builtin","disk","unknown"] as const

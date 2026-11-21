@@ -105,4 +105,8 @@ export type { UpdateActiveSelectionRequest } from './UpdateActiveSelectionReques
 export type { UpdateActiveSelectionResponseDto } from './UpdateActiveSelectionResponseDto'
 export type { UpdateModelOptionsRequest } from './UpdateModelOptionsRequest'
 export type { UpdateModelOptionsResponseDto } from './UpdateModelOptionsResponseDto'
+export type { UpdateWebSearchConfigRequest } from './UpdateWebSearchConfigRequest'
+export type { UpdateWebSearchConfigResponseDto } from './UpdateWebSearchConfigResponseDto'
+export type { WebSearchConfigViewDto } from './WebSearchConfigViewDto'
+export type { WebSearchProviderDto } from './WebSearchProviderDto'
 export * from './wire-values'

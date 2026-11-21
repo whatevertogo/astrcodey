@@ -17,12 +17,16 @@ import {
   AppearanceSettingsSection,
   PermissionsSettingsSection,
   SettingsFeedbackView,
+  WebSearchSettingsSection,
 } from './SettingsPanels'
 import {
+  DEFAULT_WEB_SEARCH_FORM,
   deriveThinkingFormValue,
   EMPTY_MODEL_SELECTION,
   modelSelectionFromConfig,
   thinkingFormToRequest,
+  webSearchFormFromConfig,
+  webSearchFormToRequest,
   type ModelSelection,
   type PendingOperation,
   type ProviderConfigDialogState,
@@ -31,6 +35,7 @@ import {
   type SettingsFeedback,
   type SettingsSection,
   type ThinkingFormValue,
+  type WebSearchFormValue,
   SETTINGS_NAV_ITEMS,
 } from './settingsSupport'
 
@@ -54,6 +59,9 @@ export default function SettingsPage({
   const [selection, setSelection] = useState<ModelSelection>(
     EMPTY_MODEL_SELECTION
   )
+  const [webSearchForm, setWebSearchForm] = useState<WebSearchFormValue>(
+    DEFAULT_WEB_SEARCH_FORM
+  )
   const [yoloEnabled, setYoloEnabled] = useState(false)
   const [themePreference, setThemePreference] =
     useState<ThemePreference>(getStoredTheme)
@@ -66,6 +74,7 @@ export default function SettingsPage({
   const applyConfig = useCallback((config: ConfigView) => {
     setConfigView(config)
     setSelection(modelSelectionFromConfig(config, config.profiles))
+    setWebSearchForm(webSearchFormFromConfig(config.webSearch))
     setYoloEnabled(config.approvalMode === 'yolo')
   }, [])
 
@@ -175,6 +184,31 @@ export default function SettingsPage({
     setSelection((current) => ({ ...current, thinkingFormValue: value }))
     setFeedback(null)
   }, [])
+
+  const handleWebSearchFormChange = useCallback(
+    (patch: Partial<WebSearchFormValue>) => {
+      setWebSearchForm((current) => ({ ...current, ...patch }))
+      setFeedback(null)
+    },
+    []
+  )
+
+  const handleSaveWebSearch = useCallback(
+    () =>
+      runOperation({ kind: 'save-web-search' }, async () => {
+        const response = await api.updateWebSearchConfig(
+          webSearchFormToRequest(webSearchForm)
+        )
+        await refreshConfig()
+        setFeedback({
+          kind: 'success',
+          message: response.warning
+            ? `已保存网络搜索设置；${response.warning}`
+            : '已保存网络搜索设置',
+        })
+      }),
+    [refreshConfig, runOperation, webSearchForm]
+  )
 
   const handleReload = useCallback(
     () =>
@@ -386,6 +420,17 @@ export default function SettingsPage({
           setProviderDialog({ kind: 'remove', value })
           setFeedback(null)
         }}
+      />
+    )
+  } else if (section === 'web-search') {
+    sectionContent = (
+      <WebSearchSettingsSection
+        webSearchView={configView?.webSearch ?? null}
+        form={webSearchForm}
+        operation={operation}
+        onChange={handleWebSearchFormChange}
+        onReload={() => void handleReload()}
+        onSave={() => void handleSaveWebSearch()}
       />
     )
   } else if (section === 'permissions') {
