@@ -12,3 +12,8 @@ jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["testing"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
