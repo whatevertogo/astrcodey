@@ -511,15 +511,16 @@ session data path，不需要额外持久化 capability。
 - 工具：`getGoal`、`createGoal`、`updateGoal`。
 - Slash command：`/goal`，可显示、创建、暂停、恢复、清空、complete 或 blocked 当前 goal；`/goal budget <n>` 在预算耗尽后调整总额并恢复 active。
 - 持久化：`<session>/extension_data/astrcode-goal/goal/goal-state.json`。
-- 续跑：注册 `ContinueAfterStopOptions::unlimited()` 的 blocking-only `ContinueAfterStop` decision hook；hook 只设置下一步续跑意图，真正的目标上下文由 `BeforeProviderRequest` 以非持久 provider-visible user message 注入，避免写入 durable transcript。
-- Token 预算：声明 `SessionHistory` 后通过类型化 host client 汇总 `TokenUsageRecorded`，按 non-cached input + output 统计 goal token（分项缺失时从 provider `total_tokens` 扣除 cached input）；达到 `tokenBudget` 时系统把 goal 标为 `budget_limited`，再通过一次非持久 hidden provider message 让模型收尾，随后停止自动续跑。`budget_limited` 与 `paused` 的 goal 都可经 `/goal resume` 或 `/goal budget <n>` 恢复。
+- 续跑：模型自然结束（非 `refusal`）且目标仍为 active 时，扩展通过 `ContinueAfterStop` 请求宿主继续一步。仅当前 turn 的下一次模型请求携带按 ID 确认（失败可重试）的目标续跑或预算收尾提示，不会泄漏到后续不相关的新用户 turn，也不会写入 durable transcript。用户暂停、清除或替换目标后，过期回调无法写回旧状态。
+- 状态：`updateGoal` 支持 `complete`、`blocked` 与（仅用户明确要求时的）`paused`；`/goal resume` 支持从 `paused`、`blocked` 和 `usage_limited` 恢复。已耗尽预算的目标（或停用时用量不可用的带预算目标）须通过 `/goal budget <n>` 调整总额后恢复。
+- Token 预算：声明 `SessionHistory` 后通过类型化 host client 汇总 `TokenUsageRecorded`，按 non-cached input + output 统计 goal token（分项缺失时从 provider `total_tokens` 扣除 cached input）。扩展通过累计已用 token（`accumulatedTokens`）与停止快照（`tokensUsedAtStop`）在暂停、阻塞、完成或触及预算时冻结用量并在恢复时排除停用期间消耗；到达预算后转为 `budget_limited` 并投递绑定当前 turn 的一次性收尾提示，再停止自动续跑。
 
 能力声明：`SessionHistory`、`ProviderRequest`、`TurnContinuationControl`。session-local goal
 state 使用默认 namespaced session data path。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录、事件读取和 LLM/tool 类型都通过 SDK re-export 使用。
 
-测试线索：`store.rs` 覆盖状态持久化和状态转移；`lib.rs` 覆盖 token 预算、prompt 注入文本和 token fallback 汇总。
+测试线索：`store.rs` 覆盖状态持久化和状态转移、并发 ack 与恢复记账；`lib.rs` 覆盖 prompt 注入文本与参数校验；`tests/lifecycle.rs` 通过已注册的工具、命令和回调验证按需续跑、turn 作用域、`refusal` 停止与暂停/恢复生命周期。
 
 ## `astrcode-extension-memory`
 
