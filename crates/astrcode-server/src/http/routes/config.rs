@@ -5,12 +5,16 @@ use astrcode_core::{
     llm::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping, validate_thinking},
     permission::ApprovalMode,
 };
-use astrcode_protocol::http::{
-    ApplyProviderPresetRequest, ApplyProviderPresetResponseDto, ConfigReloadResponseDto,
-    ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto, ProviderCatalogResponseDto,
-    ProviderEndpointPresetDto, ProviderSpecCapabilitiesDto, ProviderSpecDto,
-    RemoveProviderPresetRequest, RemoveProviderPresetResponseDto, UpdateActiveSelectionRequest,
-    UpdateActiveSelectionResponseDto, UpdateModelOptionsRequest, UpdateModelOptionsResponseDto,
+use astrcode_protocol::{
+    http::{
+        ApplyProviderPresetRequest, ApplyProviderPresetResponseDto, ConfigReloadResponseDto,
+        ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto, ProviderCatalogResponseDto,
+        ProviderEndpointPresetDto, ProviderSpecCapabilitiesDto, ProviderSpecDto,
+        RemoveProviderPresetRequest, RemoveProviderPresetResponseDto, UpdateActiveSelectionRequest,
+        UpdateActiveSelectionResponseDto, UpdateModelOptionsRequest, UpdateModelOptionsResponseDto,
+        UpdateWebSearchConfigRequest, UpdateWebSearchConfigResponseDto, WebSearchConfigViewDto,
+    },
+    wire::WebSearchProviderDto,
 };
 use axum::{
     Json,
@@ -78,8 +82,9 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         active_profile: raw.active_profile.clone(),
         active_model: raw.active_model.clone(),
         active_small_profile: raw.active_small_profile.clone(),
-        active_small_model: raw.active_small_model,
+        active_small_model: raw.active_small_model.clone(),
         approval_mode: effective.agent.approval_mode.into(),
+        web_search: web_search_config_view(&raw),
         profiles,
         warning: None,
     })
@@ -357,6 +362,24 @@ pub(in crate::http) async fn update_model_options(
     }
 }
 
+pub(in crate::http) async fn update_web_search_config(
+    State(state): State<HttpState>,
+    Json(request): Json<UpdateWebSearchConfigRequest>,
+) -> Response {
+    match update_config(&state, |candidate| {
+        apply_web_search_config_update(candidate, request)
+    })
+    .await
+    {
+        Ok(()) => Json(UpdateWebSearchConfigResponseDto {
+            success: true,
+            warning: None,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 fn apply_model_options_update(
     candidate: &mut Config,
     request: UpdateModelOptionsRequest,
@@ -576,5 +599,222 @@ fn upsert_profile(profiles: &mut Vec<Profile>, profile: Profile) {
         *existing = profile;
     } else {
         profiles.push(profile);
+    }
+}
+
+const WEB_TOOLS_EXTENSION_ID: &str = "astrcode-web-tools";
+const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 5;
+const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30;
+const DEEPSEEK_DEFAULT_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+
+fn web_search_config_view(config: &Config) -> WebSearchConfigViewDto {
+    let search = config
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get(WEB_TOOLS_EXTENSION_ID))
+        .and_then(|web_tools| web_tools.get("search"))
+        .and_then(serde_json::Value::as_object);
+
+    let provider = search
+        .and_then(|s| s.get("provider"))
+        .and_then(|value| serde_json::from_value::<WebSearchProviderDto>(value.clone()).ok())
+        .unwrap_or(WebSearchProviderDto::DuckDuckGo);
+
+    let deepseek_api_key_env = search_optional_string(search, "deepseekApiKeyEnv");
+    let brave_api_key_env = search_optional_string(search, "braveApiKeyEnv");
+    let serper_api_key_env = search_optional_string(search, "serperApiKeyEnv");
+
+    let has_deepseek_api_key = search_has_api_key(
+        search,
+        "deepseekApiKey",
+        Some(
+            deepseek_api_key_env
+                .as_deref()
+                .unwrap_or(DEEPSEEK_DEFAULT_API_KEY_ENV),
+        ),
+    );
+    let has_brave_api_key = search_has_api_key(search, "braveApiKey", brave_api_key_env.as_deref());
+    let has_serper_api_key =
+        search_has_api_key(search, "serperApiKey", serper_api_key_env.as_deref());
+
+    let default_max_results = search
+        .and_then(|s| s.get("defaultMaxResults"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS);
+    let request_timeout_secs = search
+        .and_then(|s| s.get("requestTimeoutSecs"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(DEFAULT_WEB_SEARCH_TIMEOUT_SECS);
+
+    WebSearchConfigViewDto {
+        provider,
+        has_deepseek_api_key,
+        deepseek_api_key_env,
+        has_brave_api_key,
+        brave_api_key_env,
+        has_serper_api_key,
+        serper_api_key_env,
+        default_max_results,
+        request_timeout_secs,
+    }
+}
+
+fn search_optional_string(
+    search: Option<&serde_json::Map<String, serde_json::Value>>,
+    key: &str,
+) -> Option<String> {
+    search
+        .and_then(|s| s.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn search_has_api_key(
+    search: Option<&serde_json::Map<String, serde_json::Value>>,
+    inline_key: &str,
+    env_name: Option<&str>,
+) -> bool {
+    if search_optional_string(search, inline_key).is_some() {
+        return true;
+    }
+    env_name.is_some_and(|name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
+fn apply_web_search_config_update(
+    candidate: &mut Config,
+    request: UpdateWebSearchConfigRequest,
+) -> Result<(), ConfigRequestError> {
+    if let Some(max_results) = request.default_max_results
+        && !(1..=20).contains(&max_results)
+    {
+        return Err(ConfigRequestError::new(
+            "invalid_default_max_results",
+            "defaultMaxResults must be between 1 and 20",
+        ));
+    }
+    if let Some(timeout_secs) = request.request_timeout_secs
+        && timeout_secs == 0
+    {
+        return Err(ConfigRequestError::new(
+            "invalid_request_timeout_secs",
+            "requestTimeoutSecs must be greater than zero",
+        ));
+    }
+
+    let extensions = candidate.extensions.get_or_insert_with(Default::default);
+    let web_tools = extensions
+        .entry(WEB_TOOLS_EXTENSION_ID.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !web_tools.is_object() {
+        *web_tools = serde_json::json!({});
+    }
+    let web_tools_obj = web_tools
+        .as_object_mut()
+        .expect("web_tools was normalized to an object");
+    let search_entry = web_tools_obj
+        .entry("search".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !search_entry.is_object() {
+        *search_entry = serde_json::json!({});
+    }
+    let search = search_entry
+        .as_object_mut()
+        .expect("search_entry was normalized to an object");
+
+    let provider_value = serde_json::to_value(request.provider)
+        .expect("WebSearchProviderDto serializes to a JSON string");
+    search.insert("provider".to_string(), provider_value);
+
+    update_optional_secret(
+        search,
+        "deepseekApiKey",
+        request.deepseek_api_key.as_deref(),
+        request.clear_deepseek_api_key,
+    );
+    update_optional_string(
+        search,
+        "deepseekApiKeyEnv",
+        request.deepseek_api_key_env.as_deref(),
+    );
+    update_optional_secret(
+        search,
+        "braveApiKey",
+        request.brave_api_key.as_deref(),
+        request.clear_brave_api_key,
+    );
+    update_optional_string(
+        search,
+        "braveApiKeyEnv",
+        request.brave_api_key_env.as_deref(),
+    );
+    update_optional_secret(
+        search,
+        "serperApiKey",
+        request.serper_api_key.as_deref(),
+        request.clear_serper_api_key,
+    );
+    update_optional_string(
+        search,
+        "serperApiKeyEnv",
+        request.serper_api_key_env.as_deref(),
+    );
+
+    if let Some(max_results) = request.default_max_results {
+        search.insert(
+            "defaultMaxResults".to_string(),
+            serde_json::json!(max_results),
+        );
+    }
+    if let Some(timeout_secs) = request.request_timeout_secs {
+        search.insert(
+            "requestTimeoutSecs".to_string(),
+            serde_json::json!(timeout_secs),
+        );
+    }
+
+    Ok(())
+}
+
+fn update_optional_secret(
+    search: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+    clear: bool,
+) {
+    if clear {
+        search.remove(key);
+        return;
+    }
+    if let Some(trimmed) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        search.insert(
+            key.to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
+    }
+}
+
+fn update_optional_string(
+    search: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let Some(raw) = value else {
+        return;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        search.remove(key);
+    } else {
+        search.insert(
+            key.to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
     }
 }

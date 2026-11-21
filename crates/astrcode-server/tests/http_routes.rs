@@ -970,6 +970,82 @@ async fn get_config_exposes_thinking_and_capability() {
 }
 
 #[tokio::test]
+async fn web_search_config_route_persists_deepseek_and_preserves_fetch_settings() {
+    let runtime = runtime(Arc::new(immediate_llm())).await;
+    let config_path = runtime.config_manager().config_store().path().to_path_buf();
+    fs::write(
+        &config_path,
+        r#"[extensions.astrcode-web-tools.fetch]
+cacheTtlSecs = 600
+"#,
+    )
+    .unwrap();
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let reload_resp = post_json(app.clone(), "/api/config/reload", "{}").await;
+    assert_eq!(reload_resp.status(), StatusCode::OK);
+
+    let initial = get_json::<serde_json::Value>(app.clone(), "/api/config").await;
+    assert_eq!(initial["webSearch"]["provider"], "duckduckgo");
+    assert_eq!(initial["webSearch"]["defaultMaxResults"], 5);
+    assert_eq!(initial["webSearch"]["requestTimeoutSecs"], 30);
+
+    let body = serde_json::json!({
+        "provider": "deepseek",
+        "deepseekApiKey": "sk-deepseek-search",
+        "deepseekApiKeyEnv": "CUSTOM_DEEPSEEK_SEARCH_KEY",
+        "defaultMaxResults": 8,
+        "requestTimeoutSecs": 45
+    })
+    .to_string();
+    let response = post_json_owned(app.clone(), "/api/config/web-search", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let updated = get_json::<serde_json::Value>(app.clone(), "/api/config").await;
+    assert_eq!(updated["webSearch"]["provider"], "deepseek");
+    assert_eq!(updated["webSearch"]["hasDeepseekApiKey"], true);
+    assert_eq!(
+        updated["webSearch"]["deepseekApiKeyEnv"],
+        "CUSTOM_DEEPSEEK_SEARCH_KEY"
+    );
+    assert_eq!(updated["webSearch"]["defaultMaxResults"], 8);
+    assert_eq!(updated["webSearch"]["requestTimeoutSecs"], 45);
+    assert!(
+        updated["webSearch"].get("deepseekApiKey").is_none(),
+        "secret API key must not be echoed in GET /api/config"
+    );
+
+    let raw = runtime.config_manager().raw_config_snapshot();
+    let web_tools = &raw.extensions.as_ref().unwrap()["astrcode-web-tools"];
+    assert_eq!(web_tools["fetch"]["cacheTtlSecs"], 600);
+    assert_eq!(web_tools["search"]["provider"], "deepseek");
+    assert_eq!(web_tools["search"]["deepseekApiKey"], "sk-deepseek-search");
+
+    // Empty apiKey keeps existing secret; clear flag removes it.
+    let keep_key_body = serde_json::json!({
+        "provider": "deepseek",
+        "deepseekApiKeyEnv": ""
+    })
+    .to_string();
+    let response = post_json_owned(app.clone(), "/api/config/web-search", keep_key_body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let raw = runtime.config_manager().raw_config_snapshot();
+    let search = &raw.extensions.as_ref().unwrap()["astrcode-web-tools"]["search"];
+    assert_eq!(search["deepseekApiKey"], "sk-deepseek-search");
+    assert!(search.get("deepseekApiKeyEnv").is_none());
+
+    let clear_key_body = serde_json::json!({
+        "provider": "deepseek",
+        "clearDeepseekApiKey": true
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/web-search", clear_key_body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let raw = runtime.config_manager().raw_config_snapshot();
+    let search = &raw.extensions.as_ref().unwrap()["astrcode-web-tools"]["search"];
+    assert!(search.get("deepseekApiKey").is_none());
+}
+
+#[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
     let app = router(Arc::clone(&runtime)).unwrap();

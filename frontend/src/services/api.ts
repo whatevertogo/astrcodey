@@ -19,6 +19,8 @@ import type {
   UpdateActiveSelectionResponseDto,
   UpdateModelOptionsRequest,
   UpdateModelOptionsResponseDto,
+  UpdateWebSearchConfigRequest,
+  UpdateWebSearchConfigResponseDto,
 } from './generated'
 import type {
   CreateSessionResponse,
@@ -399,6 +401,15 @@ export async function updateModelOptions(
   requestBody: UpdateModelOptionsRequest
 ): Promise<UpdateModelOptionsResponseDto> {
   return request('/api/config/model-options', {
+    method: 'POST',
+    body: JSON.stringify(requestBody),
+  })
+}
+
+export async function updateWebSearchConfig(
+  requestBody: UpdateWebSearchConfigRequest
+): Promise<UpdateWebSearchConfigResponseDto> {
+  return request('/api/config/web-search', {
     method: 'POST',
     body: JSON.stringify(requestBody),
   })

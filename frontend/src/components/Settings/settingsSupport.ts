@@ -3,6 +3,9 @@ import type {
   ThinkingCapabilityDto,
   ThinkingConfigDto,
   UpdateModelOptionsRequest,
+  UpdateWebSearchConfigRequest,
+  WebSearchConfigViewDto,
+  WebSearchProviderDto,
 } from '../../services/generated'
 import type {
   ConfigView,
@@ -19,6 +22,7 @@ import type { IconName } from '../ui'
 export type SettingsSection =
   | 'models'
   | 'providers'
+  | 'web-search'
   | 'permissions'
   | 'appearance'
 
@@ -34,6 +38,12 @@ export const SETTINGS_NAV_ITEMS: {
     label: 'Providers',
     hint: '所有已配置和预设',
     icon: 'plug',
+  },
+  {
+    id: 'web-search',
+    label: '网络搜索',
+    hint: '网页搜索服务与密钥',
+    icon: 'globe',
   },
   { id: 'permissions', label: '权限', hint: '工具批准策略', icon: 'shield' },
   { id: 'appearance', label: '外观', hint: '主题显示偏好', icon: 'monitor' },
@@ -254,11 +264,130 @@ export function deriveModelThinkingForm(
 
 export type PendingOperation =
   | { kind: 'save' }
+  | { kind: 'save-web-search' }
   | { kind: 'reload' }
   | { kind: 'test' }
   | { kind: 'apply-provider'; providerId: string }
   | { kind: 'remove-profile'; profileName: string }
   | { kind: 'activate-profile'; profileName: string }
+
+// ── Web Search Form ──
+
+export interface WebSearchFormValue {
+  provider: WebSearchProviderDto
+  deepseekApiKey: string
+  clearDeepseekApiKey: boolean
+  deepseekApiKeyEnv: string
+  braveApiKey: string
+  clearBraveApiKey: boolean
+  braveApiKeyEnv: string
+  serperApiKey: string
+  clearSerperApiKey: boolean
+  serperApiKeyEnv: string
+  defaultMaxResults: string
+  requestTimeoutSecs: string
+}
+
+export const DEFAULT_WEB_SEARCH_FORM: WebSearchFormValue = {
+  provider: 'duckduckgo',
+  deepseekApiKey: '',
+  clearDeepseekApiKey: false,
+  deepseekApiKeyEnv: '',
+  braveApiKey: '',
+  clearBraveApiKey: false,
+  braveApiKeyEnv: '',
+  serperApiKey: '',
+  clearSerperApiKey: false,
+  serperApiKeyEnv: '',
+  defaultMaxResults: '5',
+  requestTimeoutSecs: '30',
+}
+
+export const WEB_SEARCH_PROVIDER_OPTIONS: {
+  value: WebSearchProviderDto
+  label: string
+  badge: string
+  hint: string
+}[] = [
+  {
+    value: 'duckduckgo',
+    label: 'DuckDuckGo',
+    badge: '默认 · 免密钥',
+    hint: '无需 API Key，开箱即用',
+  },
+  {
+    value: 'deepseek',
+    label: 'DeepSeek 官方搜索',
+    badge: 'API Key',
+    hint: '独立搜索 API（默认读取 DEEPSEEK_API_KEY），可搭配任意聊天模型，成功返回非空结果的搜索按次计费',
+  },
+  {
+    value: 'brave',
+    label: 'Brave Search',
+    badge: 'API Key',
+    hint: '使用 Brave Web Search API，未配置密钥时回退到 DuckDuckGo',
+  },
+  {
+    value: 'serper',
+    label: 'Serper (Google)',
+    badge: 'API Key',
+    hint: '使用 Serper Google Search API，未配置密钥时回退到 DuckDuckGo',
+  },
+]
+
+export function webSearchFormFromConfig(
+  webSearch: WebSearchConfigViewDto | null | undefined
+): WebSearchFormValue {
+  if (!webSearch) {
+    return DEFAULT_WEB_SEARCH_FORM
+  }
+  return {
+    provider: webSearch.provider,
+    deepseekApiKey: '',
+    clearDeepseekApiKey: false,
+    deepseekApiKeyEnv: webSearch.deepseekApiKeyEnv ?? '',
+    braveApiKey: '',
+    clearBraveApiKey: false,
+    braveApiKeyEnv: webSearch.braveApiKeyEnv ?? '',
+    serperApiKey: '',
+    clearSerperApiKey: false,
+    serperApiKeyEnv: webSearch.serperApiKeyEnv ?? '',
+    defaultMaxResults: String(webSearch.defaultMaxResults),
+    requestTimeoutSecs: String(webSearch.requestTimeoutSecs),
+  }
+}
+
+export function webSearchFormToRequest(
+  form: WebSearchFormValue
+): UpdateWebSearchConfigRequest {
+  const defaultMaxResults = Number(form.defaultMaxResults.trim())
+  if (
+    !Number.isInteger(defaultMaxResults) ||
+    defaultMaxResults < 1 ||
+    defaultMaxResults > 20
+  ) {
+    throw new Error('默认返回条数必须是 1 到 20 之间的整数')
+  }
+  const requestTimeoutSecs = Number(form.requestTimeoutSecs.trim())
+  if (!Number.isInteger(requestTimeoutSecs) || requestTimeoutSecs <= 0) {
+    throw new Error('请求超时时间必须是正整数（秒）')
+  }
+
+  return {
+    provider: form.provider,
+    deepseekApiKey: form.deepseekApiKey.trim() || undefined,
+    clearDeepseekApiKey: form.clearDeepseekApiKey || undefined,
+    deepseekApiKeyEnv: form.deepseekApiKeyEnv.trim(),
+    braveApiKey: form.braveApiKey.trim() || undefined,
+    clearBraveApiKey: form.clearBraveApiKey || undefined,
+    braveApiKeyEnv: form.braveApiKeyEnv.trim(),
+    serperApiKey: form.serperApiKey.trim() || undefined,
+    clearSerperApiKey: form.clearSerperApiKey || undefined,
+    serperApiKeyEnv: form.serperApiKeyEnv.trim(),
+    defaultMaxResults,
+    requestTimeoutSecs,
+  }
+}
 
 export type SettingsFeedback =
   | { kind: 'test'; result: ModelTestResult }

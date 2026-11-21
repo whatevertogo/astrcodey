@@ -52,6 +52,10 @@ import type {
   ToolCallStatusDto,
   ToolApprovalDto,
   ToolOutputStreamDto,
+  UpdateWebSearchConfigRequest,
+  UpdateWebSearchConfigResponseDto,
+  WebSearchConfigViewDto,
+  WebSearchProviderDto,
 } from './generated'
 
 export {
@@ -64,6 +68,7 @@ export {
   PROVIDER_WIRE_FORMATS,
   TOOL_CALL_STATUSES,
   TOOL_OUTPUT_STREAMS,
+  WEB_SEARCH_PROVIDERS,
 } from './generated'
 
 export type Phase = PhaseDto
@@ -93,6 +98,7 @@ export type {
   CreateSessionRequest,
   PromptRequest,
   RemoveProviderPresetRequest,
+  UpdateWebSearchConfigRequest,
 }
 
 // ── Request/Response ──
@@ -333,6 +339,10 @@ export type ProviderAuthScheme = ProviderAuthSchemeDto
 export type ModelView = ModelDto
 
 export type ConfigView = ConfigViewResponseDto
+
+export type WebSearchProvider = WebSearchProviderDto
+export type WebSearchConfigView = WebSearchConfigViewDto
+export type UpdateWebSearchConfigResponse = UpdateWebSearchConfigResponseDto
 
 export type ProviderCatalogView = ProviderCatalogResponseDto
 

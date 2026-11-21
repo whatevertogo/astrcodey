@@ -151,6 +151,10 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             "/api/config/model-options",
             post(config::update_model_options),
         )
+        .route(
+            "/api/config/web-search",
+            post(config::update_web_search_config),
+        )
         .route("/api/extensions", get(extensions::list_extensions))
         .route(
             "/api/extensions/reload",

@@ -159,6 +159,9 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         UpdateModelOptionsResponseDto,
         UpdateActiveSelectionRequest,
         UpdateActiveSelectionResponseDto,
+        WebSearchConfigViewDto,
+        UpdateWebSearchConfigRequest,
+        UpdateWebSearchConfigResponseDto,
         ConfigReloadResponseDto,
         CurrentModelResponseDto,
         AvailableModelDto,
@@ -170,6 +173,7 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ToolOutputStreamDto,
         ApprovalDecisionDto,
         ApprovalModeDto,
+        WebSearchProviderDto,
         CommandAvailabilityDto,
         CommandExecutionDto,
         ExtensionSourceDto,
@@ -194,6 +198,11 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     push_wire_values(&mut output, "TOOL_OUTPUT_STREAMS", ToolOutputStreamDto::ALL)?;
     push_wire_values(&mut output, "APPROVAL_DECISIONS", ApprovalDecisionDto::ALL)?;
     push_wire_values(&mut output, "APPROVAL_MODES", ApprovalModeDto::ALL)?;
+    push_wire_values(
+        &mut output,
+        "WEB_SEARCH_PROVIDERS",
+        WebSearchProviderDto::ALL,
+    )?;
     push_wire_values(
         &mut output,
         "COMMAND_AVAILABILITIES",

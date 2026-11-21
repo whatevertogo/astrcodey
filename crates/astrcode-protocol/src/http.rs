@@ -10,7 +10,7 @@ use crate::wire::{
     ApprovalDecisionDto, ApprovalModeDto, ExtensionCapabilityDto, ExtensionHttpMethodDto,
     ExtensionSourceDto, ExtensionStageStatusDto, PhaseDto, ProviderAuthSchemeDto,
     ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto, ToolOutputStreamDto,
-    impl_wire_values,
+    WebSearchProviderDto, impl_wire_values,
 };
 pub use crate::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto, AgentSessionUpdateDto},
@@ -680,7 +680,67 @@ pub struct ConfigViewResponseDto {
     #[cfg_attr(feature = "typescript", ts(optional))]
     pub active_small_model: Option<String>,
     pub approval_mode: ApprovalModeDto,
+    pub web_search: WebSearchConfigViewDto,
     pub profiles: Vec<ProfileDto>,
+    pub warning: Option<String>,
+}
+
+/// 网络搜索配置视图（与 `extensions.astrcode-web-tools.search` 对齐）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfigViewDto {
+    pub provider: WebSearchProviderDto,
+    pub has_deepseek_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek_api_key_env: Option<String>,
+    pub has_brave_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brave_api_key_env: Option<String>,
+    pub has_serper_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serper_api_key_env: Option<String>,
+    pub default_max_results: usize,
+    pub request_timeout_secs: u64,
+}
+
+/// POST /api/config/web-search 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWebSearchConfigRequest {
+    pub provider: WebSearchProviderDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_deepseek_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek_api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brave_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_brave_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brave_api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serper_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_serper_api_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serper_api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_max_results: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
+}
+
+/// POST /api/config/web-search 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWebSearchConfigResponseDto {
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
 
