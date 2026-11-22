@@ -57,6 +57,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode, header},
 };
+use base64::Engine as _;
 use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
@@ -163,10 +164,7 @@ impl LlmProvider for PendingLlm {
     }
 
     fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
+        ModelLimits::testing(1024)
     }
 }
 
@@ -1139,6 +1137,52 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
 }
 
 #[tokio::test]
+async fn prompt_route_resizes_large_image_before_persisting_user_message() {
+    let runtime = runtime(Arc::new(immediate_llm())).await;
+    let app = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone()).await;
+    let prompt_uri = format!("/api/sessions/{session_id}/prompt");
+
+    let image = image::RgbaImage::from_pixel(3_000, 2_000, image::Rgba([180, 90, 40, 255]));
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let body = serde_json::json!({
+        "text": "describe",
+        "attachments": [{
+            "filename": "large.png",
+            "content": base64::engine::general_purpose::STANDARD.encode(png),
+            "mediaType": "image/png"
+        }]
+    })
+    .to_string();
+    let response = post_json_owned(app, &prompt_uri, body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = runtime
+        .event_store()
+        .replay_events(&SessionId::new(&session_id))
+        .await
+        .unwrap();
+    let attachments = events
+        .iter()
+        .find_map(|stored| match &stored.event.payload {
+            DurableEventPayload::UserMessage { attachments, .. } => Some(attachments),
+            _ => None,
+        })
+        .expect("prompt must persist a user message");
+    assert_eq!(attachments.len(), 1);
+
+    let stored = base64::engine::general_purpose::STANDARD
+        .decode(&attachments[0].content)
+        .unwrap();
+    let stored = image::load_from_memory(&stored).unwrap();
+    assert!(stored.width() <= 2_048);
+    assert!(stored.height() <= 2_048);
+}
+
+#[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
     let app = router(Arc::clone(&runtime)).unwrap();
@@ -1148,12 +1192,14 @@ async fn inject_route_writes_mid_turn_user_message() {
     let inject_uri = format!("/api/sessions/{session_id}/inject");
     let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#).await;
 
-    // 3 MiB Base64 超过 axum 默认 2 MiB body limit，确保 inject 路由带上了 prompt 同款上限。
+    // 3 MiB padding 超过 axum 默认 2 MiB body limit，确保 inject 路由带上了 prompt 同款上限。
+    // 附件本身用 1x1 PNG，避免测试把时间花在图片解码上。
     let inject_body = serde_json::json!({
         "text": "steer me",
+        "padding": "p".repeat(3 * 1024 * 1024),
         "attachments": [{
             "filename": "steer.png",
-            "content": "A".repeat(3 * 1024 * 1024),
+            "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
             "mediaType": "image/png"
         }]
     })
