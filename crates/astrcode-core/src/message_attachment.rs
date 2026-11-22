@@ -4,8 +4,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// 单条附件内容上限（与 TUI / 前端一致）。
+/// 单条附件内容上限（原始字节；与 TUI / 前端一致）。
+///
+/// 图片在线缆上以 Base64 传输，校验与 HTTP body 上限按
+/// [`MAX_ATTACHMENT_WIRE_CONTENT_BYTES`] 折算，避免编码膨胀误拒合法图片。
 pub const MAX_ATTACHMENT_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// 单条附件在线缆上的内容上限：Base64 每 3 字节编码为 4 个字符。
+pub const MAX_ATTACHMENT_WIRE_CONTENT_BYTES: usize = MAX_ATTACHMENT_CONTENT_BYTES.div_ceil(3) * 4;
 
 /// 单次 prompt 附件数量上限。
 pub const MAX_ATTACHMENTS: usize = 4;
@@ -53,7 +59,7 @@ pub fn validate_attachments(
         });
     }
     for (index, attachment) in attachments.iter().enumerate() {
-        if attachment.content.len() > MAX_ATTACHMENT_CONTENT_BYTES {
+        if attachment.content.len() > attachment.max_wire_content_bytes() {
             return Err(AttachmentValidationError::ContentTooLarge {
                 index,
                 max_bytes: MAX_ATTACHMENT_CONTENT_BYTES,
@@ -74,6 +80,15 @@ impl MessageAttachment {
 
     pub(crate) fn is_image(&self) -> bool {
         self.media_type.starts_with("image/")
+    }
+
+    /// `content` 在线缆上的上限：图片为 Base64 文本，其余附件按原始字节计。
+    fn max_wire_content_bytes(&self) -> usize {
+        if self.is_image() {
+            MAX_ATTACHMENT_WIRE_CONTENT_BYTES
+        } else {
+            MAX_ATTACHMENT_CONTENT_BYTES
+        }
     }
 }
 
@@ -99,7 +114,36 @@ mod tests {
         };
         assert!(matches!(
             validate_attachments(&[attachment]),
-            Err(AttachmentValidationError::ContentTooLarge { .. })
+            Err(AttachmentValidationError::ContentTooLarge {
+                max_bytes: MAX_ATTACHMENT_CONTENT_BYTES,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn accepts_base64_image_at_raw_content_limit() {
+        let attachment = MessageAttachment {
+            filename: "limit.png".into(),
+            content: "A".repeat(MAX_ATTACHMENT_WIRE_CONTENT_BYTES),
+            media_type: "image/png".into(),
+        };
+        assert!(validate_attachments(&[attachment]).is_ok());
+    }
+
+    #[test]
+    fn rejects_base64_image_above_wire_content_limit() {
+        let attachment = MessageAttachment {
+            filename: "too-big.png".into(),
+            content: "A".repeat(MAX_ATTACHMENT_WIRE_CONTENT_BYTES + 4),
+            media_type: "image/png".into(),
+        };
+        assert!(matches!(
+            validate_attachments(&[attachment]),
+            Err(AttachmentValidationError::ContentTooLarge {
+                max_bytes: MAX_ATTACHMENT_CONTENT_BYTES,
+                ..
+            })
         ));
     }
 }

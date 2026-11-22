@@ -10,6 +10,7 @@ use astrcode_core::{
         StoredEvent,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits, testing::ScriptedLlm},
+    message_attachment::MAX_ATTACHMENT_WIRE_CONTENT_BYTES,
     tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id, new_turn_id},
 };
@@ -1110,6 +1111,21 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
         post_json_owned(app.clone(), &attachment_prompt_uri, valid_attachment_body).await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
+    // 4 MiB 原始图片 Base64 后为线缆上限；编码膨胀不能被误判为超限。
+    let image_session_id = create_session(app.clone()).await;
+    let image_prompt_uri = format!("/api/sessions/{image_session_id}/prompt");
+    let image_body = serde_json::json!({
+        "text": "describe",
+        "attachments": [{
+            "filename": "limit.png",
+            "content": "A".repeat(MAX_ATTACHMENT_WIRE_CONTENT_BYTES),
+            "mediaType": "image/png"
+        }]
+    })
+    .to_string();
+    let image_accepted = post_json_owned(app.clone(), &image_prompt_uri, image_body).await;
+    assert_eq!(image_accepted.status(), StatusCode::OK);
+
     let oversized_session_id = create_session(app.clone()).await;
     let oversized_prompt_uri = format!("/api/sessions/{oversized_session_id}/prompt");
     let body = serde_json::json!({
@@ -1132,7 +1148,17 @@ async fn inject_route_writes_mid_turn_user_message() {
     let inject_uri = format!("/api/sessions/{session_id}/inject");
     let _first = post_json(app.clone(), &prompt_uri, r#"{"text":"first"}"#).await;
 
-    let inject = post_json(app, &inject_uri, r#"{"text":"steer me"}"#).await;
+    // 3 MiB Base64 超过 axum 默认 2 MiB body limit，确保 inject 路由带上了 prompt 同款上限。
+    let inject_body = serde_json::json!({
+        "text": "steer me",
+        "attachments": [{
+            "filename": "steer.png",
+            "content": "A".repeat(3 * 1024 * 1024),
+            "mediaType": "image/png"
+        }]
+    })
+    .to_string();
+    let inject = post_json_owned(app, &inject_uri, inject_body).await;
     assert_eq!(inject.status(), StatusCode::OK);
     let body: PromptSubmitResponse = serde_json::from_slice(&body_bytes(inject).await).unwrap();
     assert!(matches!(
@@ -1140,6 +1166,23 @@ async fn inject_route_writes_mid_turn_user_message() {
         PromptSubmitResponse::Handled { message, .. }
             if message == "injected into active turn"
     ));
+
+    let events = runtime
+        .event_store()
+        .replay_events(&SessionId::new(&session_id))
+        .await
+        .unwrap();
+    let accepted = events
+        .iter()
+        .find_map(|stored| match &stored.event.payload {
+            DurableEventPayload::UserInputAccepted { input } => Some(input),
+            _ => None,
+        })
+        .expect("inject must persist UserInputAccepted");
+    assert_eq!(accepted.text, "steer me");
+    assert_eq!(accepted.attachments.len(), 1);
+    assert_eq!(accepted.attachments[0].filename, "steer.png");
+    assert_eq!(accepted.attachments[0].media_type, "image/png");
 }
 
 #[tokio::test]

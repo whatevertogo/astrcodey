@@ -5,6 +5,7 @@ import type {
   ExtensionStateView,
   KeybindingInfo,
   PendingAskUserQuestion,
+  PromptAttachment,
   SessionListItem,
   SlashCommandInfo,
 } from '../services/types'
@@ -12,10 +13,14 @@ import type { SessionStreamStatus } from './sessionStreamController'
 
 export type MessageDelivery = 'queued' | 'inject'
 
+/** 本次提交的落地方式；`queued` 时预览 URL 的所有权转交 pending 队列。 */
+export type PromptDelivery = 'sent' | 'queued' | 'injected' | 'handled'
+
 export interface PendingMessage {
   id: string
   text: string
   delivery: MessageDelivery
+  attachments: PromptAttachment[]
 }
 
 export interface ActiveSessionStream {
@@ -87,8 +92,8 @@ export interface AppState {
   ) => Promise<boolean>
   submitPrompt: (
     text: string,
-    attachments?: import('../services/types').PromptAttachmentWire[]
-  ) => Promise<boolean>
+    attachments?: PromptAttachment[]
+  ) => Promise<PromptDelivery | false>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: import('../services/types').ConversationDelta) => void
   clearTransientHint: () => void
@@ -96,6 +101,6 @@ export interface AppState {
   injectPendingMessage: (id: string) => Promise<void>
   removePendingMessage: (id: string) => void
   resendPendingMessage: (id: string) => Promise<void>
-  restorePendingMessage: (id: string) => string | null
+  restorePendingMessage: (id: string) => PendingMessage | null
   flushPendingQueued: () => Promise<void>
 }

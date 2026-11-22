@@ -151,16 +151,14 @@ impl SessionCommandService {
     pub(crate) async fn inject_input(
         &self,
         session_id: SessionId,
-        text: String,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
+        astrcode_core::message_attachment::validate_attachments(&input.attachments)
+            .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         match self
             .scheduler
-            .deliver_input_in_operation(
-                operation,
-                UserInput::text_only(text),
-                InputDelivery::InjectOnly,
-            )
+            .deliver_input_in_operation(operation, input, InputDelivery::InjectOnly)
             .await?
         {
             DeliveryOutcome::Injected { .. } => Ok(PromptSubmission::Handled {

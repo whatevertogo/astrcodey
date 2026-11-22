@@ -28,7 +28,7 @@ type RouterParts = (Router, Arc<ServerEventBus>);
 
 const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT_BYTES
     + astrcode_core::message_attachment::MAX_ATTACHMENTS
-        * astrcode_core::message_attachment::MAX_ATTACHMENT_CONTENT_BYTES
+        * astrcode_core::message_attachment::MAX_ATTACHMENT_WIRE_CONTENT_BYTES
     + 64 * 1024;
 const RUN_INFO_TEMPFILE_PREFIX: &str = ".run.json.";
 
@@ -107,7 +107,10 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             "/api/sessions/{id}/prompt",
             post(sessions::submit_prompt).layer(DefaultBodyLimit::max(MAX_PROMPT_HTTP_BODY_BYTES)),
         )
-        .route("/api/sessions/{id}/inject", post(sessions::inject_message))
+        .route(
+            "/api/sessions/{id}/inject",
+            post(sessions::inject_message).layer(DefaultBodyLimit::max(MAX_PROMPT_HTTP_BODY_BYTES)),
+        )
         .route(
             "/api/sessions/{id}/approve",
             post(sessions::resolve_tool_approval),

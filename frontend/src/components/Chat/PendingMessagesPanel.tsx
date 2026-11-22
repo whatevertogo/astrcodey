@@ -4,9 +4,10 @@ import { cn } from '../../lib/utils'
 import { ghostIconButton } from '../../lib/styles'
 import { Icon } from '../ui/Icon'
 import { IconButton } from '../ui/IconButton'
+import type { PromptAttachment } from '../../services/types'
 
 interface PendingMessagesPanelProps {
-  onEdit: (text: string) => void
+  onEdit: (text: string, attachments: PromptAttachment[]) => void
   canInject: boolean
 }
 
@@ -53,6 +54,18 @@ export default function PendingMessagesPanel({
               key={message.id}
               className="group flex items-center gap-3 py-2.5"
             >
+              {message.attachments.length > 0 && (
+                <div className="flex shrink-0 gap-1">
+                  {message.attachments.map((attachment) => (
+                    <img
+                      key={attachment.id}
+                      src={attachment.previewUrl}
+                      alt={attachment.filename}
+                      className="h-9 w-9 rounded-md border border-border object-cover"
+                    />
+                  ))}
+                </div>
+              )}
               <p className="min-w-0 flex-1 truncate text-[14px] leading-snug text-text-primary">
                 {message.text}
               </p>
@@ -63,8 +76,10 @@ export default function PendingMessagesPanel({
                   size={14}
                   className="rounded-md"
                   onClick={() => {
-                    const text = restorePendingMessage(message.id)
-                    if (text) onEdit(text)
+                    const restored = restorePendingMessage(message.id)
+                    if (restored) {
+                      onEdit(restored.text, restored.attachments)
+                    }
                   }}
                 />
                 <IconButton

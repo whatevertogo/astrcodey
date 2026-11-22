@@ -3,6 +3,7 @@
 use astrcode_core::{
     tool::{SessionApiError, SessionToolSelection},
     types::SessionId,
+    user_input::UserInput,
 };
 use astrcode_protocol::http::{
     CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
@@ -242,16 +243,21 @@ pub(in crate::http) async fn inject_message(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
+    let input = match user_input_from_prompt(request) {
+        Ok(input) => input,
+        Err(error) => return handler_error_response(error, "inject_failed"),
+    };
     tracing::info!(
         session_id = %session_id,
-        text_len = request.text.len(),
+        text_len = input.text.len(),
+        attachment_count = input.attachments.len(),
         "POST inject"
     );
     let session_id = SessionId::from(session_id);
     match state
         .app
         .session_commands()
-        .inject_input(session_id.clone(), request.text)
+        .inject_input(session_id.clone(), input)
         .await
     {
         Ok(PromptSubmission::Handled { message }) => Json(PromptSubmitResponse::Handled {
@@ -307,35 +313,37 @@ fn approval_error_response(error: SessionApiError) -> Response {
     }
 }
 
+/// 在 HTTP 边界把 prompt 线缆请求映射为领域输入，并校验附件数量与大小。
+fn user_input_from_prompt(request: PromptRequest) -> Result<UserInput, HandlerError> {
+    let attachments: Vec<_> = request.attachments.into_iter().map(Into::into).collect();
+    astrcode_core::message_attachment::validate_attachments(&attachments)
+        .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
+    Ok(UserInput {
+        text: request.text,
+        attachments,
+    })
+}
+
 pub(in crate::http) async fn submit_prompt(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
-    let attachments: Vec<_> = request.attachments.into_iter().map(Into::into).collect();
-    if let Err(error) = astrcode_core::message_attachment::validate_attachments(&attachments) {
-        return handler_error_response(
-            HandlerError::InvalidRequest(error.to_string()),
-            "prompt_failed",
-        );
-    }
+    let input = match user_input_from_prompt(request) {
+        Ok(input) => input,
+        Err(error) => return handler_error_response(error, "prompt_failed"),
+    };
     tracing::info!(
         session_id = %session_id,
-        text_len = request.text.len(),
-        attachment_count = attachments.len(),
+        text_len = input.text.len(),
+        attachment_count = input.attachments.len(),
         "POST prompt submit"
     );
     let session_id = SessionId::from(session_id);
     let result = state
         .app
         .session_commands()
-        .submit_input(
-            session_id.clone(),
-            astrcode_core::user_input::UserInput {
-                text: request.text,
-                attachments,
-            },
-        )
+        .submit_input(session_id.clone(), input)
         .await;
     match result {
         Ok(PromptSubmission::Accepted { turn_id }) => {

@@ -19,7 +19,6 @@ import ArgumentCompletionSelector from './ArgumentCompletionSelector'
 import PendingMessagesPanel from './PendingMessagesPanel'
 import ComposerAttachments from './ComposerAttachments'
 import {
-  attachmentToWire,
   MAX_ATTACHMENTS,
   readImageFiles,
   revokeAttachmentPreviews,
@@ -70,6 +69,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
 
   const [value, setValue] = useState('')
   const [attachments, setAttachments] = useState<PromptAttachment[]>([])
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null)
   const [configView, setConfigView] = useState<ConfigView | null>(null)
   const [approvalSaving, setApprovalSaving] = useState(false)
   const attachmentsRef = useRef(attachments)
@@ -360,6 +360,18 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     })
   }, [])
 
+  const addImageFiles = useCallback(
+    (files: File[]) => {
+      const { attachments: incoming, rejected } = readImageFiles(
+        files,
+        Math.max(0, MAX_ATTACHMENTS - attachmentsRef.current.length)
+      )
+      addAttachments(incoming)
+      setAttachmentNotice(rejected.length > 0 ? rejected.join('；') : null)
+    },
+    [addAttachments]
+  )
+
   const removeAttachment = useCallback((id: string) => {
     setAttachments((current) => {
       const target = current.find((item) => item.id === id)
@@ -371,10 +383,10 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const handleAttachFromPicker = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files ?? [])
-      addAttachments(readImageFiles(files))
+      addImageFiles(files)
       event.target.value = ''
     },
-    [addAttachments]
+    [addImageFiles]
   )
 
   const toggleApprovalMode = useCallback(async () => {
@@ -408,13 +420,14 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       for (const item of items) {
         if (item.kind !== 'file') continue
         const file = item.getAsFile()
-        if (file?.type.startsWith('image/')) files.push(file)
+        if (file && (!file.type || file.type.startsWith('image/')))
+          files.push(file)
       }
       if (files.length === 0) return
       event.preventDefault()
-      addAttachments(readImageFiles(files))
+      addImageFiles(files)
     },
-    [addAttachments]
+    [addImageFiles]
   )
 
   const submit = useCallback(async () => {
@@ -428,11 +441,16 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     }
     closeSlashTrigger()
     closeArgTrigger()
-    const wireAttachments = await Promise.all(attachments.map(attachmentToWire))
-    const accepted = await submitPrompt(trimmed, wireAttachments)
-    if (!accepted) return
-    revokeAttachmentPreviews(attachments)
-    setAttachments([])
+    const delivery = await submitPrompt(trimmed, attachments)
+    if (!delivery) return
+    if (delivery === 'queued') {
+      // 预览 URL 所有权转交 pending 队列，发送成功后再 revoke。
+      setAttachments([])
+    } else {
+      revokeAttachmentPreviews(attachments)
+      setAttachments([])
+    }
+    setAttachmentNotice(null)
     setValue('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -561,8 +579,11 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       >
         <PendingMessagesPanel
           canInject={canInject}
-          onEdit={(text) => {
+          onEdit={(text, restoredAttachments) => {
             setValue(text)
+            if (restoredAttachments.length > 0) {
+              addAttachments(restoredAttachments)
+            }
             requestAnimationFrame(() => {
               const textarea = textareaRef.current
               if (!textarea) return
@@ -631,6 +652,11 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 attachments={attachments}
                 onRemove={removeAttachment}
               />
+              {attachmentNotice ? (
+                <p className="mb-2 text-[12px] text-warning">
+                  {attachmentNotice}
+                </p>
+              ) : null}
               <textarea
                 ref={textareaRef}
                 className={cn(
