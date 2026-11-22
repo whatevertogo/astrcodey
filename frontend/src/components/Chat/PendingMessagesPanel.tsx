@@ -4,9 +4,10 @@ import { cn } from '../../lib/utils'
 import { ghostIconButton } from '../../lib/styles'
 import { Icon } from '../ui/Icon'
 import { IconButton } from '../ui/IconButton'
+import type { PendingMessage } from '../../store/types'
 
 interface PendingMessagesPanelProps {
-  onEdit: (text: string) => void
+  onEdit: (message: PendingMessage) => void
   canInject: boolean
 }
 
@@ -18,7 +19,6 @@ export default function PendingMessagesPanel({
   const injectPendingMessage = useAppStore((s) => s.injectPendingMessage)
   const resendPendingMessage = useAppStore((s) => s.resendPendingMessage)
   const removePendingMessage = useAppStore((s) => s.removePendingMessage)
-  const restorePendingMessage = useAppStore((s) => s.restorePendingMessage)
   const [expanded, setExpanded] = useState(true)
 
   const summary = `${pendingMessages.length} queued`
@@ -53,6 +53,18 @@ export default function PendingMessagesPanel({
               key={message.id}
               className="group flex items-center gap-3 py-2.5"
             >
+              {message.attachments.length > 0 && (
+                <div className="flex shrink-0 gap-1">
+                  {message.attachments.map((attachment) => (
+                    <img
+                      key={attachment.id}
+                      src={attachment.previewUrl}
+                      alt={attachment.filename}
+                      className="h-9 w-9 rounded-md border border-border object-cover"
+                    />
+                  ))}
+                </div>
+              )}
               <p className="min-w-0 flex-1 truncate text-[14px] leading-snug text-text-primary">
                 {message.text}
               </p>
@@ -62,10 +74,7 @@ export default function PendingMessagesPanel({
                   label="编辑"
                   size={14}
                   className="rounded-md"
-                  onClick={() => {
-                    const text = restorePendingMessage(message.id)
-                    if (text) onEdit(text)
-                  }}
+                  onClick={() => onEdit(message)}
                 />
                 <IconButton
                   icon="retry"

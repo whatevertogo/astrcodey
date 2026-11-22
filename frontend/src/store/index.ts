@@ -1,12 +1,16 @@
 import { create } from 'zustand'
 import * as api from '../services/api'
 import { resolveHostBridge } from '../lib/hostBridge'
-import type { ConversationDelta } from '../services/types'
+import type { ConversationDelta, PromptAttachment } from '../services/types'
 import {
   applyDeltaToState,
   mergePendingAskUserSnapshot,
 } from './delta/applyDelta'
 import { isRegisteredSlashCommand } from '../lib/keybindings'
+import {
+  attachmentToWire,
+  revokeAttachmentPreviews,
+} from '../lib/composerAttachments'
 import {
   commandNoteBlock,
   isCompactCommand,
@@ -26,7 +30,7 @@ import {
   computeInitialProjectFolderOrder,
   syncProjectFolderOrder,
 } from '../components/Sidebar/projectFolderOrder'
-import type { AppState } from './types'
+import type { AppState, PromptDelivery } from './types'
 import {
   buildConversationView,
   prependTimelinePage,
@@ -73,7 +77,12 @@ const DEFAULT_SESSION_STATE = {
   transientHint: null,
 } as const satisfies Partial<AppState>
 
-function resetSessionView(): Partial<AppState> {
+function resetSessionView(
+  pendingMessages: AppState['pendingMessages']
+): Partial<AppState> {
+  for (const message of pendingMessages) {
+    revokeAttachmentPreviews(message.attachments)
+  }
   return { ...DEFAULT_SESSION_STATE }
 }
 
@@ -171,7 +180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get()
     if (state.activeSessionId === sessionId) {
       state.sessionStream?.stop()
-      set(resetSessionView())
+      set(resetSessionView(state.pendingMessages))
     }
     await Promise.all([
       get().refreshSessions(),
@@ -205,7 +214,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     )
     if (activeSession && activeSession.workingDir === workingDir) {
       state.sessionStream?.stop()
-      set(resetSessionView())
+      set(resetSessionView(state.pendingMessages))
     }
     await Promise.all([
       get().refreshSessions(),
@@ -224,7 +233,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     state.sessionStream?.stop()
 
     set({
-      ...resetSessionView(),
+      ...resetSessionView(state.pendingMessages),
       activeSessionId: sessionId,
       sessionStreamStatus: 'connecting',
     })
@@ -550,8 +559,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   submitPrompt: async (
     text: string,
-    attachments: import('../services/types').PromptAttachmentWire[] = []
-  ) => {
+    attachments: PromptAttachment[] = []
+  ): Promise<PromptDelivery | false> => {
     const state = get()
     const { activeSessionId } = state
     if (!activeSessionId) {
@@ -583,13 +592,15 @@ export const useAppStore = create<AppState>((set, get) => ({
                   id: crypto.randomUUID(),
                   text,
                   delivery: 'queued',
+                  attachments,
                 },
               ],
             }))
-            return true
+            return 'queued'
           }
-          await api.injectMessage(activeSessionId, text)
-          return true
+          const wire = await Promise.all(attachments.map(attachmentToWire))
+          await api.injectMessage(activeSessionId, text, wire)
+          return 'injected'
         }
 
         set((current) => ({
@@ -599,17 +610,15 @@ export const useAppStore = create<AppState>((set, get) => ({
               id: crypto.randomUUID(),
               text,
               delivery: 'queued',
+              attachments,
             },
           ],
         }))
-        return true
+        return 'queued'
       }
 
-      const response = await api.submitPrompt(
-        activeSessionId,
-        text,
-        attachments
-      )
+      const wire = await Promise.all(attachments.map(attachmentToWire))
+      const response = await api.submitPrompt(activeSessionId, text, wire)
       if (response.kind === 'accepted') {
         set((current) => ({
           control: {
@@ -621,7 +630,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }))
       } else if (response.kind === 'handled') {
         if (get().activeSessionId !== response.sessionId) {
-          return true
+          return 'handled'
         }
         if (compactCommand) {
           await get().refreshSessions()
@@ -635,8 +644,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
           }))
         }
+        return 'handled'
       }
-      return true
+      return 'sent'
     } catch (err) {
       console.error('submitPrompt failed:', err)
       set({
@@ -670,7 +680,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     try {
-      await api.injectMessage(state.activeSessionId, message.text)
+      const wire = await Promise.all(message.attachments.map(attachmentToWire))
+      await api.injectMessage(state.activeSessionId, message.text, wire)
+      revokeAttachmentPreviews(message.attachments)
       set((current) => ({
         pendingMessages: current.pendingMessages.filter(
           (item) => item.id !== id
@@ -686,9 +698,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removePendingMessage: (id: string) => {
-    set((current) => ({
-      pendingMessages: current.pendingMessages.filter((item) => item.id !== id),
-    }))
+    set((current) => {
+      const target = current.pendingMessages.find((item) => item.id === id)
+      if (target) revokeAttachmentPreviews(target.attachments)
+      return {
+        pendingMessages: current.pendingMessages.filter(
+          (item) => item.id !== id
+        ),
+      }
+    })
   },
 
   resendPendingMessage: async (id: string) => {
@@ -699,7 +717,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       pendingMessages: current.pendingMessages.filter((item) => item.id !== id),
     }))
     try {
-      await api.submitPrompt(state.activeSessionId, message.text)
+      const wire = await Promise.all(message.attachments.map(attachmentToWire))
+      await api.submitPrompt(state.activeSessionId, message.text, wire)
+      revokeAttachmentPreviews(message.attachments)
     } catch (err) {
       console.error('resendPendingMessage failed:', err)
       set((current) => ({
@@ -713,8 +733,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get()
     const message = state.pendingMessages.find((item) => item.id === id)
     if (!message) return null
-    get().removePendingMessage(id)
-    return message.text
+    // 预览 URL 随消息一起转回 composer，不在此处 revoke。
+    set((current) => ({
+      pendingMessages: current.pendingMessages.filter((item) => item.id !== id),
+    }))
+    return message
   },
 
   flushPendingQueued: async () => {
@@ -741,7 +764,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     for (const message of toFlush) {
       try {
-        await api.submitPrompt(activeSessionId, message.text)
+        const wire = await Promise.all(
+          message.attachments.map(attachmentToWire)
+        )
+        await api.submitPrompt(activeSessionId, message.text, wire)
+        revokeAttachmentPreviews(message.attachments)
       } catch (err) {
         console.error('flushPendingQueued failed:', err)
         set((current) => ({

@@ -14,6 +14,7 @@ pub use session_manager::SessionManagerError;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
+mod attachment_preparation;
 mod child_session;
 mod config_manager;
 mod delivery_gates;

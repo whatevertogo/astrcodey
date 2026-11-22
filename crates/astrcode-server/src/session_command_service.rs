@@ -18,6 +18,7 @@ use astrcode_extension_sdk::extension::{
 use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
 use crate::{
+    attachment_preparation::normalize_image_attachments,
     bootstrap::ServerRuntime,
     delivery_gates::SessionOperationGuard,
     server_event_bus::ServerEventBus,
@@ -81,8 +82,7 @@ impl SessionCommandService {
         session_id: SessionId,
         input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        astrcode_core::message_attachment::validate_attachments(&input.attachments)
-            .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
+        let input = prepare_input(input).await?;
 
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
@@ -151,16 +151,13 @@ impl SessionCommandService {
     pub(crate) async fn inject_input(
         &self,
         session_id: SessionId,
-        text: String,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
+        let input = prepare_input(input).await?;
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         match self
             .scheduler
-            .deliver_input_in_operation(
-                operation,
-                UserInput::text_only(text),
-                InputDelivery::InjectOnly,
-            )
+            .deliver_input_in_operation(operation, input, InputDelivery::InjectOnly)
             .await?
         {
             DeliveryOutcome::Injected { .. } => Ok(PromptSubmission::Handled {
@@ -612,6 +609,13 @@ impl SessionCommandService {
             .map(|view| view.active_turn_id.is_some() || view.queued_inputs > 0)
             .unwrap_or(true)
     }
+}
+
+async fn prepare_input(mut input: UserInput) -> Result<UserInput, HandlerError> {
+    astrcode_core::message_attachment::validate_attachments(&input.attachments)
+        .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
+    normalize_image_attachments(&mut input.attachments).await;
+    Ok(input)
 }
 
 fn delivery_to_submission(outcome: DeliveryOutcome) -> PromptSubmission {

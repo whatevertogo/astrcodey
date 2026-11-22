@@ -20,10 +20,7 @@ impl CommandHandler {
         attachments: Vec<MessageAttachment>,
     ) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        let input = UserInput {
-            text: text.clone(),
-            attachments,
-        };
+        let input = UserInput { text, attachments };
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
         {
             match self.execute_command_for_session(sid.clone(), command).await {
@@ -37,7 +34,7 @@ impl CommandHandler {
             }
         }
         if self.scheduler.registry().has_active(&sid) {
-            return self.inject_mid_turn_message_for_session(&sid, text).await;
+            return self.inject_input_for_session(sid, input).await.map(|_| ());
         }
         match self.session_commands.submit_input(sid, input).await {
             Ok(_) => Ok(()),
@@ -50,18 +47,19 @@ impl CommandHandler {
         text: String,
     ) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        self.inject_mid_turn_message_for_session(&sid, text).await
+        self.inject_mid_turn_message_for_session(&sid, UserInput::text_only(text))
+            .await
     }
 
     pub(super) async fn inject_mid_turn_message_for_session(
         &self,
         sid: &SessionId,
-        text: String,
+        input: UserInput,
     ) -> Result<(), HandlerError> {
         if !self.scheduler.registry().has_active(sid) {
             return Err(self.report_error(40400, HandlerError::NoActiveTurn));
         }
-        self.inject_input_for_session(sid.clone(), text)
+        self.inject_input_for_session(sid.clone(), input)
             .await
             .map(|_| ())
     }
@@ -71,8 +69,8 @@ impl CommandHandler {
     pub(crate) async fn inject_input_for_session(
         &self,
         sid: SessionId,
-        text: String,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        self.session_commands.inject_input(sid, text).await
+        self.session_commands.inject_input(sid, input).await
     }
 }

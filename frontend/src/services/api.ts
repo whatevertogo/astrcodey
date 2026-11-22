@@ -228,13 +228,14 @@ export function openConversationStream(
 /** Mid-turn steer: requires an active turn (unlike `submitPrompt`, which queues while busy). */
 export async function injectMessage(
   sessionId: string,
-  text: string
+  text: string,
+  attachments: PromptAttachmentWire[] = []
 ): Promise<PromptSubmitResponse> {
   return request<PromptSubmitResponse>(
     `/api/sessions/${encodeURIComponent(sessionId)}/inject`,
     {
       method: 'POST',
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, attachments }),
     }
   )
 }
