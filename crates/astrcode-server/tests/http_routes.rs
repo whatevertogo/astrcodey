@@ -1111,7 +1111,7 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
         post_json_owned(app.clone(), &attachment_prompt_uri, valid_attachment_body).await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
-    // 4 MiB 原始图片 Base64 后为线缆上限；编码膨胀不能被误判为超限。
+    // 10 MiB 原始图片 Base64 后为线缆上限；编码膨胀不能被误判为超限。
     let image_session_id = create_session(app.clone()).await;
     let image_prompt_uri = format!("/api/sessions/{image_session_id}/prompt");
     let image_body = serde_json::json!({

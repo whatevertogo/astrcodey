@@ -1,7 +1,7 @@
 import type { PromptAttachment } from '../services/types'
 
 export const MAX_ATTACHMENTS = 4
-export const MAX_ATTACHMENT_CONTENT_BYTES = 4 * 1024 * 1024
+export const MAX_ATTACHMENT_CONTENT_BYTES = 10 * 1024 * 1024
 
 export interface ImageFilesReadResult {
   attachments: PromptAttachment[]

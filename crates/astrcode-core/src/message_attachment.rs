@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// 图片在线缆上以 Base64 传输，校验与 HTTP body 上限按
 /// [`MAX_ATTACHMENT_WIRE_CONTENT_BYTES`] 折算，避免编码膨胀误拒合法图片。
-pub const MAX_ATTACHMENT_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ATTACHMENT_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// 单条附件在线缆上的内容上限：Base64 每 3 字节编码为 4 个字符。
 pub const MAX_ATTACHMENT_WIRE_CONTENT_BYTES: usize = MAX_ATTACHMENT_CONTENT_BYTES.div_ceil(3) * 4;
