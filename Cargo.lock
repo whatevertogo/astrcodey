@@ -298,6 +298,7 @@ version = "0.3.19"
 dependencies = [
  "astrcode-paths",
  "async-trait",
+ "base64 0.22.1",
  "fs2",
  "jiff",
  "serde",

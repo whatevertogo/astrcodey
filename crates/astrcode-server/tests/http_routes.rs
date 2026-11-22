@@ -10,7 +10,7 @@ use astrcode_core::{
         StoredEvent,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits, testing::ScriptedLlm},
-    message_attachment::MAX_ATTACHMENT_WIRE_CONTENT_BYTES,
+    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES,
     tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id, new_turn_id},
 };
@@ -1116,7 +1116,8 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
         "text": "describe",
         "attachments": [{
             "filename": "limit.png",
-            "content": "A".repeat(MAX_ATTACHMENT_WIRE_CONTENT_BYTES),
+            "content": base64::engine::general_purpose::STANDARD
+                .encode(vec![0_u8; MAX_ATTACHMENT_CONTENT_BYTES]),
             "mediaType": "image/png"
         }]
     })
@@ -1221,7 +1222,9 @@ async fn inject_route_writes_mid_turn_user_message() {
     let accepted = events
         .iter()
         .find_map(|stored| match &stored.event.payload {
-            DurableEventPayload::UserInputAccepted { input } => Some(input),
+            DurableEventPayload::UserInputAccepted { input } if input.text == "steer me" => {
+                Some(input)
+            },
             _ => None,
         })
         .expect("inject must persist UserInputAccepted");

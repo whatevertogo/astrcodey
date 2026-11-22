@@ -4,10 +4,10 @@ import { cn } from '../../lib/utils'
 import { ghostIconButton } from '../../lib/styles'
 import { Icon } from '../ui/Icon'
 import { IconButton } from '../ui/IconButton'
-import type { PromptAttachment } from '../../services/types'
+import type { PendingMessage } from '../../store/types'
 
 interface PendingMessagesPanelProps {
-  onEdit: (text: string, attachments: PromptAttachment[]) => void
+  onEdit: (message: PendingMessage) => void
   canInject: boolean
 }
 
@@ -19,7 +19,6 @@ export default function PendingMessagesPanel({
   const injectPendingMessage = useAppStore((s) => s.injectPendingMessage)
   const resendPendingMessage = useAppStore((s) => s.resendPendingMessage)
   const removePendingMessage = useAppStore((s) => s.removePendingMessage)
-  const restorePendingMessage = useAppStore((s) => s.restorePendingMessage)
   const [expanded, setExpanded] = useState(true)
 
   const summary = `${pendingMessages.length} queued`
@@ -75,12 +74,7 @@ export default function PendingMessagesPanel({
                   label="编辑"
                   size={14}
                   className="rounded-md"
-                  onClick={() => {
-                    const restored = restorePendingMessage(message.id)
-                    if (restored) {
-                      onEdit(restored.text, restored.attachments)
-                    }
-                  }}
+                  onClick={() => onEdit(message)}
                 />
                 <IconButton
                   icon="retry"

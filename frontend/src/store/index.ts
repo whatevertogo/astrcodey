@@ -77,7 +77,12 @@ const DEFAULT_SESSION_STATE = {
   transientHint: null,
 } as const satisfies Partial<AppState>
 
-function resetSessionView(): Partial<AppState> {
+function resetSessionView(
+  pendingMessages: AppState['pendingMessages']
+): Partial<AppState> {
+  for (const message of pendingMessages) {
+    revokeAttachmentPreviews(message.attachments)
+  }
   return { ...DEFAULT_SESSION_STATE }
 }
 
@@ -175,7 +180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get()
     if (state.activeSessionId === sessionId) {
       state.sessionStream?.stop()
-      set(resetSessionView())
+      set(resetSessionView(state.pendingMessages))
     }
     await Promise.all([
       get().refreshSessions(),
@@ -209,7 +214,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     )
     if (activeSession && activeSession.workingDir === workingDir) {
       state.sessionStream?.stop()
-      set(resetSessionView())
+      set(resetSessionView(state.pendingMessages))
     }
     await Promise.all([
       get().refreshSessions(),
@@ -228,7 +233,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     state.sessionStream?.stop()
 
     set({
-      ...resetSessionView(),
+      ...resetSessionView(state.pendingMessages),
       activeSessionId: sessionId,
       sessionStreamStatus: 'connecting',
     })

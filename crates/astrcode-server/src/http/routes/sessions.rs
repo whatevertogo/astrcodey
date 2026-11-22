@@ -243,10 +243,7 @@ pub(in crate::http) async fn inject_message(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
-    let input = match user_input_from_prompt(request) {
-        Ok(input) => input,
-        Err(error) => return handler_error_response(error, "inject_failed"),
-    };
+    let input = user_input_from_prompt(request);
     tracing::info!(
         session_id = %session_id,
         text_len = input.text.len(),
@@ -313,15 +310,12 @@ fn approval_error_response(error: SessionApiError) -> Response {
     }
 }
 
-/// 在 HTTP 边界把 prompt 线缆请求映射为领域输入，并校验附件数量与大小。
-fn user_input_from_prompt(request: PromptRequest) -> Result<UserInput, HandlerError> {
-    let attachments: Vec<_> = request.attachments.into_iter().map(Into::into).collect();
-    astrcode_core::message_attachment::validate_attachments(&attachments)
-        .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
-    Ok(UserInput {
+/// 在 HTTP 边界把 prompt 线缆请求映射为领域输入；附件校验与归一化在 service 层统一完成。
+fn user_input_from_prompt(request: PromptRequest) -> UserInput {
+    UserInput {
         text: request.text,
-        attachments,
-    })
+        attachments: request.attachments.into_iter().map(Into::into).collect(),
+    }
 }
 
 pub(in crate::http) async fn submit_prompt(
@@ -329,10 +323,7 @@ pub(in crate::http) async fn submit_prompt(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
-    let input = match user_input_from_prompt(request) {
-        Ok(input) => input,
-        Err(error) => return handler_error_response(error, "prompt_failed"),
-    };
+    let input = user_input_from_prompt(request);
     tracing::info!(
         session_id = %session_id,
         text_len = input.text.len(),

@@ -61,6 +61,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const slashCommands = useAppStore((s) => s.slashCommands)
   const refreshCommands = useAppStore((s) => s.refreshCommands)
   const pendingMessages = useAppStore((s) => s.pendingMessages)
+  const restorePendingMessage = useAppStore((s) => s.restorePendingMessage)
   const composerDeliveryMode = useAppStore((s) => s.composerDeliveryMode)
   const toggleComposerDeliveryMode = useAppStore(
     (s) => s.toggleComposerDeliveryMode
@@ -361,8 +362,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   }, [])
 
   const addImageFiles = useCallback(
-    (files: File[]) => {
-      const { attachments: incoming, rejected } = readImageFiles(
+    async (files: File[]) => {
+      const { attachments: incoming, rejected } = await readImageFiles(
         files,
         Math.max(0, MAX_ATTACHMENTS - attachmentsRef.current.length)
       )
@@ -383,7 +384,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const handleAttachFromPicker = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files ?? [])
-      addImageFiles(files)
+      void addImageFiles(files)
       event.target.value = ''
     },
     [addImageFiles]
@@ -425,7 +426,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       }
       if (files.length === 0) return
       event.preventDefault()
-      addImageFiles(files)
+      void addImageFiles(files)
     },
     [addImageFiles]
   )
@@ -443,15 +444,15 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     closeArgTrigger()
     const delivery = await submitPrompt(trimmed, attachments)
     if (!delivery) return
-    if (delivery === 'queued') {
-      // 预览 URL 所有权转交 pending 队列，发送成功后再 revoke。
-      setAttachments([])
-    } else {
+    const submittedIds = new Set(attachments.map((attachment) => attachment.id))
+    setAttachments((current) =>
+      current.filter((attachment) => !submittedIds.has(attachment.id))
+    )
+    if (delivery !== 'queued') {
       revokeAttachmentPreviews(attachments)
-      setAttachments([])
     }
     setAttachmentNotice(null)
-    setValue('')
+    setValue((current) => (current.trim() === trimmed ? '' : current))
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -579,11 +580,21 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       >
         <PendingMessagesPanel
           canInject={canInject}
-          onEdit={(text, restoredAttachments) => {
-            setValue(text)
-            if (restoredAttachments.length > 0) {
-              addAttachments(restoredAttachments)
+          onEdit={(message) => {
+            const remaining = MAX_ATTACHMENTS - attachmentsRef.current.length
+            if (message.attachments.length > remaining) {
+              setAttachmentNotice(
+                `该排队消息包含 ${message.attachments.length} 张图片，composer 仅剩 ${Math.max(0, remaining)} 个附件位；先移除部分图片再编辑`
+              )
+              return
             }
+            const restored = restorePendingMessage(message.id)
+            if (!restored) return
+            setValue(restored.text)
+            if (restored.attachments.length > 0) {
+              addAttachments(restored.attachments)
+            }
+            setAttachmentNotice(null)
             requestAnimationFrame(() => {
               const textarea = textareaRef.current
               if (!textarea) return

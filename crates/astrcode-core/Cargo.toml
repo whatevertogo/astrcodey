@@ -20,6 +20,7 @@ astrcode-paths = { path = "../astrcode-paths" }
 fs2 = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
+base64 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }

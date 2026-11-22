@@ -13,16 +13,51 @@ function formatMib(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-export function readImageFiles(
+const IMAGE_SIGNATURE_BYTES = 12
+
+async function sniffImageMediaType(file: File): Promise<string | null> {
+  const head = new Uint8Array(
+    await file.slice(0, IMAGE_SIGNATURE_BYTES).arrayBuffer()
+  )
+  const ascii = (start: number, end: number) =>
+    String.fromCharCode(...head.slice(start, end))
+
+  if (
+    head.length >= 8 &&
+    head[0] === 0x89 &&
+    head[1] === 0x50 &&
+    head[2] === 0x4e &&
+    head[3] === 0x47
+  ) {
+    return 'image/png'
+  }
+  if (
+    head.length >= 3 &&
+    head[0] === 0xff &&
+    head[1] === 0xd8 &&
+    head[2] === 0xff
+  ) {
+    return 'image/jpeg'
+  }
+  if (head.length >= 6 && ascii(0, 4) === 'GIF8') {
+    return 'image/gif'
+  }
+  if (head.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') {
+    return 'image/webp'
+  }
+  return null
+}
+
+export async function readImageFiles(
   files: FileList | File[],
   capacity = MAX_ATTACHMENTS
-): ImageFilesReadResult {
+): Promise<ImageFilesReadResult> {
   const attachments: PromptAttachment[] = []
   const rejected: string[] = []
 
   for (const file of Array.from(files)) {
     const name = file.name || 'Pasted image.png'
-    // 部分 WebView/剪贴板来源的图片 File.type 为空，不能据此丢弃。
+    // 显式非图片类型直接忽略；空类型交给文件头嗅探，避免把任意文件当成 PNG。
     if (file.type && !file.type.startsWith('image/')) continue
     if (attachments.length >= capacity) {
       rejected.push(`${name}：最多添加 ${MAX_ATTACHMENTS} 张图片`)
@@ -34,11 +69,16 @@ export function readImageFiles(
       )
       continue
     }
+    const mediaType = file.type || (await sniffImageMediaType(file))
+    if (!mediaType) {
+      rejected.push(`${name}：无法识别的图片格式`)
+      continue
+    }
     attachments.push({
       id: crypto.randomUUID(),
       file,
       filename: name,
-      mediaType: file.type || 'image/png',
+      mediaType,
       previewUrl: URL.createObjectURL(file),
     })
   }
