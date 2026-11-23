@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-ai"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-bundled-extensions",
  "astrcode-core",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-bundled-extensions"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-agent-tools",
  "astrcode-extension-ask-user",
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-cli"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "arboard",
  "astrcode-client",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-client"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "astrcode-protocol",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-context"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "criterion",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-core"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-paths",
  "async-trait",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-desktop"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "anyhow",
  "astrcode-paths",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-eval"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "astrcode-protocol",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-agent-tools"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-ask-user"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-channels"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-coding"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-goal"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-mcp"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-memory"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-mode"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-sdk"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "async-trait",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-session-commands"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-skill"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-todo-tool"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-web-tools"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-worker"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "astrcode-s5r-runtime",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extensions"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "arc-swap",
  "astrcode-core",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-log"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-paths",
  "jiff",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-paths"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "dirs",
  "libc",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-protocol"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "serde",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-s5r-runtime"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-server"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "agent-client-protocol",
  "astrcode-ai",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-session"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "arc-swap",
  "astrcode-context",
@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-session-projection"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "jiff",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-storage"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "astrcode-core",
  "astrcode-session-projection",
